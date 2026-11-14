@@ -21,9 +21,16 @@ Ucho nagrywa rozmowy w Teams, Zoomie czy Meet oraz dyktowanie na laptopie z Wind
 ## Co robi
 
 - **Spotkania.** Nagrywa dwie osobne ścieżki: Twój mikrofon („Ja”) i dźwięk systemowy („Spotkanie”). Transkrypt jest podzielony na mówców bez modelu diaryzacji, bo źródła są rozdzielone od początku.
-- **Dyktowanie.** *Ucho Dyktuj* (w menu Start: Ucho Dictate): Ctrl+Shift+Spacja, mówisz, drugie wciśnięcie, a tekst ląduje tam, gdzie stoi kursor (terminal, przeglądarka, Teams).
+- **Dyktowanie.** Ctrl+Shift+Spacja, mówisz, drugie wciśnięcie, a tekst ląduje tam, gdzie stoi kursor (terminal, przeglądarka, Teams). Od v0.2 spotkania i dyktowanie to jedna aplikacja: jedna ikona w zasobniku, jeden silnik Whisper, a dyktowanie wchodzi przed trwającą transkrypcję spotkania.
 - **Archiwum dla agentów AI.** Mały serwer MCP tylko do odczytu pozwala Claude Code, Claude Desktop, Cursorowi, Codexowi i innym klientom MCP przeglądać, przeszukiwać i czytać transkrypty. Ucho nie ma własnego czatu: streszcza Twój agent.
 - **Opcjonalne podsumowania lokalne.** Domyślnie wyłączone. Po włączeniu lokalny model Qwen pisze krótkie podsumowanie, a mechaniczne filtry sprawdzają je z transkryptem, żeby nie pojawiły się imiona ani daty, które nie padły.
+
+<p align="center">
+  <img src="docs/screens/meeting-recording-light-pl-1366x768.png" alt="Nagrywanie spotkania w Uchu" width="49%">
+  <img src="docs/screens/transcript-dark.png" alt="Transkrypt ze znacznikami czasu i mówcami" width="49%">
+</p>
+
+Więcej zrzutów ekranu (oba motywy, okno dyktowania, kreator pierwszego uruchomienia): [docs/screens](docs/screens).
 
 ## Czym się różni
 
@@ -60,22 +67,25 @@ Godzinne spotkanie transkrybuje się na karcie Arc w ok. 4 minuty.
    powershell -ExecutionPolicy Bypass -File .\install.ps1
    ```
    Nie trzeba uprawnień administratora. Instalator doinstaluje Pythona 3.12 (przez winget, jeśli go nie ma), środowisko z przypiętymi wersjami pakietów, pobierze model Whisper (ok. 1,6 GB, w przypiętej wersji) i utworzy skróty.
-3. Uruchom **Ucho** albo **Ucho Dictate** z Menu Start.
+3. Uruchom **Ucho** z Menu Start. Przy pierwszym uruchomieniu krótki kreator zapyta o język, folder nagrań, pokaże model dobrany do Twojego sprzętu (z opcjonalnym pomiarem szybkości) i przypomni o zgodzie uczestników. Skrót **Ucho Dictate** uruchamia tę samą aplikację z otwartym dyktowaniem.
 
 Opcjonalnie `-WithSummary` pobiera też model podsumowań (ok. 5 GB) i włącza podsumowania.
 
 Nagrania trafiają do `C:\Users\<Ty>\Ucho\recordings`, celowo poza OneDrive. Katalog zmienisz w Ustawieniach.
 
-Aktualizacja z v0.1: rozpakuj paczkę na stary folder i uruchom ponownie `install.ps1`. Plik `ustawienia.json` zostanie przeniesiony do `settings.json` (folder nagrań się nie zmieni), `modele\` zmieni nazwę na `models\`, a stare nagrania z polskimi nazwami plików nadal działają w aplikacji i w serwerze MCP.
+Aktualizacja z v0.1: rozpakuj paczkę na stary folder i uruchom ponownie `install.ps1`. Plik `ustawienia.json` zostanie przeniesiony do `settings.json` (folder nagrań się nie zmieni), ustawienia dyktowania z `dyktuj.json` / `dictate.json` trafią do `settings.json`, `modele\` zmieni nazwę na `models\`, a stare nagrania z polskimi nazwami plików nadal działają w aplikacji i w serwerze MCP. Najpierw zamknij stare okno *Ucho Dyktuj*: trzyma skrót Ctrl+Shift+Spacja.
 
 ## Użycie
 
 - Wpisz nazwę spotkania i naciśnij **REC** albo użyj **Ctrl+Alt+R** w dowolnym programie (działa też, gdy okno jest schowane w zasobniku).
 - **STOP** uruchamia transkrypcję. Możesz ją przerwać; gotowe fragmenty zostaną.
+- **Dyktuj** skrótem **Ctrl+Shift+Spacja** (drugi raz wstawia tekst, **Esc** anuluje), także w trakcie transkrypcji spotkania.
+- **Nagrania** pokazują wszystkie spotkania z jednozdaniowym podsumowaniem; wyszukiwarka przeszukuje tytuły, podsumowania i wszystkie transkrypty, z polskimi znakami i bez nich.
+- Prawy przycisk na ikonie Ucha na pasku zadań daje *Nagraj spotkanie* i *Dyktuj*. W Ustawieniach możesz włączyć start razem z Windows.
 - **Używaj słuchawek.** Na głośnikach mikrofon łapie też rozmówców i wszystko jest w transkrypcie dwa razy.
 - **Poinformuj uczestników o nagrywaniu.** Brak bota nie oznacza, że nagrywanie jest legalne. Zobacz [PRIVACY.md](PRIVACY.md).
 
-Interfejs jest po polsku albo po angielsku (Ustawienia → Język interfejsu albo automatycznie według Windowsa).
+Interfejs jest po polsku albo po angielsku (Ustawienia → Język interfejsu albo automatycznie według Windowsa), w jasnym i ciemnym motywie, który domyślnie idzie za ustawieniem Windowsa. Ustawienia → *Układ okien* wybiera między jednym oknem ze Spotkaniem i Dyktowaniem a ikoną w zasobniku z osobnym, małym oknem dyktowania. Całą aplikację obsłużysz klawiaturą (Tab, Enter, Spacja).
 
 ## Podłączenie agenta AI (MCP)
 
@@ -95,11 +105,12 @@ Agent wysyła przeczytany fragment transkryptu do swojego dostawcy modelu (w prz
 
 W skrócie: nagrania, transkrypty i ustawienia zostają na dysku. Telemetria Hugging Face i OpenVINO jest wyłączona. Szczegóły i polecenie, którym sprawdzisz to sam: [PRIVACY.md](PRIVACY.md).
 
-## Ograniczenia (v0.1)
+## Ograniczenia
 
 - Tylko Windows. macOS w v0.2.
 - Wszyscy po drugiej stronie rozmowy mają etykietę „Spotkanie”; poszczególni rozmówcy zdalni nie są rozróżniani.
 - Brak transkrypcji na żywo w trakcie nagrania.
+- Przy wymuszonym języku transkrypcji (Polski albo English zamiast Auto) spotkanie jest liczone kawałkami do 5 minut, więc dyktowanie w trakcie takiej transkrypcji może czekać do jednego kawałka (ok. 20 s na GPU Arc). W trybie Auto czeka najwyżej ok. 1 s.
 - Aplikacja nie jest jeszcze podpisana cyfrowo, więc Windows może wyświetlić ostrzeżenie.
 
 ## Rozwój
@@ -109,6 +120,7 @@ py -3.12 -m venv .venv-dev
 .\.venv-dev\Scripts\python.exe -m pip install pytest ruff numpy soundfile
 .\.venv-dev\Scripts\python.exe -m pytest
 .\.venv-dev\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m ucho --smoke-test     # test startu GUI bez audio i modelu (uruchamia go też CI)
 ```
 
 Opis architektury: [docs/architecture.md](docs/architecture.md). Jak pomóc: [CONTRIBUTING.md](CONTRIBUTING.md).
