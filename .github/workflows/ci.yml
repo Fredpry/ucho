@@ -26,10 +26,10 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: python -m pytest -q
-      - name: Installer is ASCII only (PowerShell 5.1)
+      - name: Installer scripts are ASCII only (PowerShell 5.1, cmd.exe)
         shell: pwsh
         run: |
-          $bad = Select-String -Path install.ps1 -Pattern '[^\x00-\x7F]'
+          $bad = Select-String -Path install.ps1, uninstall.ps1, install.cmd, uninstall.cmd -Pattern '[^\x00-\x7F]'
           if ($bad) { $bad; exit 1 }
 
   gui-smoke:

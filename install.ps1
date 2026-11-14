@@ -3,11 +3,13 @@
 <#
     Ucho - installer / instalator.
 
-    Run / Uruchom: right click -> "Run with PowerShell"
+    Run / Uruchom: double-click install.cmd / kliknij dwukrotnie install.cmd
     or / albo:  powershell -ExecutionPolicy Bypass -File .\install.ps1
 
     No admin rights needed; safe to run more than once.
     Nie wymaga uprawnien administratora i mozna go uruchamiac wielokrotnie.
+    The whole run is logged to install.log in the program folder.
+    Przebieg instalacji trafia do install.log w folderze programu.
 
     ASCII only: PowerShell 5.1 reads a file without a BOM as ANSI.
 #>
@@ -17,12 +19,15 @@ param(
     [switch]$SkipModel,            # skip the Whisper model / nie pobieraj modelu Whisper
     [switch]$WithSummary,          # also download the summary model / pobierz tez model podsumowan
     [switch]$WithParakeet,         # optional Parakeet backend (CPU) / opcjonalny silnik Parakeet (CPU)
-    [switch]$ReinstallPackages     # force reinstall of packages / wymus ponowna instalacje
+    [switch]$ReinstallPackages,    # force reinstall of packages / wymus ponowna instalacje
+    [switch]$Force,                # install inside OneDrive without asking / instaluj w OneDrive bez pytania
+    [switch]$Pause                 # wait for Enter before closing (install.cmd) / czekaj na Enter przed zamknieciem
 )
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $Root  # "-c from ucho..." imports need the program folder as working directory
+$Log = Join-Path $Root 'install.log'
 $Venv = Join-Path $Root '.venv'
 $VenvPy = Join-Path $Venv 'Scripts\python.exe'
 $VenvPyw = Join-Path $Venv 'Scripts\pythonw.exe'
@@ -59,15 +64,123 @@ function Test-Python312 {
     return $null
 }
 
+# False in CI, in scheduled tasks and under "powershell -NonInteractive":
+# there the installer must never wait for a key.
+function Test-Interactive {
+    if (-not [Environment]::UserInteractive) { return $false }
+    try { if ([Console]::IsInputRedirected) { return $false } } catch { }
+    foreach ($arg in [Environment]::GetCommandLineArgs()) {
+        if ($arg -like '-noni*') { return $false }
+    }
+    return $true
+}
+
+# Runs a program and copies its output into install.log as well. Windows
+# PowerShell's transcript does not record what a native program writes
+# straight to the console, and pip errors are what a bug report needs. pip
+# shows no progress bar when its output is piped, only the package names.
+function Invoke-Logged([string]$Exe, [string[]]$Arguments) {
+    $previous = $ErrorActionPreference
+    # With 'Stop' the first line on stderr (e.g. a pip warning) would end the script.
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $Exe @Arguments 2>&1 | ForEach-Object { Write-Host "    $_" }
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    return $LASTEXITCODE
+}
+
+$script:Logging = $false
+function Stop-Log {
+    if ($script:Logging) {
+        try { Stop-Transcript | Out-Null } catch { }
+        $script:Logging = $false
+    }
+}
+
+# install.cmd passes -Pause: a double-clicked window would otherwise close
+# before anyone can read the result or the error.
+function Wait-Close {
+    if ($Pause -and (Test-Interactive)) {
+        Write-Host ''
+        try { [void](Read-Host (T 'Nacisnij Enter, aby zamknac to okno' 'Press Enter to close this window')) } catch { }
+    }
+}
+
+# Every exit goes through here: the log is closed, the window waits (-Pause).
+function Exit-Installer([int]$Code, [switch]$Cancelled) {
+    Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+    if ($Code -ne 0 -and -not $Cancelled) {
+        Write-Host ''
+        Fail (T 'Instalacja nie zostala ukonczona.' 'Installation did not finish.')
+        if ($script:Logging) {
+            Write-Host ((T '     Szczegoly sa w logu: ' '     Details are in the log: ') + $Log) -ForegroundColor Yellow
+            Write-Host (T '     Zgloszenie bledu: dolacz ten plik (zawiera nazwe uzytkownika i sciezki).' '     Bug report: attach this file (it contains your user name and paths).') -ForegroundColor DarkGray
+        }
+    }
+    Stop-Log
+    Wait-Close
+    exit $Code
+}
+
+# Any unexpected terminating error ends here instead of closing the window.
+trap {
+    Fail ((T 'Nieoczekiwany blad: ' 'Unexpected error: ') + $_.Exception.Message)
+    if ($_.InvocationInfo) { Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray }
+    Exit-Installer 1
+}
+
+try {
+    Start-Transcript -Path $Log -Force | Out-Null
+    $script:Logging = $true
+} catch {
+    Warn (T 'Nie moge zapisac install.log - instaluje dalej bez logu' 'Could not write install.log - continuing without a log')
+}
+
 New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
 
 Write-Host ''
 Write-Host (T '  Ucho - lokalna transkrypcja spotkan i dyktowanie' '  Ucho - local meeting transcription and dictation') -ForegroundColor White
 Write-Host (T '  Dziala offline. Audio i transkrypty nie opuszczaja tego komputera.' '  Works offline. Audio and transcripts never leave this computer.') -ForegroundColor DarkGray
+Write-Host ((T '  Folder programu: ' '  Program folder: ') + $Root) -ForegroundColor DarkGray
 
-if ($Root -match 'OneDrive') {
-    Warn (T 'Program lezy w folderze OneDrive. Modele (kilka GB) i logi beda synchronizowane do chmury.' 'The program is inside a OneDrive folder. Models (several GB) and logs will sync to the cloud.')
-    Warn (T 'Zalecane: rozpakuj Ucho np. do C:\Users\<Ty>\Ucho\app' 'Recommended: unpack Ucho to e.g. C:\Users\<you>\Ucho\app')
+# Started from inside the zip (Explorer copies only the clicked file to a
+# temporary folder) or from an incomplete copy: nothing below could work.
+if (-not ((Test-Path (Join-Path $Root 'ucho\__init__.py')) -and (Test-Path $Requirements))) {
+    Fail (T 'Brakuje plikow programu obok install.ps1.' 'Program files are missing next to install.ps1.')
+    Warn (T 'Najpierw rozpakuj cale archiwum (prawy przycisk > Wyodrebnij wszystkie), potem uruchom install.cmd z rozpakowanego folderu.' 'Unpack the whole zip first (right click > Extract All), then run install.cmd from the unpacked folder.')
+    Exit-Installer 1 -Cancelled
+}
+
+# Models (several GB), settings and ucho.log (which holds dictated text) live
+# in the program folder, so a OneDrive folder would upload them. Stop by
+# default; -Force or a non-interactive run (automation) only warns.
+$inOneDrive = $Root -match 'OneDrive'
+foreach ($folder in @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer)) {
+    if ($folder -and $Root.StartsWith($folder.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { $inOneDrive = $true }
+}
+if ($inOneDrive) {
+    $bar = '  ' + ('!' * 72)
+    Write-Host ''
+    Write-Host $bar -ForegroundColor Red
+    Write-Host (T '  UWAGA: Ucho jest w folderze synchronizowanym z OneDrive:' '  WARNING: Ucho is in a folder that OneDrive syncs to the cloud:') -ForegroundColor Red
+    Write-Host "    $Root" -ForegroundColor Yellow
+    Write-Host (T '  Modele (kilka GB), ustawienia i log z podyktowanym tekstem trafilyby do chmury.' '  Models (several GB), settings and the log with your dictated text would be uploaded.') -ForegroundColor Yellow
+    Write-Host (T '  Zalecane: rozpakuj Ucho-Windows.zip do C:\Users\<Ty> (program trafi do C:\Users\<Ty>\Ucho\app).' '  Recommended: extract Ucho-Windows.zip to C:\Users\<you> (the app goes to C:\Users\<you>\Ucho\app).') -ForegroundColor Yellow
+    Write-Host $bar -ForegroundColor Red
+    if ($Force) {
+        Warn (T 'Podano -Force - instaluje mimo to.' '-Force given - installing anyway.')
+    } elseif (-not (Test-Interactive)) {
+        Warn (T 'Tryb nieinteraktywny - instaluje mimo to (-Force wylacza to pytanie).' 'Non-interactive run - installing anyway (-Force skips this question).')
+    } else {
+        $answer = Read-Host (T '  Mimo to instalowac tutaj? [t/N]' '  Install here anyway? [y/N]')
+        if ($answer -notmatch '^\s*(y|yes|t|tak)\s*$') {
+            Write-Host ''
+            Write-Host (T '  Przerwano. Przenies folder poza OneDrive i uruchom install.cmd ponownie.' '  Stopped. Move the folder out of OneDrive and run install.cmd again.') -ForegroundColor White
+            Exit-Installer 1 -Cancelled
+        }
+    }
 }
 
 # --- 1. Python 3.12 -------------------------------------------------------
@@ -78,7 +191,7 @@ if ($null -eq $version) {
     Warn (T 'Brak Pythona 3.12 - instaluje przez winget (kilka minut)' 'Python 3.12 not found - installing with winget (a few minutes)')
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Fail (T 'Brak winget. Zainstaluj Pythona 3.12 z https://www.python.org/downloads/' 'winget not found. Install Python 3.12 from https://www.python.org/downloads/')
-        exit 1
+        Exit-Installer 1
     }
     & winget install --id Python.Python.3.12 -e --scope user --silent --accept-package-agreements --accept-source-agreements
     Update-Path
@@ -86,7 +199,7 @@ if ($null -eq $version) {
     $version = Test-Python312
     if ($null -eq $version) {
         Fail (T 'Instalacja Pythona nie powiodla sie. Otworz nowe okno i uruchom skrypt ponownie.' 'Python installation failed. Open a new window and run the script again.')
-        exit 1
+        Exit-Installer 1
     }
 }
 Ok "Python $version"
@@ -96,7 +209,7 @@ Ok "Python $version"
 Step (T 'Przygotowuje srodowisko wirtualne (.venv)' 'Preparing the virtual environment (.venv)')
 if (-not (Test-Path $VenvPy)) {
     & py -3.12 -m venv $Venv
-    if ($LASTEXITCODE -ne 0) { Fail (T 'Nie udalo sie utworzyc .venv' 'Could not create .venv'); exit 1 }
+    if ($LASTEXITCODE -ne 0) { Fail (T 'Nie udalo sie utworzyc .venv' 'Could not create .venv'); Exit-Installer 1 }
     Ok (T 'Utworzono .venv' 'Created .venv')
 } else {
     Ok (T '.venv juz istnieje' '.venv already exists')
@@ -105,13 +218,13 @@ if (-not (Test-Path $VenvPy)) {
 # --- 3. Dependencies (pinned versions from requirements.txt) ---------------
 
 Step (T 'Instaluje zaleznosci (za pierwszym razem ok. 400 MB)' 'Installing dependencies (about 400 MB the first time)')
-& $VenvPy -m pip install --upgrade --quiet pip setuptools wheel
-if ($LASTEXITCODE -ne 0) { Fail (T 'Aktualizacja pip nie powiodla sie' 'pip upgrade failed'); exit 1 }
+$code = Invoke-Logged $VenvPy @('-m', 'pip', 'install', '--upgrade', '--quiet', 'pip', 'setuptools', 'wheel')
+if ($code -ne 0) { Fail (T 'Aktualizacja pip nie powiodla sie' 'pip upgrade failed'); Exit-Installer 1 }
 
 $pipArgs = @('-m', 'pip', 'install', '-r', $Requirements)
 if ($ReinstallPackages) { $pipArgs += '--force-reinstall' }
-& $VenvPy @pipArgs
-if ($LASTEXITCODE -ne 0) { Fail (T 'Instalacja zaleznosci nie powiodla sie' 'Dependency installation failed'); exit 1 }
+$code = Invoke-Logged $VenvPy $pipArgs
+if ($code -ne 0) { Fail (T 'Instalacja zaleznosci nie powiodla sie' 'Dependency installation failed'); Exit-Installer 1 }
 Ok (T 'Zaleznosci zainstalowane' 'Dependencies installed')
 
 # Optional second speech-to-text backend (NVIDIA Parakeet via sherpa-onnx,
@@ -120,8 +233,8 @@ Ok (T 'Zaleznosci zainstalowane' 'Dependencies installed')
 if ($WithParakeet) {
     $pipArgs = @('-m', 'pip', 'install', '-r', $ParakeetRequirements)
     if ($ReinstallPackages) { $pipArgs += '--force-reinstall' }
-    & $VenvPy @pipArgs
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-Logged $VenvPy $pipArgs
+    if ($code -ne 0) {
         Warn (T 'Instalacja Parakeet nie powiodla sie - Whisper dziala bez zmian' 'Parakeet installation failed - Whisper works as before')
     } else {
         Ok (T 'Parakeet zainstalowany - wybierz go w Ustawieniach > Sprzet' 'Parakeet installed - choose it in Settings > Hardware')
@@ -324,13 +437,32 @@ foreach ($old in $legacy) {
     }
 }
 
-Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+# --- 9. Done ----------------------------------------------------------------
+
+# The MCP command with the real paths of this installation, ready to paste.
+# "-s user" registers the server for every project, not only the current folder.
+$McpServer = Join-Path $Root 'mcp_server.py'
+$McpCommand = "claude mcp add -s user ucho -- `"$VenvPy`" `"$McpServer`""
+$bar = '  ' + ('=' * 72)
 
 Write-Host ''
-Write-Host (T '  Gotowe.' '  Done.') -ForegroundColor Green
-Write-Host (T "  Uruchom skrotem 'Ucho' z Pulpitu lub Menu Start." "  Start it with the 'Ucho' shortcut on the Desktop or in the Start menu.") -ForegroundColor White
+Write-Host $bar -ForegroundColor Green
+Write-Host (T '  Gotowe. Ucho jest zainstalowane.' '  Done. Ucho is installed.') -ForegroundColor Green
+Write-Host $bar -ForegroundColor Green
+Write-Host ''
+Write-Host (T "  Uruchom: Menu Start > Ucho (albo skrot 'Ucho' na Pulpicie)." "  Start it: Start menu > Ucho (or the 'Ucho' shortcut on the Desktop).") -ForegroundColor White
 Write-Host (T '  Nagrywanie spotkania: Ctrl+Alt+R   Dyktowanie: Ctrl+Shift+Spacja' '  Record a meeting: Ctrl+Alt+R   Dictate: Ctrl+Shift+Space') -ForegroundColor DarkGray
 Write-Host ((T '  Transkrypcja liczona na: ' '  Transcription runs on: ') + $device) -ForegroundColor DarkGray
 Write-Host ''
+Write-Host (T '  Agent AI (MCP), np. Claude Code - wklej to polecenie w terminalu:' '  AI agent (MCP), e.g. Claude Code - paste this command into a terminal:') -ForegroundColor White
+Write-Host ''
+Write-Host "  $McpCommand" -ForegroundColor Cyan
+Write-Host ''
+Write-Host (T '  Cursor, Claude Desktop, Codex: ta sama sciezka, przyklady w README.pl.md (sekcja MCP).' '  Cursor, Claude Desktop, Codex: same paths, examples in README.md (section MCP).') -ForegroundColor DarkGray
+Write-Host ((T '  Folder programu: ' '  Program folder: ') + $Root) -ForegroundColor DarkGray
+Write-Host ((T '  Nagrania:        ' '  Recordings:     ') + $Recordings) -ForegroundColor DarkGray
+if ($script:Logging) { Write-Host ((T '  Log instalacji:  ' '  Install log:    ') + $Log) -ForegroundColor DarkGray }
+Write-Host ''
 Write-Host (T '  Pamietaj o poinformowaniu uczestnikow, ze spotkanie jest nagrywane.' '  Remember to tell participants that the meeting is being recorded.') -ForegroundColor Yellow
 Write-Host ''
+Exit-Installer 0

@@ -17,7 +17,7 @@ Measured on the development laptop, Intel Core Ultra 7 258V with Arc 140V, 32 GB
 | 51 s recording, PL/EN auto-detect | 3.7 s (14x) | 47 s (1.1x) |
 | First model load | ~21 s (compilation, then ~2 s from cache) | ~6 s |
 
-A one-hour meeting transcribes in about 4 minutes on the Arc GPU. Auto-detect is slower on the CPU because the recording is cut into ~12 s chunks, each with its own language detection (see `docs/architecture.md`, section 3).
+A one-hour meeting transcribes in about 4 to 7 minutes on the Arc GPU: 15x is this short clip with a forced language, 8.9x a 5-minute synthetic meeting with automatic language detection ([Parakeet section](#parakeet-tdt-06b-v3-as-an-optional-backend-v02)). Auto-detect is slower on the CPU because the recording is cut into ~12 s chunks, each with its own language detection (see `docs/architecture.md`, section 3).
 
 Everything below fills in the other rows.
 
