@@ -213,6 +213,30 @@ def set_shortcut_app_id(path: Path, app_id: str) -> bool:
                 _release(pointer)
 
 
+def shortcut_arguments(path: Path) -> str | None:
+    """Command-line arguments stored in a .lnk file (None when it cannot be read)."""
+    if sys.platform != "win32" or not path.exists():
+        return None
+    link = persist_file = c_void_p()
+    try:
+        _com_start()
+        link = _create(_CLSID_SHELL_LINK, _IID_SHELL_LINK_W)
+        _method(link, _IDX_QUERY_INTERFACE, POINTER(_GUID), POINTER(c_void_p))(
+            link, byref(_guid(_IID_PERSIST_FILE)), byref(persist_file))
+        _method(persist_file, _IDX_PF_LOAD, wintypes.LPCWSTR, wintypes.DWORD)(
+            persist_file, str(path), 0)
+        buffer = ctypes.create_unicode_buffer(1024)
+        _method(link, _IDX_SL_GET_ARGUMENTS, wintypes.LPWSTR, ctypes.c_int)(link, buffer, 1024)
+        return buffer.value
+    except Exception:
+        log.debug("Could not read %s", path, exc_info=True)
+        return None
+    finally:
+        for pointer in (persist_file, link):
+            if pointer:
+                _release(pointer)
+
+
 SHORTCUT_NAMES = ("Ucho.lnk", "Ucho Dictate.lnk")
 
 
@@ -257,10 +281,12 @@ _IDX_DL_SET_APP_ID = 3
 _IDX_DL_BEGIN_LIST = 4
 _IDX_DL_ADD_USER_TASKS = 7
 _IDX_DL_COMMIT_LIST = 8
+_IDX_DL_DELETE_LIST = 10
 # IObjectCollection.
 _IDX_OC_ADD_OBJECT = 5
 # IShellLinkW.
 _IDX_SL_SET_DESCRIPTION = 7
+_IDX_SL_GET_ARGUMENTS = 10
 _IDX_SL_SET_WORKING_DIRECTORY = 9
 _IDX_SL_SET_ARGUMENTS = 11
 _IDX_SL_SET_ICON_LOCATION = 17
@@ -344,6 +370,24 @@ def set_jump_list(app_id: str, tasks: list[dict]) -> bool:
         for pointer in links + [collection, destinations]:
             if pointer:
                 _release(pointer)
+
+
+def clear_jump_list(app_id: str) -> bool:
+    """Removes the custom Jump List of `app_id` (ICustomDestinationList::DeleteList)."""
+    if sys.platform != "win32":
+        return False
+    destinations = c_void_p()
+    try:
+        _com_start()
+        destinations = _create(_CLSID_DESTINATION_LIST, _IID_CUSTOM_DESTINATION_LIST)
+        _method(destinations, _IDX_DL_DELETE_LIST, wintypes.LPCWSTR)(destinations, app_id)
+        return True
+    except Exception:
+        log.debug("Could not delete the Jump List", exc_info=True)
+        return False
+    finally:
+        if destinations:
+            _release(destinations)
 
 
 # --- start with Windows ---------------------------------------------------------

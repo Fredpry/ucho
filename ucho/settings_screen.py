@@ -574,5 +574,6 @@ def sync_autostart(settings: config.Settings) -> None:
     wanted = autostart_command()
     if enabled and current != wanted:
         winshell.set_autostart(True, wanted)
-    elif not enabled and current is not None:
+    elif not enabled and current is not None and "ucho.pyw" in current.lower():
+        # Only an entry this app wrote; a "Ucho" entry made by hand stays.
         winshell.set_autostart(False, wanted)
