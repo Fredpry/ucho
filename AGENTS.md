@@ -8,6 +8,11 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 2. **No real user data.** Never put real recordings, transcripts or names from meetings into code, tests, commits or issues. Tests use synthetic data.
 3. **Every user-facing string goes through `t("...")`** with English source text, and gets a Polish entry in `ucho/locale/pl.json`. `tests/test_i18n.py` enforces this.
 
+## Commits
+
+- Commit as the maintainer, with a DCO sign-off (`git commit -s`). Do not add `Co-Authored-By` trailers or other tool attribution.
+- Dependabot pull requests are proposals only. Never merge them with the GitHub button; test the update, apply it in a maintainer commit (several updates may share one) and close the PR with a link to that commit.
+
 ## Map
 
 | Path | Purpose |
