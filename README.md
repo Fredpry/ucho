@@ -1,6 +1,16 @@
-# Ucho
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="design/assets/ucho-hero-dark.svg">
+    <img src="design/assets/ucho-hero-light.svg" alt="Ucho: private transcripts of your meetings and dictation, offline" width="880">
+  </picture>
+</p>
 
-**Accurate meeting and dictation transcripts in your language. On your laptop. Nothing leaves it.**
+<p align="center"><b>Accurate meeting and dictation transcripts in your language. On your laptop. Nothing leaves it.</b></p>
+
+<p align="center">
+  <a href="https://ucho.app">ucho.app</a> · <a href="README.pl.md">Polski</a> · <a href="PRIVACY.md">Privacy</a> · <a href="design/README.md">Design system</a> · <a href="LICENSE">Apache-2.0</a>
+</p>
+
 
 Ucho (pronounced *oo-ho*, Polish for "ear") records your Teams, Zoom or Meet calls and your dictation on a Windows laptop and turns them into text locally, with Whisper large-v3 running on OpenVINO. No bot joins the call, no account, no cloud. It is built for Polish first, and handles English and meetings that mix both.
 
