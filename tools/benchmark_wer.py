@@ -222,26 +222,26 @@ class Transcriber:
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from ucho import config, transcribe
 
-        if language not in config.JEZYKI:
-            raise SystemExit(f"Unknown language {language!r}, choose from: {', '.join(config.JEZYKI)}")
+        if language not in config.LANGUAGES:
+            raise SystemExit(f"Unknown language {language!r}, choose from: {', '.join(config.LANGUAGES)}")
         self._transcribe = transcribe
-        self.language_token = config.JEZYKI[language]
-        self.engine = transcribe.Silnik(model or config.MODEL_DOMYSLNY, device)
+        self.language_token = config.LANGUAGES[language]
+        self.engine = transcribe.Engine(model or config.DEFAULT_MODEL, device)
         # Load (and on GPU compile) before the first file, so that file's
         # processing time and speed are not inflated by the one-off load.
         start = time.perf_counter()
-        self.engine.zaladuj()
+        self.engine.load()
         self.load_s = round(time.perf_counter() - start, 2)
 
     def __call__(self, audio: Path) -> str:
-        from ucho.merge import scal
+        from ucho.merge import merge_tracks
 
         # Same path as the app: silence cutting, chunking, hallucination filter.
-        segments = self._transcribe.transkrybuj_plik(audio, self.engine, "", self.language_token)
-        return " ".join(s.tekst for s in scal(segments)).strip()
+        segments = self._transcribe.transcribe_file(audio, self.engine, "", self.language_token)
+        return " ".join(s.text for s in merge_tracks(segments)).strip()
 
     def close(self) -> None:
-        self.engine.zwolnij()
+        self.engine.release()
 
 
 def audio_seconds(path: Path) -> float | None:
@@ -349,8 +349,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="do not transcribe, score existing <stem>.hyp.txt files")
     parser.add_argument("--model", default="", help="OpenVINO model repo id (default: app default)")
     parser.add_argument("--models-dir", type=Path, default=None,
-                        help="Hugging Face cache holding the models, e.g. the installed app's modele "
-                             "folder (default: HF_HOME, else <repo>/modele)")
+                        help="Hugging Face cache holding the models, e.g. the installed app's models "
+                             "folder (default: HF_HOME, else <repo>/models)")
     parser.add_argument("--device", default="GPU", help="GPU, CPU, NPU or AUTO (default: GPU, falls back to CPU)")
     parser.add_argument("--language", default="auto", help="auto, pl or en (default: auto, as in the app)")
     parser.add_argument("--limit", type=int, default=None, help="process at most N files")

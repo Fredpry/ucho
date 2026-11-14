@@ -22,7 +22,7 @@ Ucho's own code is Apache-2.0. The installer downloads the components below; the
 
 The LGPL libraries are installed as separate, unmodified packages in a normal virtual environment and imported at run time, so you can replace them with any compatible version.
 
-## Models (Hugging Face, pinned revisions in `ucho/config.py`)
+## Models (Hugging Face, pinned revisions in `ucho/config.py`, `REVISIONS`)
 
 | Model | Used for | License |
 |---|---|---|

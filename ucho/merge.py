@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Scalanie transkrypcji dwoch sciezek w jeden transkrypt z podzialem na mowcow.
+"""Merging the transcripts of two tracks into one transcript split by speaker.
 
-Mikrofon to "Ja", dzwiek systemowy to "Spotkanie". Poniewaz obie sciezki
-sa nagrywane rownolegle i wyrownane do zegara sciennego, wystarczy posortowac
-segmenty po czasie startu, aby odtworzyc przebieg rozmowy.
+The microphone is "me", the system audio is "meeting". Both tracks are
+recorded in parallel and aligned to the wall clock, so sorting segments by
+start time is enough to rebuild the course of the conversation.
+
+Segments store stable speaker codes; the localized labels ("Me"/"Ja",
+"Meeting"/"Spotkanie") are rendered only on output.
 """
 
 from __future__ import annotations
@@ -12,196 +15,222 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .i18n import t
 
-MOWCA_JA = "Ja"
-MOWCA_SPOTKANIE = "Spotkanie"
+SPEAKER_ME = "me"
+SPEAKER_MEETING = "meeting"
+SPEAKER_LABELS = {SPEAKER_ME: "Me", SPEAKER_MEETING: "Meeting"}
+# Speaker values written before v0.2: the label in the UI language of the time.
+LEGACY_SPEAKERS = {"Ja": SPEAKER_ME, "Me": SPEAKER_ME,
+                   "Spotkanie": SPEAKER_MEETING, "Meeting": SPEAKER_MEETING}
 
-# Whisper na ciszy i szumie potrafi wygenerowac stale formulki z napisow filmowych.
-# Odsiewamy najczestsze, zeby nie zasmiecaly transkryptu.
-_HALUCYNACJE = [
+TRANSCRIPT_MD = "transcript.md"
+TRANSCRIPT_SRT = "transcript.srt"
+TRANSCRIPT_TXT = "transcript.txt"
+META_FILE = "meta.json"
+
+# On silence and noise Whisper produces stock phrases from film subtitles.
+# We drop the most common ones so they do not litter the transcript. The
+# patterns match Polish and English speech, so they stay in both languages.
+_HALLUCINATIONS = [
     r"^napisy (stworzone przez|robione przez|wykonane przez)",
     r"amara\.?org",
     r"^zapraszam(y)? (do subskrypcji|na kolejny)",
     r"^subskrybuj",
-    # "dzi[eę]kuj": wczesniej bylo samo "dziekuj", wiec prawdziwe "Dziękuję"
-    # z polskim "ę" nigdy nie pasowalo (wylapal to test).
+    # "dzi[eę]kuj": it used to be plain "dziekuj", so a real "Dziękuję" with
+    # the Polish "ę" never matched (a test caught it).
     r"^dzi[eę]kuj[eę] za (uwag[eę]|obejrzenie|ogl[aą]danie)",
     r"^subtitles? (by|created by|provided by)",
     r"^transcri(pt|ption) by",
     r"^thanks? for watching",
     r"^please subscribe",
-    # Whisper wstawia te formulki w miejsce ciszy, takze w nagraniu polskim.
+    # Whisper puts these phrases in place of silence, also in Polish recordings.
     r"^(thank you|thanks|you|bye)[.!]?$",
-    # Samodzielne wtracenie bez zdania wokol to niemal zawsze artefakt na szumie.
+    # A lone filler with no sentence around it is almost always a noise artifact.
     r"^(so|um|uh+|hmm+|mm+|ah+|oh+|eh+|yeah|no|tak|no tak)[.,!?]?$",
     r"^napisy:",
     r"^\W*$",
 ]
-_HALUCYNACJE_RE = [re.compile(w, re.IGNORECASE) for w in _HALUCYNACJE]
+_HALLUCINATION_RES = [re.compile(p, re.IGNORECASE) for p in _HALLUCINATIONS]
 
-# Minimalny czas trwania segmentu - krotsze to zwykle artefakty.
-_MIN_TRWANIE = 0.15
-# Przerwa, powyzej ktorej nie sklejamy dwoch wypowiedzi tego samego mowcy.
-_MAX_PRZERWA_SKLEJANIA = 1.5
+# Minimum segment duration; shorter ones are usually artifacts.
+_MIN_DURATION = 0.15
+# Gap above which two utterances of the same speaker are not joined.
+_MAX_JOIN_GAP = 1.5
 
 
 @dataclass
 class Segment:
     start: float
-    koniec: float
-    tekst: str
-    mowca: str
+    end: float
+    text: str
+    speaker: str
 
 
-def _jest_halucynacja(tekst: str) -> bool:
-    czysty = tekst.strip()
-    if not czysty:
+def normalize_speaker(value) -> str:
+    """Speaker code from a stored value (also the pre-v0.2 labels)."""
+    value = str(value or "")
+    return LEGACY_SPEAKERS.get(value, value)
+
+
+def speaker_label(speaker: str) -> str:
+    """Localized label for a speaker code; unknown values are shown as they are."""
+    label = SPEAKER_LABELS.get(speaker)
+    return t(label) if label else speaker
+
+
+def is_hallucination(text: str) -> bool:
+    clean_text = text.strip()
+    if not clean_text:
         return True
-    return any(wzor.search(czysty) for wzor in _HALUCYNACJE_RE)
+    return any(pattern.search(clean_text) for pattern in _HALLUCINATION_RES)
 
 
-def oczysc(segmenty: list[Segment]) -> list[Segment]:
-    """Usuwa puste segmenty, znane halucynacje i bezposrednie powtorzenia."""
-    wynik: list[Segment] = []
-    for seg in segmenty:
-        tekst = " ".join(seg.tekst.split())
-        if not tekst or _jest_halucynacja(tekst):
+def clean(segments: list[Segment]) -> list[Segment]:
+    """Drops empty segments, known hallucinations and direct repetitions."""
+    result: list[Segment] = []
+    for seg in segments:
+        text = " ".join(seg.text.split())
+        if not text or is_hallucination(text):
             continue
-        if seg.koniec - seg.start < _MIN_TRWANIE:
+        if seg.end - seg.start < _MIN_DURATION:
             continue
-        if wynik and wynik[-1].mowca == seg.mowca and wynik[-1].tekst == tekst:
-            # Whisper potrafi zapetlic to samo zdanie - bierzemy je raz.
-            wynik[-1].koniec = seg.koniec
+        if result and result[-1].speaker == seg.speaker and result[-1].text == text:
+            # Whisper can loop on the same sentence; we keep it once.
+            result[-1].end = seg.end
             continue
-        wynik.append(Segment(seg.start, seg.koniec, tekst, seg.mowca))
-    return wynik
+        result.append(Segment(seg.start, seg.end, text, seg.speaker))
+    return result
 
 
-def scal(*listy: list[Segment]) -> list[Segment]:
-    """Laczy segmenty ze wszystkich sciezek w chronologiczna rozmowe."""
-    wszystkie: list[Segment] = []
-    for lista in listy:
-        wszystkie.extend(oczysc(lista))
-    wszystkie.sort(key=lambda s: (s.start, s.mowca))
+def merge_tracks(*tracks: list[Segment]) -> list[Segment]:
+    """Joins the segments of all tracks into one chronological conversation."""
+    everything: list[Segment] = []
+    for track in tracks:
+        everything.extend(clean(track))
+    everything.sort(key=lambda s: (s.start, s.speaker))
 
-    sklejone: list[Segment] = []
-    for seg in wszystkie:
-        poprzedni = sklejone[-1] if sklejone else None
+    joined: list[Segment] = []
+    for seg in everything:
+        previous = joined[-1] if joined else None
         if (
-            poprzedni is not None
-            and poprzedni.mowca == seg.mowca
-            and seg.start - poprzedni.koniec <= _MAX_PRZERWA_SKLEJANIA
+            previous is not None
+            and previous.speaker == seg.speaker
+            and seg.start - previous.end <= _MAX_JOIN_GAP
         ):
-            poprzedni.tekst = f"{poprzedni.tekst} {seg.tekst}".strip()
-            poprzedni.koniec = max(poprzedni.koniec, seg.koniec)
+            previous.text = f"{previous.text} {seg.text}".strip()
+            previous.end = max(previous.end, seg.end)
         else:
-            sklejone.append(Segment(seg.start, seg.koniec, seg.tekst, seg.mowca))
-    return sklejone
+            joined.append(Segment(seg.start, seg.end, seg.text, seg.speaker))
+    return joined
 
 
-def slug(tekst: str, maks: int = 48) -> str:
-    """Dowolny tekst -> bezpieczny fragment nazwy katalogu.
+def slug(text: str, max_len: int = 48) -> str:
+    """Any text -> a safe piece of a folder name.
 
-    Podkreslenie tez zamieniamy na mysinik: nazwa katalogu sesji dzieli sie na
-    czlony wlasnie po podkresleniu (data_godzina_temat_imiona).
+    Underscores also become hyphens: the session folder name is split into
+    parts exactly at underscores (date_time_topic_names).
     """
-    # "ł" nie rozklada sie w NFKD i bez tego znikalo ("zespół" -> "zespo").
-    tekst = tekst.replace("ł", "l").replace("Ł", "L")
-    tekst = unicodedata.normalize("NFKD", tekst).encode("ascii", "ignore").decode()
-    tekst = re.sub(r"[^\w\s-]", "", tekst).strip()
-    tekst = re.sub(r"[\s_-]+", "-", tekst)
-    return tekst[:maks].strip("-")
+    # "ł" does not decompose in NFKD and used to vanish ("zespół" -> "zespo").
+    text = text.replace("ł", "l").replace("Ł", "L")
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    text = re.sub(r"[^\w\s-]", "", text).strip()
+    text = re.sub(r"[\s_-]+", "-", text)
+    return text[:max_len].strip("-")
 
 
-def czas_hms(sekundy: float) -> str:
-    sekundy = max(0.0, sekundy)
-    g, reszta = divmod(int(sekundy), 3600)
-    m, s = divmod(reszta, 60)
-    return f"{g:02d}:{m:02d}:{s:02d}"
+def format_hms(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    h, rest = divmod(int(seconds), 3600)
+    m, s = divmod(rest, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def _czas_srt(sekundy: float) -> str:
-    sekundy = max(0.0, sekundy)
-    g, reszta = divmod(int(sekundy), 3600)
-    m, s = divmod(reszta, 60)
-    ms = int(round((sekundy - int(sekundy)) * 1000))
-    return f"{g:02d}:{m:02d}:{s:02d},{ms:03d}"
+def _srt_time(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    h, rest = divmod(int(seconds), 3600)
+    m, s = divmod(rest, 60)
+    ms = int(round((seconds - int(seconds)) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def jako_markdown(segmenty: list[Segment], meta: dict) -> str:
-    naglowek = [
-        "# " + t("Transkrypt: {tytul}", tytul=meta.get("temat") or meta.get("nazwa") or t("Spotkanie")),
+def as_markdown(segments: list[Segment], meta: dict) -> str:
+    title = meta.get("topic") or meta.get("name") or t("Meeting")
+    lines = [
+        "# " + t("Transcript: {title}", title=title),
         "",
-        f"- **{t('Data')}:** {meta.get('data', '')}",
-        f"- **{t('Czas trwania')}:** {czas_hms(meta.get('trwanie_s', 0))}",
+        f"- **{t('Date')}:** {meta.get('date', '')}",
+        f"- **{t('Duration')}:** {format_hms(meta.get('duration_s', 0))}",
         f"- **Model:** `{meta.get('model', '')}`",
-        f"- **{t('Obliczenia')}:** {meta.get('device', '')}",
-        f"- **{t('Język')}:** {meta.get('jezyk', 'auto')}",
+        f"- **{t('Compute')}:** {meta.get('device', '')}",
+        f"- **{t('Language')}:** {meta.get('language', 'auto')}",
     ]
-    if meta.get("urzadzenie_mikrofon"):
-        naglowek.append(f"- **{t('Mikrofon')}:** {meta['urzadzenie_mikrofon']}")
-    if meta.get("urzadzenie_system"):
-        naglowek.append(f"- **{t('Dźwięk systemowy')}:** {meta['urzadzenie_system']}")
-    if meta.get("uczestnicy"):
-        naglowek.append(f"- **{t('Uczestnicy')}:** {', '.join(meta['uczestnicy'])}")
-    naglowek += ["", "---", ""]
+    if meta.get("microphone_device"):
+        lines.append(f"- **{t('Microphone')}:** {meta['microphone_device']}")
+    if meta.get("system_device"):
+        lines.append(f"- **{t('System audio')}:** {meta['system_device']}")
+    if meta.get("participants"):
+        lines.append(f"- **{t('Participants')}:** {', '.join(meta['participants'])}")
+    lines += ["", "---", ""]
 
-    # Podsumowanie na gorze, zeby nie trzeba bylo czytac calosci - pelna wersja
-    # z ustaleniami siedzi w podsumowanie.md.
+    # The summary goes on top so nobody has to read everything; the full
+    # version with decisions is in summary.md.
     if meta.get("tldr"):
-        naglowek += ["## " + t("W skrócie"), "", meta["tldr"], ""]
-        if meta.get("punkty"):
-            naglowek += [f"- {punkt}" for punkt in meta["punkty"]] + [""]
-        naglowek += ["---", ""]
+        lines += ["## " + t("In short"), "", meta["tldr"], ""]
+        if meta.get("key_points"):
+            lines += [f"- {point}" for point in meta["key_points"]] + [""]
+        lines += ["---", ""]
 
-    if not segmenty:
-        naglowek.append("_" + t("Nie rozpoznano żadnej mowy.") + "_")
-        return "\n".join(naglowek) + "\n"
+    if not segments:
+        lines.append("_" + t("No speech was recognized.") + "_")
+        return "\n".join(lines) + "\n"
 
-    for seg in segmenty:
-        naglowek.append(f"**[{czas_hms(seg.start)}] {seg.mowca}:** {seg.tekst}")
-        naglowek.append("")
-    return "\n".join(naglowek)
-
-
-def jako_srt(segmenty: list[Segment]) -> str:
-    linie: list[str] = []
-    for i, seg in enumerate(segmenty, start=1):
-        koniec = max(seg.koniec, seg.start + 0.5)
-        linie.append(str(i))
-        linie.append(f"{_czas_srt(seg.start)} --> {_czas_srt(koniec)}")
-        linie.append(f"{seg.mowca}: {seg.tekst}")
-        linie.append("")
-    return "\n".join(linie)
+    for seg in segments:
+        lines.append(f"**[{format_hms(seg.start)}] {speaker_label(seg.speaker)}:** {seg.text}")
+        lines.append("")
+    return "\n".join(lines)
 
 
-def jako_tekst(segmenty: list[Segment]) -> str:
-    return "\n".join(f"{seg.mowca}: {seg.tekst}" for seg in segmenty) + "\n"
+def as_srt(segments: list[Segment]) -> str:
+    lines: list[str] = []
+    for i, seg in enumerate(segments, start=1):
+        end = max(seg.end, seg.start + 0.5)
+        lines.append(str(i))
+        lines.append(f"{_srt_time(seg.start)} --> {_srt_time(end)}")
+        lines.append(f"{speaker_label(seg.speaker)}: {seg.text}")
+        lines.append("")
+    return "\n".join(lines)
 
 
-def zapisz_wyniki(katalog: Path, segmenty: list[Segment], meta: dict) -> dict[str, Path]:
-    """Zapisuje transkrypt w trzech formatach oraz metadane sesji."""
-    katalog.mkdir(parents=True, exist_ok=True)
-    pliki = {
-        "md": katalog / "transkrypt.md",
-        "srt": katalog / "transkrypt.srt",
-        "txt": katalog / "transkrypt.txt",
-        "meta": katalog / "meta.json",
+def as_text(segments: list[Segment],
+            label: Callable[[str], str] = speaker_label) -> str:
+    """Plain text, one utterance per line. `label` renders the speaker code."""
+    return "\n".join(f"{label(seg.speaker)}: {seg.text}" for seg in segments) + "\n"
+
+
+def save_results(folder: Path, segments: list[Segment], meta: dict) -> dict[str, Path]:
+    """Writes the transcript in three formats plus the session metadata."""
+    folder.mkdir(parents=True, exist_ok=True)
+    files = {
+        "md": folder / TRANSCRIPT_MD,
+        "srt": folder / TRANSCRIPT_SRT,
+        "txt": folder / TRANSCRIPT_TXT,
+        "meta": folder / META_FILE,
     }
-    pliki["md"].write_text(jako_markdown(segmenty, meta), encoding="utf-8")
-    pliki["srt"].write_text(jako_srt(segmenty), encoding="utf-8")
-    pliki["txt"].write_text(jako_tekst(segmenty), encoding="utf-8")
+    files["md"].write_text(as_markdown(segments, meta), encoding="utf-8")
+    files["srt"].write_text(as_srt(segments), encoding="utf-8")
+    files["txt"].write_text(as_text(segments), encoding="utf-8")
 
-    pelne_meta = dict(meta)
-    pelne_meta["zapisano"] = datetime.now().isoformat(timespec="seconds")
-    pelne_meta["liczba_segmentow"] = len(segmenty)
-    pelne_meta["segmenty"] = [asdict(s) for s in segmenty]
-    pliki["meta"].write_text(
-        json.dumps(pelne_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+    full_meta = dict(meta)
+    full_meta["saved"] = datetime.now().isoformat(timespec="seconds")
+    full_meta["segment_count"] = len(segments)
+    full_meta["segments"] = [asdict(s) for s in segments]
+    files["meta"].write_text(
+        json.dumps(full_meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    return pliki
+    return files

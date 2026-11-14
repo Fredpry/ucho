@@ -21,7 +21,7 @@ Ucho nagrywa rozmowy w Teams, Zoomie czy Meet oraz dyktowanie na laptopie z Wind
 ## Co robi
 
 - **Spotkania.** Nagrywa dwie osobne ścieżki: Twój mikrofon („Ja”) i dźwięk systemowy („Spotkanie”). Transkrypt jest podzielony na mówców bez modelu diaryzacji, bo źródła są rozdzielone od początku.
-- **Dyktowanie.** *Ucho Dyktuj*: Ctrl+Shift+Spacja, mówisz, drugie wciśnięcie, a tekst ląduje tam, gdzie stoi kursor (terminal, przeglądarka, Teams).
+- **Dyktowanie.** *Ucho Dyktuj* (w menu Start: Ucho Dictate): Ctrl+Shift+Spacja, mówisz, drugie wciśnięcie, a tekst ląduje tam, gdzie stoi kursor (terminal, przeglądarka, Teams).
 - **Archiwum dla agentów AI.** Mały serwer MCP tylko do odczytu pozwala Claude Code, Claude Desktop, Cursorowi, Codexowi i innym klientom MCP przeglądać, przeszukiwać i czytać transkrypty. Ucho nie ma własnego czatu: streszcza Twój agent.
 - **Opcjonalne podsumowania lokalne.** Domyślnie wyłączone. Po włączeniu lokalny model Qwen pisze krótkie podsumowanie, a mechaniczne filtry sprawdzają je z transkryptem, żeby nie pojawiły się imiona ani daty, które nie padły.
 
@@ -33,7 +33,7 @@ Ucho nagrywa rozmowy w Teams, Zoomie czy Meet oraz dyktowanie na laptopie z Wind
 | Zwykłe laptopy | Dostrojone do Intel Core Ultra z grafiką Arc (OpenVINO na zintegrowanej karcie), na innych komputerach liczy na procesorze. |
 | Polski i angielski | Język jest wykrywany co ok. 12 s i tylko spośród języków, których używasz, więc w polskim spotkaniu nie pojawiają się wtrącenia po koreańsku czy islandzku. |
 | Zmyślenia Whispera | Cisza jest wycinana, zanim trafi do modelu, a znane formułki z napisów filmowych („Napisy stworzone przez…”) są odsiewane. |
-| Twoje pliki | Zwykłe `transkrypt.md`, `.srt`, `.txt` i `meta.json` w osobnym folderze dla każdego spotkania. |
+| Twoje pliki | Zwykłe `transcript.md`, `.srt`, `.txt` i `meta.json` w osobnym folderze dla każdego spotkania. |
 
 ## Wydajność (Core Ultra 7 258V, Arc 140V)
 
@@ -55,16 +55,18 @@ Godzinne spotkanie transkrybuje się na karcie Arc w ok. 4 minuty.
 ## Instalacja
 
 1. Pobierz `Ucho-Windows.zip` z zakładki [Releases](../../releases) i rozpakuj, np. do `C:\Users\<Ty>\Ucho\app`. **Nie rozpakowuj do OneDrive** (Pulpit i Dokumenty często są synchronizowane), bo modele i logi trafiłyby do chmury.
-2. Prawy przycisk na `instaluj.ps1` → *Uruchom w programie PowerShell* albo:
+2. Prawy przycisk na `install.ps1` → *Uruchom w programie PowerShell* albo:
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\instaluj.ps1
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
    ```
    Nie trzeba uprawnień administratora. Instalator doinstaluje Pythona 3.12 (przez winget, jeśli go nie ma), środowisko z przypiętymi wersjami pakietów, pobierze model Whisper (ok. 1,6 GB, w przypiętej wersji) i utworzy skróty.
-3. Uruchom **Ucho** albo **Ucho Dyktuj** z Menu Start.
+3. Uruchom **Ucho** albo **Ucho Dictate** z Menu Start.
 
-Opcjonalnie `-ZPodsumowaniem` pobiera też model podsumowań (ok. 5 GB) i włącza podsumowania.
+Opcjonalnie `-WithSummary` pobiera też model podsumowań (ok. 5 GB) i włącza podsumowania.
 
-Nagrania trafiają do `C:\Users\<Ty>\Ucho\nagrania`, celowo poza OneDrive. Katalog zmienisz w Ustawieniach.
+Nagrania trafiają do `C:\Users\<Ty>\Ucho\recordings`, celowo poza OneDrive. Katalog zmienisz w Ustawieniach.
+
+Aktualizacja z v0.1: rozpakuj paczkę na stary folder i uruchom ponownie `install.ps1`. Plik `ustawienia.json` zostanie przeniesiony do `settings.json` (folder nagrań się nie zmieni), `modele\` zmieni nazwę na `models\`, a stare nagrania z polskimi nazwami plików nadal działają w aplikacji i w serwerze MCP.
 
 ## Użycie
 
@@ -82,7 +84,7 @@ Serwer MCP działa tylko do odczytu, korzysta wyłącznie z biblioteki standardo
 Claude Code:
 
 ```powershell
-claude mcp add ucho -- "C:\Users\<Ty>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<Ty>\Ucho\app\mcp_serwer.py"
+claude mcp add ucho -- "C:\Users\<Ty>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<Ty>\Ucho\app\mcp_server.py"
 ```
 
 Claude Desktop, Cursor i inne: dodaj serwer stdio z tym samym poleceniem i argumentem. Potem zapytaj np.: *„Co ustaliliśmy w zeszłym tygodniu z dostawcą stali?”*

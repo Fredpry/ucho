@@ -1,11 +1,11 @@
 {
-  "jezyk": "auto",
+  "language": "auto",
   "enter": false,
-  "tryb": "wklej",
-  "dzwieki": true,
-  "maks_nagranie_s": 300,
+  "mode": "paste",
+  "sounds": true,
+  "max_recording_s": 300,
   "model": "OpenVINO/whisper-large-v3-fp16-ov",
-  "slownik": {
+  "dictionary": {
     "Cloud Code": "Claude Code",
     "Cloud Codem": "Claude Code'em"
   }

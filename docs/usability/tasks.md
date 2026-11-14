@@ -21,7 +21,7 @@ Liczymy też **błędy**: każde działanie, które oddala od celu i które ucze
 - **Stan początkowy:** Ucho nie jest zainstalowane. Uczestnik ma link do `Ucho-Windows.zip` (Releases albo plik z czatu). Python może, ale nie musi być zainstalowany.
 - **Kryteria sukcesu:**
   - archiwum rozpakowane **poza OneDrive** (nie na Pulpicie ani w Dokumentach, jeśli są synchronizowane);
-  - `instaluj.ps1` uruchomiony i zakończony bez błędu;
+  - `instaluj.ps1` (od v0.2 `install.ps1`) uruchomiony i zakończony bez błędu;
   - w menu Start są skróty Ucho (w wersji 0.1 także Ucho Dyktuj).
 - **Na co patrzymy:**
   - czy uczestnik czyta README albo instrukcję, czy od razu klika;
@@ -59,7 +59,7 @@ Liczymy też **błędy**: każde działanie, które oddala od celu i które ucze
 
 - **Stan początkowy:** transkrypcja z zadania 2 zakończona. Okno Ucho może być otwarte albo schowane.
 - **Kryteria sukcesu:**
-  - uczestnik otwiera transkrypt (w aplikacji albo plik `transkrypt.md` w folderze nagrania);
+  - uczestnik otwiera transkrypt (w aplikacji albo plik `transkrypt.md`, od v0.2 `transcript.md`, w folderze nagrania);
   - wskazuje zdanie o autokarze i podaje jego znacznik czasu.
 - **Na co patrzymy:**
   - czy szuka na liście nagrań w aplikacji, czy w Eksploratorze plików;
@@ -114,7 +114,7 @@ Liczymy też **błędy**: każde działanie, które oddala od celu i które ucze
 - **Stan początkowy:** Claude Code zainstalowany i zalogowany. Ucho zainstalowane, w archiwum jest nagranie z zadania 2. Uczestnik ma dostęp do README (strona repozytorium albo plik w folderze aplikacji).
 - **Ważne:** Claude Code wyśle treść transkryptu do Anthropic. Dlatego używamy wyłącznie wymyślonej rozmowy z zadania 2, a uczestnik zaznacza osobną zgodę w `consent.md`.
 - **Kryteria sukcesu:**
-  - `claude mcp add ucho -- ...` z poprawnymi ścieżkami do `python.exe` i `mcp_serwer.py`;
+  - `claude mcp add ucho -- ...` z poprawnymi ścieżkami do `python.exe` i `mcp_serwer.py` (od v0.2 `mcp_server.py`);
   - serwer `ucho` widoczny w Claude Code (np. `/mcp`);
   - Claude odpowiada na podstawie transkryptu i wymienia autokar.
 - **Na co patrzymy:**
