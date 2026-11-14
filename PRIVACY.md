@@ -30,6 +30,12 @@ Nothing else. Recording, transcription, optional summaries and the MCP server wo
 
 The default recordings folder is deliberately **not** in Documents: on many company laptops Documents are redirected to OneDrive, which would upload recordings to the cloud.
 
+### How long it is kept
+
+Ucho keeps a recording until you delete it. **Delete recording** on the transcript screen (or the Delete key on a recording selected in the list) asks for confirmation and then removes the whole session folder: audio, transcript and summary. The files are deleted directly, not moved to the Recycle Bin. Copies made outside Ucho (backups, a synced folder) are not affected.
+
+**Delete audio after** in Settings (Never, 7, 30 or 90 days; default Never) removes only the audio files of recordings that already have a transcript, at start and then once a day. Transcripts, summaries and `meta.json` stay, and `meta.json` notes that the audio was removed. The log records only how many files were removed.
+
 ### Check it yourself
 
 While Ucho is recording or transcribing, list external connections of its Python processes (no admin rights needed):
@@ -90,6 +96,12 @@ Nic więcej. Nagrywanie, transkrypcja, opcjonalne podsumowania i serwer MCP dzia
 | Modele | `models\` w folderze programu |
 
 Domyślny folder nagrań celowo **nie** leży w Dokumentach: na wielu firmowych laptopach Dokumenty są przekierowane do OneDrive, więc nagrania trafiłyby do chmury.
+
+### Jak długo są przechowywane
+
+Ucho przechowuje nagranie, dopóki go nie usuniesz. **Usuń nagranie** na ekranie transkryptu (albo klawisz Delete na nagraniu zaznaczonym na liście) po potwierdzeniu usuwa cały folder sesji: dźwięk, transkrypt i podsumowanie. Pliki są kasowane od razu, nie trafiają do Kosza. Kopie zrobione poza Ucho (kopie zapasowe, folder synchronizowany) zostają bez zmian.
+
+**Usuwaj nagrania audio po** w Ustawieniach (Nigdy, 7, 30 albo 90 dniach; domyślnie Nigdy) usuwa przy starcie, a potem raz dziennie, tylko pliki audio nagrań, które mają już transkrypt. Transkrypty, podsumowania i `meta.json` zostają, a w `meta.json` zapisuje się informacja o usunięciu dźwięku. Log odnotowuje tylko liczbę usuniętych plików.
 
 ### Sprawdź sam
 

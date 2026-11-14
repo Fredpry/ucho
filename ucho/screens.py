@@ -12,11 +12,12 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import tkinter
 from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, session, theme, ui
+from . import config, retention, session, theme, ui
 from .archive import Match, fold, hms, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
@@ -73,6 +74,46 @@ def describe(meta: dict, folder: Path) -> tuple[str, str]:
     if meta.get("duration_s"):
         parts.append(hms(meta["duration_s"]))
     return title, "  ·  ".join(p for p in parts if p)
+
+
+def delete_recording(app, folder: Path, parent) -> bool:
+    """Asks, then deletes a whole session folder. True when it was deleted.
+
+    Refused while the session is being recorded, transcribed or summarized.
+    The search index needs no extra step: it rebuilds when the list of
+    sessions changes (archive.Archive.index).
+    """
+    if app.meeting.is_active(folder):
+        app.toast(t("This recording is being recorded, transcribed or summarized. "
+                    "Delete it when that has finished."), "warning", 6)
+        return False
+    meta = session.read_meta(folder)
+    title, _line = describe(meta, folder)
+    date = meta.get("date") or session.date_from_name(folder.name)
+    if date:
+        message = t("The recording “{title}” from {date} will be deleted permanently: audio, "
+                    "transcript and summary. This cannot be undone.", title=title, date=date)
+    else:
+        message = t("The recording “{title}” will be deleted permanently: audio, transcript and "
+                    "summary. This cannot be undone.", title=title)
+    if not ui.confirm(parent, t("Delete recording?"), message, t("Delete permanently"),
+                      destructive=True):
+        return False
+    # The dialog was modal but the app kept running: check again.
+    if app.meeting.is_active(folder):
+        app.toast(t("This recording is being recorded, transcribed or summarized. "
+                    "Delete it when that has finished."), "warning", 6)
+        return False
+    try:
+        retention.delete_session(app.settings.recordings_dir, folder)
+    except retention.DeleteError as error:
+        log.warning("Recording not deleted: %s", error)
+        app.toast(t("The recording could not be deleted. Close programs that use its files "
+                    "and try again."), "warning", 6)
+        return False
+    app.show("recordings")
+    app.toast(t("Recording deleted"))
+    return True
 
 
 def session_title(folder_name: str) -> str:
@@ -298,6 +339,12 @@ class RecordingCard(ctk.CTkFrame):
         self.bind("<Configure>", self._wrap, add="+")
         self._bind_all(self)
         ui.focusable(self, self.open)
+        # Delete on a focused card: the same confirmation as the button on the transcript screen.
+        tkinter.Misc.bind(self, "<Delete>", self._delete_key, add="+")
+
+    def _delete_key(self, _event=None) -> str:
+        delete_recording(self.app, self.folder, self)
+        return "break"
 
     def _bind_all(self, widget) -> None:
         for sequence, handler in (("<Button-1>", lambda _e: self.open()),
@@ -413,6 +460,8 @@ class RecordingsScreen(Screen):
             title, line = describe(meta, match.session)
             status = t("transcript ready") if session.find_file(match.session, TRANSCRIPT_MD) else t(
                 "no transcript")
+            if retention.audio_removed(meta):
+                status += "  ·  " + t("audio deleted")
             line = f"{line}  ·  {status}" if line else status
             if meta.get("participants"):
                 line += "  ·  " + ", ".join(meta["participants"])
@@ -452,6 +501,9 @@ class TranscriptScreen(Screen):
         self.again = ui.secondary(actions, t("Transcribe again"), self._again, "refresh", width=10)
         self.again.pack(side="left", padx=(0, 8))
         self.summarize = ui.secondary(actions, t("Summarize"), self._summarize, "summary", width=10)
+        # Right-aligned, away from the everyday actions.
+        self.delete = ui.danger(actions, t("Delete recording"), self._delete, "delete", width=10)
+        self.delete.pack(side="right")
         self.stop = ui.secondary(actions, t("Stop"), self.meeting.cancel, "stop", width=10)
         self.progress_row = ctk.CTkFrame(actions, fg_color="transparent")
         self.progress = ctk.CTkProgressBar(self.progress_row, width=160, height=8)
@@ -496,6 +548,8 @@ class TranscriptScreen(Screen):
             details.append(str(meta["device"]))
         if meta.get("model"):
             details.append(str(meta["model"]).split("/")[-1])
+        if retention.audio_removed(meta):
+            details.append(t("audio deleted"))
         self.title.configure(text=title)
         self.subtitle.configure(text="  ·  ".join(details))
         self.segments = session.segments(meta)
@@ -528,8 +582,11 @@ class TranscriptScreen(Screen):
                     text.write((file.read_text(encoding="utf-8"), "body"))
                 except OSError:
                     pass
-            else:
+            elif session.audio_tracks(self.folder):
                 text.write((t("No transcript yet. Use “Transcribe again”.") + "\n", "muted"))
+            else:
+                text.write((t("No transcript, and the audio files are gone, so this recording "
+                              "cannot be transcribed.") + "\n", "muted"))
         if self.query:
             text.highlight(query_words(self.query))
         else:
@@ -613,6 +670,10 @@ class TranscriptScreen(Screen):
         if self.folder is not None and self.meeting.summarize_again(self.folder):
             self.live = True
             self._update_actions()
+
+    def _delete(self) -> None:
+        if self.folder is not None and delete_recording(self.app, self.folder, self):
+            self.folder, self.segments, self.live = None, [], False
 
 
 # --- Dictation --------------------------------------------------------------------------

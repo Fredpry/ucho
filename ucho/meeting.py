@@ -76,6 +76,15 @@ class MeetingController:
     def busy(self) -> bool:
         return self.transcribing or self.summarizing
 
+    def is_active(self, folder: Path) -> bool:
+        """`folder` is being recorded, transcribed or summarized: it must not be deleted."""
+        if self.session_dir is None or not (self.recording or self.busy):
+            return False
+        try:
+            return Path(folder).resolve() == self.session_dir.resolve()
+        except OSError:
+            return True  # cannot tell: treat as in use
+
     def levels(self) -> dict[str, float]:
         if self.recording and self.recorder is not None:
             return self.recorder.levels

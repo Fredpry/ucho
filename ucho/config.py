@@ -219,6 +219,9 @@ DEFAULTS = {
     "summary_enabled": False,
     "summary_model": DEFAULT_LLM_MODEL,
     "rename_folder": False,
+    # Delete the audio of transcribed recordings after this many days (0 = never).
+    # Transcripts, summaries and meta.json stay. See ucho/retention.py.
+    "audio_retention_days": 0,
     # Written by `python -m ucho.hardware --save` (the installer runs it) and
     # by the first-run wizard. A repo id, or DICTATION_SHARED: dictation then
     # uses the transcription model (one model in memory instead of two).
