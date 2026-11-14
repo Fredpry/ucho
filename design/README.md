@@ -64,7 +64,7 @@ Implemented in the app (v0.2): the theme is built from `tokens.json` in `ucho/th
 
 ## Logo
 
-`assets/ucho-mark.svg`: an ear drawn as two strokes with three sound waves arriving from the left. Brand blush for the outer ear, blush-600 for the inner curl. Minimum size 24 px; below 32 px drop the waves. Hero versions for the README: `assets/ucho-hero-light.svg`, `assets/ucho-hero-dark.svg`.
+`assets/ucho-mark.svg`: an ear drawn as two strokes with three sound waves arriving from the left. Brand blush for the outer ear, blush-600 for the inner curl. Minimum size 24 px; below 32 px drop the waves. README banners (PL/EN, light/dark, animated): `assets/banner-*.svg`, built by `make_banner.py` with the headline in Bricolage Grotesque converted to outlines.
 
 ## Voice
 

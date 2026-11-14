@@ -9,7 +9,7 @@ Both are run by hand. Neither runs in CI (no models, no GPU, no audio there).
 
 ## Known numbers (v0.1)
 
-Measured on the development laptop, Intel Core Ultra 7 258V with Arc 140V, 32 GB RAM, Whisper large-v3 INT8 (from `README.md`):
+Measured on the development laptop, Intel Core Ultra 7 258V with Arc 140V, 32 GB RAM, Whisper large-v3 INT8:
 
 | | GPU (Arc 140V) | CPU |
 |---|---|---|
