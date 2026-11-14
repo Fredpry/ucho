@@ -82,6 +82,7 @@
   "Recognizing…": "Rozpoznaję…",
   "Inserted": "Wstawiono",
   "Copied to clipboard": "Skopiowano do schowka",
+  "Text is on the clipboard, press Ctrl+V": "Tekst jest w schowku, wklej Ctrl+V",
   "I didn't hear anything": "Nic nie usłyszałem",
   "Recognition error": "Błąd rozpoznawania",
   "The model failed to load": "Model się nie załadował",
