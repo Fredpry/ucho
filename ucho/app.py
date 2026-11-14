@@ -424,8 +424,12 @@ class App(ctk.CTk):
         was_recording = self.meeting.recording
         self.meeting.toggle(name)
         if self.state() != "withdrawn" and self.settings["setup_complete"]:
-            if was_recording and self.meeting.transcribing:
+            stopped = self.meeting.last_stopped
+            if was_recording and self.meeting.transcribing and self.meeting.is_active(stopped):
                 self.show("transcript", live=True)
+            elif was_recording and self.meeting.queue_position(stopped):
+                # Another session is still being transcribed: show this one as queued.
+                self.show("transcript", folder=stopped)
             elif not was_recording:
                 self.show("meeting")
 
@@ -471,10 +475,11 @@ class App(ctk.CTk):
             return t("Recording"), "recording"
         if d.recording:
             return t("Dictating"), "recording"
+        queued = f"  ·  {t('Queued ({n})', n=m.queued)}" if m.queued else ""
         if m.transcribing:
-            return t("Transcribing {percent}%", percent=int(m.progress * 100)), "working"
+            return t("Transcribing {percent}%", percent=int(m.progress * 100)) + queued, "working"
         if m.summarizing:
-            return t("Summarizing"), "working"
+            return t("Summarizing") + queued, "working"
         if d.queued:
             return t("Recognizing"), "working"
         return t("Ready"), "ready"

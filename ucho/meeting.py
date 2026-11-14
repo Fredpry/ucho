@@ -6,6 +6,15 @@ The logic behind the "Meeting" screen, without widgets. Model work goes
 through the shared engine (ucho/engine.py); results come back to the UI
 thread through `app.post`, and screens listen to the events below.
 
+One session is transcribed (and summarized) at a time. A session that stops
+while another one is still being worked on waits in a FIFO queue and starts
+when the current one has finished or failed, summary included. The queue
+lives here, not in the engine: the engine gets one meeting job at a time, so
+a dictation still overtakes it between chunks, and a queued transcription
+never runs between another session's transcription and its summary. The
+queue is not saved: sessions still queued at exit stay without a transcript
+and can be transcribed later.
+
 Events (name, data):
     state          -
     progress       (fraction, new_text)
@@ -20,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -38,7 +48,8 @@ class MeetingController:
         self.recording = False
         self.recording_start = 0.0
         self.session_name = ""
-        self.session_dir: Path | None = None
+        self.session_dir: Path | None = None  # the session being transcribed or summarized
+        self.last_stopped: Path | None = None  # folder of the last finished recording
         self.transcribing = False
         self.summarizing = False
         self.progress = 0.0
@@ -48,6 +59,7 @@ class MeetingController:
         self.last_segments: list[Segment] = []
         self.last_meta: dict = {}
         self._job = None
+        self._queue: deque[tuple[Path, dict, dict]] = deque()  # (folder, files, meta)
         self._listeners: list[Callable[[str, object], None]] = []
 
     # --- events -------------------------------------------------------------
@@ -75,6 +87,31 @@ class MeetingController:
     @property
     def busy(self) -> bool:
         return self.transcribing or self.summarizing
+
+    @property
+    def queued(self) -> int:
+        """Sessions waiting for their transcription."""
+        return len(self._queue)
+
+    def queue_position(self, folder: Path | None) -> int:
+        """1 for the next session to be transcribed, 2 for the one after it; 0 when not queued."""
+        for position, (queued, _files, _meta) in enumerate(list(self._queue), start=1):
+            if queued == folder:
+                return position
+        return 0
+
+    def is_active(self, folder: Path | None) -> bool:
+        """True while this session is being transcribed or summarized."""
+        return folder is not None and self.busy and folder == self.session_dir
+
+    def dequeue(self, folder: Path) -> bool:
+        """Takes a session out of the queue (for example before it is deleted)."""
+        for entry in list(self._queue):
+            if entry[0] == folder:
+                self._queue.remove(entry)
+                self._emit("state")
+                return True
+        return False
 
     def levels(self) -> dict[str, float]:
         if self.recording and self.recorder is not None:
@@ -114,8 +151,8 @@ class MeetingController:
             return False
         self.recorder = recorder
         self.recording = True
+        # Not session_dir: that one belongs to a transcription that may still run.
         self.session_name = name
-        self.session_dir = folder
         self.recording_start = time.time()
         self.message = (("; ".join(recorder.warnings)), "warning") if recorder.warnings else None
         log.info("Recording started: %s", folder.name)
@@ -129,6 +166,7 @@ class MeetingController:
         result = self.recorder.stop()
         self.recorder = None
         files = {n: d["file"] for n, d in result["tracks"].items()}
+        self.last_stopped = result["folder"]
         log.info("Recording stopped: %.0f s", result["duration_s"])
         if not files:
             self.message = (t("Nothing was recorded."), "warning")
@@ -163,14 +201,40 @@ class MeetingController:
         meta = session.read_meta(folder)
         meta.pop("segments", None)
         meta.setdefault("name", folder.name)
-        meta["model"] = self.settings["model"]
-        meta["language"] = self.settings["language"]
         return self.transcribe(folder, files, meta)
 
     def transcribe(self, folder: Path, files: dict, meta: dict) -> bool:
-        if self.busy:
-            self._emit("error", t("Another transcription is running. Wait until it finishes."))
-            return False
+        """Transcribes the session now, or queues it while another one is being worked on.
+
+        True when the session is running or waiting in the queue (also when it
+        already was: a session is never queued twice).
+        """
+        if self.is_active(folder) or self.queue_position(folder):
+            log.info("Transcription of %s already running or queued", folder.name)
+            return True
+        if self.busy or self._queue:
+            self._queue.append((folder, files, meta))
+            log.info("Transcription of %s queued (%d waiting)", folder.name, len(self._queue))
+            self._emit("state")
+            return True
+        return self._start(folder, files, meta)
+
+    def _advance(self) -> None:
+        """Starts the next queued session when nothing is running (UI thread)."""
+        while self._queue and not self.busy:
+            folder, files, meta = self._queue.popleft()
+            if not folder.is_dir():
+                log.warning("Queued session %s no longer exists - skipped", folder.name)
+                continue
+            if self._start(folder, files, meta):
+                return
+        self._emit("state")
+
+    def _finished(self) -> None:
+        """The current session is done (transcript, and summary when expected) or failed."""
+        self.app.post(self._advance)
+
+    def _start(self, folder: Path, files: dict, meta: dict) -> bool:
         # Settings are read once at start and the app can sit in the tray for
         # weeks; every UI change goes to disk at once, so the file is at least
         # as fresh as memory.
@@ -180,6 +244,8 @@ class MeetingController:
             log.warning("Transcription skipped: model %r is not downloaded", model)
             self._emit("error", t("The model is not downloaded — open Settings."))
             return False
+        # A queued session may start after the settings changed: record what is used.
+        meta["model"], meta["language"] = model, self.settings["language"]
 
         self.transcribing = True
         self.session_dir = folder
@@ -211,6 +277,9 @@ class MeetingController:
                 failed(RuntimeError(t("Saving failed: {error}", error=error)))
                 return
             expected = self._summary_expected(segments)
+            # Summarizing first: `busy` must not drop between the two steps,
+            # or a queued session would start in between.
+            self.summarizing = expected
             self.transcribing = False
             self.progress = 1.0
             self.last_segments, self.last_meta = segments, full
@@ -222,6 +291,7 @@ class MeetingController:
                 self.summarize(folder, segments, full)
             else:
                 self._emit("state")
+                self._finished()
 
         def failed(error: BaseException) -> None:
             self.transcribing = False
@@ -229,6 +299,7 @@ class MeetingController:
             self.status_text = t("Error: {error}", error=text)
             self._emit("error", self.status_text)
             self._emit("state")
+            self._finished()
 
         self._job = self.app.engine.transcribe(files, model, device, self.settings["language"],
                                                progress=progress, status=status,
@@ -271,7 +342,10 @@ class MeetingController:
 
         model = self.settings["summary_model"]
         if not transcribe.model_downloaded(model):
+            self.summarizing = False
             self._emit("summary_error", t("The summary model is not downloaded — see Settings."))
+            self._emit("state")
+            self._finished()
             return
         self.summarizing = True
         self.status_text = t("Summarizing...")
@@ -284,20 +358,26 @@ class MeetingController:
                 cancel=job.cancel)
 
         def done(result) -> None:
-            self.summarizing = False
-            if self._job is not None and self._job.cancel.is_set():
-                self._emit("summary_error", t("stopped"))
-            elif not result:
-                self._emit("summary_error", t("The model returned no summary."))
-            else:
-                self._save_summary(folder, segments, meta, result)
-            self._emit("state")
+            # `summarizing` stays set until the summary is saved and the folder
+            # renamed, so the next queued session cannot start in between.
+            try:
+                if self._job is not None and self._job.cancel.is_set():
+                    self._emit("summary_error", t("stopped"))
+                elif not result:
+                    self._emit("summary_error", t("The model returned no summary."))
+                else:
+                    self._save_summary(folder, segments, meta, result)
+            finally:
+                self.summarizing = False
+                self._emit("state")
+                self._finished()
 
         def failed(error: BaseException) -> None:
             self.summarizing = False
             log.warning("Summary failed: %s", error)
             self._emit("summary_error", str(error))
             self._emit("state")
+            self._finished()
 
         self._job = self.app.engine.exclusive(work, "summary", on_done=done, on_error=failed)
 
@@ -325,6 +405,12 @@ class MeetingController:
         if self.recording:
             # Do not lose a recording in progress: close the files properly.
             self.stop()
+        if self._queue:
+            # Not saved: these sessions keep their audio and can be
+            # transcribed later with "Transcribe again".
+            log.info("Quit with %d queued transcription(s) not started: %s", len(self._queue),
+                     ", ".join(folder.name for folder, _f, _m in self._queue))
+            self._queue.clear()
         if self._job is not None:
             self._job.cancel.set()
 
