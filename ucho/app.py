@@ -1,1279 +1,794 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""App window: recording, transcription, recordings list, settings."""
+"""The Ucho app: one process for meeting recording and dictation.
+
+One window with a sidebar (Meeting, Dictation, Recordings, Settings) or, in
+the "tray" layout, the tray icon as the hub with the main window and a small
+dictation window. Both layouts share everything below: one Whisper engine
+(ucho/engine.py), one tray icon, both global hotkeys, one AppUserModelID,
+the Jump List and the single-instance guard.
+
+`python -m ucho --smoke-test` builds the whole UI without audio capture and
+without loading a model, walks through every screen and both layouts, and
+exits with 1 when anything logged an error (CI runs it on windows-latest).
+"""
 
 from __future__ import annotations
 
+import argparse
+import copy
 import json
 import logging
-import os
 import queue
 import sys
+import tempfile
 import threading
 import time
-from datetime import datetime
+import tkinter
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import customtkinter as ctk
 
-from . import (audio, config, i18n, icon as icon_mod, session, summary as summary_mod,
-               transcribe, winshell)
+from . import config, hardware, i18n, theme, ui, winshell
+from .archive import Archive
+from .dictation import DictationController
+from .engine import Engine
+from .hotkeys import Hotkeys
+from .hotkeys import label as hotkey_label
 from .i18n import t
-from .merge import TRANSCRIPT_MD, Segment, format_hms, save_results, slug, speaker_label
-from .tray import GlobalHotkey, TrayIcon
+from .instance import SingleInstance
+from .meeting import MeetingController
+from .theme import C
+from .tray import Item, TrayIcon
 
 log = logging.getLogger(__name__)
 
-BG = "#15171d"
-PANEL = "#1e2129"
-PANEL_LIGHT = "#272b35"
-ACCENT = "#5ea4ff"
-ACCENT_HOVER = "#7ab4ff"
-RED = "#ef4444"
-RED_HOVER = "#f26565"
-TEXT = "#e6e9ef"
-TEXT_MUTED = "#8b93a5"
-GREEN = "#34d399"
+ICON_FILE = Path(__file__).resolve().parent / "assets" / "icon.ico"
+DICTATE_ICON_FILE = Path(__file__).resolve().parent / "assets" / "dictate.ico"
+TICK_MS = 66
+SIDEBAR_WIDTH = 212
+
+
+@dataclass
+class Options:
+    dictate: bool = False      # open dictation (shortcut "Ucho Dictate", Jump List)
+    record: bool = False       # start recording a meeting (Jump List)
+    minimized: bool = False    # start in the tray (start with Windows)
+    smoke_test: float | None = None  # seconds; CI start test without audio and models
+
+
+def parse_args(argv: list[str] | None) -> Options:
+    parser = argparse.ArgumentParser(prog="python -m ucho", description="Ucho (offline).")
+    parser.add_argument("--dictate", action="store_true", help="open dictation")
+    parser.add_argument("--record", action="store_true", help="start recording a meeting")
+    parser.add_argument("--minimized", action="store_true", help="start in the tray")
+    parser.add_argument("--smoke-test", nargs="?", const=3.0, type=float, metavar="SECONDS",
+                        help="start the full UI without audio capture or models, exit after "
+                             "SECONDS (default 3); exit code 1 when an error was logged")
+    args, _unknown = parser.parse_known_args(argv)
+    return Options(args.dictate, args.record, args.minimized, args.smoke_test)
 
 
 class App(ctk.CTk):
-    def __init__(self):
+    def __init__(self, settings: config.Settings, options: Options | None = None):
+        self.settings = settings
+        self.options = options or Options()
+        self.smoke = self.options.smoke_test is not None
+        # The smoke test must not touch OpenVINO devices (CI); the screenshot tool turns it on.
+        self.probe_hardware = not self.smoke
+        theme.apply(settings["theme"])
         super().__init__()
+        theme.apply_fonts()
 
-        self.settings = config.Settings()
-        config.prepare_dirs(self.settings)
+        self._posted: queue.Queue[Callable[[], None]] = queue.Queue()
+        self.engine = Engine()
+        self.engine.start()
+        self.archive = Archive(settings.recordings_dir)
+        self.meeting = MeetingController(self)
+        self.dictation = DictationController(self)
+        self.hotkeys = Hotkeys(self._on_hotkey)
+        self.hotkey_errors: dict[str, str] = {}
+        self.hardware_profile: hardware.HardwareProfile | None = None
+        self.hardware_rec: hardware.Recommendation | None = None
+        self.hardware_measured = None
+        self._hardware_waiting: list[Callable[[], None]] = []
+        self.devices: dict | None = None
+        self._device_callbacks: list[Callable[[dict], None]] = []
+        self.audio_ok = True
+        self.last_query = ""
+        self.compact = False
+        self.dictation_window = None
+        self._body: ctk.CTkFrame | None = None
+        self._screens: dict = {}
+        self._current = ""
+        self._nav: dict[str, ctk.CTkButton] = {}
+        self._toast = None
+        self._toast_until = 0.0
+        self._taskbar = None
+        self._threads: list[threading.Thread] = []
 
-        self.recorder: audio.Recorder | None = None
-        self.recording = False
-        self.session_dir: Path | None = None
-        self.session_name = ""
-        self.recording_start = 0.0
-        self.cancel_transcription = threading.Event()
-        self.transcribing = False
-        self.summarizing = False
-        self._queue: "queue.Queue[tuple]" = queue.Queue()
-        self._devices = {"microphones": [], "system": [],
-                         "default_microphone": None, "default_system": None}
+        self._setup_window()
+        self.tray = TrayIcon(config.APP_NAME, [
+            Item(lambda: t("Show Ucho"), lambda: self.post(self.show_main), default=True),
+            Item(lambda: t("Stop recording") if self.meeting.recording else t("Record a meeting"),
+                 lambda: self.post(self.toggle_recording)),
+            Item(lambda: t("Stop dictation") if self.dictation.recording else t("Dictate"),
+                 lambda: self.post(self.dictation.toggle)),
+            Item(lambda: t("Dictation window"), lambda: self.post(self.show_dictation),
+                 visible=lambda: self.settings["layout"] == "tray"),
+            None,
+            Item(lambda: t("Quit"), lambda: self.post(self.quit_app)),
+        ])
 
-        self._build_window()
-        self._build_header()
-        self._build_views()
-        self._show_view("record")
-
-        self._tray = TrayIcon(
-            config.APP_NAME,
-            on_toggle=lambda: self.after(0, self.toggle_recording),
-            on_show=lambda: self.after(0, self._show_window),
-            on_quit=lambda: self.after(0, self.quit_app),
-        )
-        self._hotkey = GlobalHotkey(
-            self.settings["hotkey"], lambda: self.after(0, self.toggle_recording)
-        )
-        if self.settings["tray"]:
-            self._tray.start()
-        self._hotkey.start()
-
+        try:
+            self.dictation.last_text = "" if self.smoke else _last_dictation()
+        except Exception:
+            log.debug("No last dictation", exc_info=True)
+        self.build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        threading.Thread(target=self._load_devices, daemon=True).start()
-        self.after(100, self._tick)
-        # The window must already exist in the system before we describe it
-        # for the taskbar.
-        self.after(600, self._describe_for_taskbar)
+        self.report_callback_exception = self._on_callback_error
 
-    # --- building the UI --------------------------------------------------
+        self.hotkey_errors = self.hotkeys.start({"record": self.settings["hotkey"],
+                                                 "dictate": self.settings["dictation_hotkey"]})
+        if self.settings["tray"] or self.settings["layout"] == "tray":
+            self.tray.start()
+        self._start_thread(self._load_devices, "devices")
+        if not self.smoke:
+            self.dictation.preload()
+            self._start_thread(self.dictation_prepare, "portaudio")
+        self.after(TICK_MS, self._tick)
+        # The window must exist in the system before it is described for the taskbar.
+        self.after(600, self._after_start)
 
-    def _build_window(self) -> None:
-        ctk.set_appearance_mode("dark")
-        self.title(t("{app} - local recording and transcription", app=config.APP_NAME))
-        # Fit to the screen: on a high-DPI laptop the work area can be short,
-        # and a fixed 560x770 would cut off the bottom of the view.
-        width = min(560, self.winfo_screenwidth() - 60)
-        height = min(720, self.winfo_screenheight() - 110)
+    # --- window -------------------------------------------------------------------
+
+    def _setup_window(self) -> None:
+        self.title(config.APP_NAME)
+        scaling = ctk.ScalingTracker.get_window_scaling(self)
+        work_w, work_h = _work_area()
+        if not work_w:
+            work_w, work_h = self.winfo_screenwidth(), self.winfo_screenheight() - 48
+        # Logical sizes (customtkinter scales them). A 1366x768 screen at 125 %
+        # leaves about 1093 x 566 logical pixels; the layout must fit there.
+        avail_w, avail_h = work_w / scaling, work_h / scaling - 34
+        width, height = int(min(1040, avail_w - 40)), int(min(700, avail_h - 10))
+        self.compact = height < 620
         self.geometry(f"{width}x{height}")
-        self.minsize(500, min(600, height))
-        self.configure(fg_color=BG)
+        self.minsize(min(820, width), min(500, height))
+        self.configure(fg_color=C.bg)
+        self._set_icon()
+        # customtkinter repaints the title bar after ~200 ms (dark mode) and
+        # Windows can lose the icon on the way; set it again afterwards.
+        self.after(400, self._set_icon)
 
-        self._icon_file = Path(__file__).resolve().parent / "assets" / "icon.ico"
-        if not self._icon_file.exists():
-            try:
-                icon_mod.save_ico(self._icon_file)
-            except Exception:
-                pass
-        self._set_window_icon()
-        # After ~200 ms CustomTkinter hides and shows the window to repaint the
-        # title bar dark, and Windows can lose the icon along the way. We set
-        # it again after that.
-        self.after(400, self._set_window_icon)
-
-    def _window_hwnd(self) -> int:
-        """Handle of the window the taskbar sees.
-
-        `winfo_id()` returns the Tk child window; taskbar properties must go
-        to the parent window, which `wm_frame()` gives.
-        """
-        try:
-            return int(self.wm_frame(), 16)
-        except Exception:
-            return self.winfo_id()
-
-    def _describe_for_taskbar(self) -> None:
-        """Taskbar data: what we are and how to start us again."""
-        if sys.platform != "win32":
+    def _set_icon(self) -> None:
+        if not ICON_FILE.exists():
             return
         try:
-            ok = winshell.describe_window(
-                self._window_hwnd(),
-                start_command(),
-                config.APP_NAME,
-                f"{self._icon_file},0",
-                config.APP_ID,
-            )
-            log.info("Taskbar window description: %s", ok)
-        except Exception:
-            log.debug("Could not describe the window", exc_info=True)
-        # Shortcuts get the same id, so a pinned tile and the running window
-        # are one button. Done in the background: COM can take a moment.
-        threading.Thread(target=_stamp_shortcuts, daemon=True).start()
-
-    def _set_window_icon(self) -> None:
-        if not self._icon_file.exists():
-            return
-        try:
-            # `default` also covers child windows (dialogs).
-            self.iconbitmap(default=str(self._icon_file))
-            self.iconbitmap(str(self._icon_file))
+            self.iconbitmap(default=str(ICON_FILE))
+            self.iconbitmap(str(ICON_FILE))
         except Exception:
             pass
 
-    def _build_header(self) -> None:
-        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=56)
-        bar.pack(fill="x", side="top")
-        bar.pack_propagate(False)
-
-        ctk.CTkLabel(
-            bar, text=f"  {config.APP_NAME}", text_color=TEXT,
-            font=ctk.CTkFont(size=17, weight="bold"),
-        ).pack(side="left", padx=(14, 20))
-
-        self._nav_buttons: dict[str, ctk.CTkButton] = {}
-        for key, label in (("record", t("Record")),
-                           ("recordings", t("Recordings")),
-                           ("settings", t("Settings"))):
-            button = ctk.CTkButton(
-                bar, text=label, width=96, height=32, corner_radius=8,
-                fg_color="transparent", hover_color=PANEL_LIGHT,
-                text_color=TEXT_MUTED,
-                font=ctk.CTkFont(size=13),
-                command=lambda k=key: self._show_view(k),
-            )
-            button.pack(side="left", padx=2)
-            self._nav_buttons[key] = button
-
-    def _build_views(self) -> None:
-        self._container = ctk.CTkFrame(self, fg_color=BG)
-        self._container.pack(fill="both", expand=True)
-
-        self._views = {
-            "record": self._record_view(),
-            "transcript": self._transcript_view(),
-            "recordings": self._recordings_view(),
-            "settings": self._settings_view(),
-        }
-
-    def _show_view(self, name: str) -> None:
-        for view in self._views.values():
-            view.pack_forget()
-        self._views[name].pack(fill="both", expand=True, padx=16, pady=16)
-
-        active_tab = "record" if name == "transcript" else name
-        for key, button in self._nav_buttons.items():
-            selected = key == active_tab
-            button.configure(
-                fg_color=PANEL_LIGHT if selected else "transparent",
-                text_color=TEXT if selected else TEXT_MUTED,
-            )
-        if name == "recordings":
-            self._refresh_recordings()
-
-    # --- view: record -----------------------------------------------------
-
-    def _record_view(self) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(self._container, fg_color=BG)
-
-        ctk.CTkLabel(frame, text=t("Meeting name"), text_color=TEXT_MUTED,
-                     font=ctk.CTkFont(size=12)).pack(anchor="w")
-        self._name_entry = ctk.CTkEntry(
-            frame, height=36, corner_radius=10, fg_color=PANEL,
-            border_color=PANEL_LIGHT, text_color=TEXT,
-            placeholder_text=t("e.g. Team standup"),
-        )
-        self._name_entry.pack(fill="x", pady=(4, 12))
-
-        card = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=16)
-        card.pack(fill="x", pady=(0, 12))
-
-        self._time_label = ctk.CTkLabel(
-            card, text="00:00:00", text_color=TEXT,
-            font=ctk.CTkFont(family="Consolas", size=34, weight="bold"),
-        )
-        self._time_label.pack(pady=(16, 0))
-
-        self._status_label = ctk.CTkLabel(
-            card, text=t("Ready to record"), text_color=TEXT_MUTED,
-            font=ctk.CTkFont(size=12), wraplength=460,
-        )
-        self._status_label.pack(pady=(0, 12))
-
-        # The short label matters: a longer text stretches CTkButton
-        # horizontally and the circle turns into an oval.
-        self._rec_button = ctk.CTkButton(
-            card, text="REC", width=148, height=148, corner_radius=74,
-            fg_color=RED, hover_color=RED_HOVER, text_color="#ffffff",
-            font=ctk.CTkFont(size=22, weight="bold"),
-            command=self.toggle_recording,
-        )
-        self._rec_button.pack(pady=(0, 6))
-
-        ctk.CTkLabel(
-            card, text=t("global shortcut: {shortcut}", shortcut=self._shortcut_text()),
-            text_color=TEXT_MUTED, font=ctk.CTkFont(size=11),
-        ).pack(pady=(0, 14))
-
-        self._level_bars = {}
-        for key, label in (("microphone", t("Microphone")), ("system", t("System audio"))):
-            row = ctk.CTkFrame(frame, fg_color="transparent")
-            row.pack(fill="x", pady=3)
-            ctk.CTkLabel(row, text=label, text_color=TEXT_MUTED, width=130,
-                         anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
-            bar = ctk.CTkProgressBar(row, height=10, corner_radius=5,
-                                     fg_color=PANEL, progress_color=GREEN)
-            bar.pack(side="left", fill="x", expand=True)
-            bar.set(0)
-            self._level_bars[key] = bar
-
-        language_row = ctk.CTkFrame(frame, fg_color="transparent")
-        language_row.pack(fill="x", pady=(14, 0))
-        ctk.CTkLabel(language_row, text=t("Transcription language"), text_color=TEXT_MUTED,
-                     font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(0, 6))
-        self._language_picker = ctk.CTkSegmentedButton(
-            language_row, values=list(config.LANGUAGE_LABELS.values()),
-            fg_color=PANEL, selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
-            unselected_color=PANEL, unselected_hover_color=PANEL_LIGHT,
-            text_color=TEXT, command=self._on_language_change,
-        )
-        self._language_picker.pack(fill="x")
-        self._language_picker.set(config.LANGUAGE_LABELS[self.settings["language"]])
-
-        self._notice = ctk.CTkLabel(
-            frame,
-            text=t("Tell participants that the meeting is being recorded.\n"
-                   "Use headphones — on speakers the microphone also picks up the other people."),
-            text_color=TEXT_MUTED, font=ctk.CTkFont(size=11), justify="left",
-        )
-        self._notice.pack(anchor="w", pady=(14, 0))
-        return frame
-
-    def _shortcut_text(self) -> str:
-        return (self.settings["hotkey"].replace("<", "").replace(">", "")
-                .replace("+", " + ").upper())
-
-    def _on_language_change(self, value: str) -> None:
-        for code, label in config.LANGUAGE_LABELS.items():
-            if label == value:
-                self.settings["language"] = code
-                self.settings.save()
-                return
-
-    # --- view: transcript -------------------------------------------------
-
-    def _transcript_view(self) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(self._container, fg_color=BG)
-
-        self._transcript_title = ctk.CTkLabel(
-            frame, text=t("Transcription"), text_color=TEXT,
-            font=ctk.CTkFont(size=16, weight="bold"),
-        )
-        self._transcript_title.pack(anchor="w")
-
-        self._transcript_subtitle = ctk.CTkLabel(
-            frame, text="", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12)
-        )
-        self._transcript_subtitle.pack(anchor="w", pady=(2, 12))
-
-        self._progress_bar = ctk.CTkProgressBar(
-            frame, height=12, corner_radius=6, fg_color=PANEL, progress_color=ACCENT
-        )
-        self._progress_bar.pack(fill="x")
-        self._progress_bar.set(0)
-
-        self._progress_label = ctk.CTkLabel(
-            frame, text="0%", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12)
-        )
-        self._progress_label.pack(anchor="w", pady=(6, 12))
-
-        # Summary card: inserted above the transcript once the model finishes.
-        self._summary_card = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12)
-        self._participants_label = ctk.CTkLabel(
-            self._summary_card, text="", text_color=ACCENT, anchor="w",
-            justify="left", font=ctk.CTkFont(size=12, weight="bold"), wraplength=460,
-        )
-        self._participants_label.pack(fill="x", padx=14, pady=(10, 0))
-        self._summary_label = ctk.CTkLabel(
-            self._summary_card, text="", text_color=TEXT, anchor="w",
-            justify="left", font=ctk.CTkFont(size=12), wraplength=460,
-        )
-        self._summary_label.pack(fill="x", padx=14, pady=(4, 10))
-
-        self._transcript_box = ctk.CTkTextbox(
-            frame, fg_color=PANEL, text_color=TEXT, corner_radius=12,
-            font=ctk.CTkFont(size=12), wrap="word",
-        )
-        self._transcript_box.pack(fill="both", expand=True)
-
-        buttons = ctk.CTkFrame(frame, fg_color="transparent")
-        buttons.pack(fill="x", pady=(12, 0))
-
-        self._folder_button = ctk.CTkButton(
-            buttons, text=t("Open folder"), height=36, corner_radius=10,
-            fg_color=PANEL_LIGHT, hover_color=PANEL, text_color=TEXT,
-            command=self._open_session_folder,
-        )
-        self._folder_button.pack(side="left", expand=True, fill="x", padx=(0, 6))
-
-        self._cancel_button = ctk.CTkButton(
-            buttons, text=t("Stop"), height=36, corner_radius=10,
-            fg_color=PANEL_LIGHT, hover_color=RED, text_color=TEXT,
-            command=self._cancel_transcription,
-        )
-        self._cancel_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
-        return frame
-
-    # --- view: recordings -------------------------------------------------
-
-    def _recordings_view(self) -> ctk.CTkFrame:
-        frame = ctk.CTkFrame(self._container, fg_color=BG)
-        top = ctk.CTkFrame(frame, fg_color="transparent")
-        top.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(top, text=t("Recordings"), text_color=TEXT,
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        ctk.CTkButton(top, text=t("Refresh"), width=88, height=30, corner_radius=8,
-                      fg_color=PANEL_LIGHT, hover_color=PANEL, text_color=TEXT,
-                      command=self._refresh_recordings).pack(side="right")
-
-        self._recordings_list = ctk.CTkScrollableFrame(frame, fg_color=BG)
-        self._recordings_list.pack(fill="both", expand=True)
-        return frame
-
-    def _refresh_recordings(self) -> None:
-        for child in self._recordings_list.winfo_children():
-            child.destroy()
-
-        folder = self.settings.recordings_dir
-        if not folder.exists():
-            return
-        sessions = session.list_sessions(folder)
-        if not sessions:
-            ctk.CTkLabel(self._recordings_list, text=t("No recordings yet."),
-                         text_color=TEXT_MUTED).pack(pady=20)
-            return
-
-        for session_dir in sessions[:60]:
-            self._session_card(session_dir)
-
-    @staticmethod
-    def _describe_folder_name(folder_name: str) -> tuple[str, str]:
-        """'2026-09-08_09-15_Budzet-Q4_Anna-Marek' -> ('Budzet Q4 Anna Marek', ...).
-
-        Since the model names the folder, there can be two parts after the
-        timestamp (topic and names), so we can no longer assume exactly three.
-        """
-        parts = folder_name.split("_")
-        if len(parts) >= 3 and parts[1].count("-") == 1:
-            date = f"{parts[0]} {parts[1].replace('-', ':')}"
-            return " ".join(parts[2:]).replace("-", " "), date
-        return folder_name, ""
-
-    def _session_card(self, session_dir: Path) -> None:
-        meta = session.read_meta(session_dir)
-        name, date = self._describe_folder_name(session_dir.name)
-
-        card = ctk.CTkFrame(self._recordings_list, fg_color=PANEL, corner_radius=12)
-        card.pack(fill="x", pady=4)
-
-        ctk.CTkLabel(card, text=meta.get("topic") or meta.get("name") or name,
-                     text_color=TEXT, anchor="w",
-                     font=ctk.CTkFont(size=13, weight="bold")).pack(
-            fill="x", padx=14, pady=(10, 0))
-
-        description = meta.get("date") or date
-        if meta.get("duration_s"):
-            description += (f"  ·  {format_hms(meta['duration_s'])}"
-                            f"  ·  {meta.get('device', '?')}")
-        transcript_file = session.find_file(session_dir, TRANSCRIPT_MD)
-        description += "  ·  " + (t("transcript ready") if transcript_file else t("no transcript"))
-        if meta.get("participants"):
-            description += "  ·  " + ", ".join(meta["participants"])
-        ctk.CTkLabel(card, text=description, text_color=TEXT_MUTED, anchor="w",
-                     font=ctk.CTkFont(size=11)).pack(fill="x", padx=14, pady=(2, 4))
-
-        # The summary is visible right in the list: that is what it is for.
-        summary_file = session.find_file(session_dir, session.SUMMARY_MD)
-        if meta.get("tldr"):
-            ctk.CTkLabel(card, text=meta["tldr"], text_color=TEXT, anchor="w",
-                         justify="left", wraplength=430,
-                         font=ctk.CTkFont(size=11)).pack(fill="x", padx=14, pady=(0, 6))
-
-        buttons = ctk.CTkFrame(card, fg_color="transparent")
-        buttons.pack(fill="x", padx=10, pady=(0, 10))
-        ctk.CTkButton(buttons, text=t("Folder"), width=68, height=28, corner_radius=8,
-                      fg_color=PANEL_LIGHT, hover_color=BG, text_color=TEXT,
-                      font=ctk.CTkFont(size=11),
-                      command=lambda s=session_dir: self._open(s)).pack(side="left", padx=2)
-        if transcript_file:
-            ctk.CTkButton(buttons, text=t("Transcript"), width=84, height=28, corner_radius=8,
-                          fg_color=PANEL_LIGHT, hover_color=BG, text_color=TEXT,
-                          font=ctk.CTkFont(size=11),
-                          command=lambda f=transcript_file: self._open(f)
-                          ).pack(side="left", padx=2)
-        if summary_file:
-            ctk.CTkButton(buttons, text=t("Summary"), width=108, height=28,
-                          corner_radius=8, fg_color=PANEL_LIGHT, hover_color=BG,
-                          text_color=TEXT, font=ctk.CTkFont(size=11),
-                          command=lambda f=summary_file: self._open(f)
-                          ).pack(side="left", padx=2)
-        elif meta.get("segments"):
-            ctk.CTkButton(buttons, text=t("Summarize"), width=86, height=28,
-                          corner_radius=8, fg_color=PANEL_LIGHT, hover_color=ACCENT,
-                          text_color=TEXT, font=ctk.CTkFont(size=11),
-                          command=lambda s=session_dir: self._summarize_again(s)
-                          ).pack(side="left", padx=2)
-        ctk.CTkButton(buttons, text=t("Transcribe again"), width=140, height=28,
-                      corner_radius=8, fg_color=PANEL_LIGHT, hover_color=ACCENT,
-                      text_color=TEXT, font=ctk.CTkFont(size=11),
-                      command=lambda s=session_dir: self._transcribe_again(s)
-                      ).pack(side="left", padx=2)
-
-    # --- view: settings ---------------------------------------------------
-
-    def _settings_view(self) -> ctk.CTkFrame:
-        frame = ctk.CTkScrollableFrame(self._container, fg_color=BG)
-
-        def section(title: str) -> ctk.CTkFrame:
-            ctk.CTkLabel(frame, text=title, text_color=TEXT, anchor="w",
-                         font=ctk.CTkFont(size=14, weight="bold")).pack(
-                fill="x", pady=(14, 6))
-            box = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12)
-            box.pack(fill="x")
-            return box
-
-        def field(parent, label: str) -> ctk.CTkFrame:
-            ctk.CTkLabel(parent, text=label, text_color=TEXT_MUTED, anchor="w",
-                         font=ctk.CTkFont(size=11)).pack(fill="x", padx=12, pady=(10, 2))
-            row = ctk.CTkFrame(parent, fg_color="transparent")
-            row.pack(fill="x", padx=12, pady=(0, 8))
-            return row
-
-        # Audio devices
-        box = section(t("Audio devices"))
-        self._microphone_menu = ctk.CTkOptionMenu(
-            field(box, t("Microphone")), values=[t("(default)")], fg_color=PANEL_LIGHT,
-            button_color=PANEL_LIGHT, button_hover_color=BG, text_color=TEXT,
-            dynamic_resizing=False, command=lambda _: self._save_devices(),
-        )
-        self._microphone_menu.pack(fill="x")
-        self._system_menu = ctk.CTkOptionMenu(
-            field(box, t("System audio (loopback)")), values=[t("(default)")],
-            fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT, button_hover_color=BG,
-            text_color=TEXT, dynamic_resizing=False,
-            command=lambda _: self._save_devices(),
-        )
-        self._system_menu.pack(fill="x")
-        self._tracks_menu = ctk.CTkOptionMenu(
-            field(box, t("What to record")),
-            values=[t(v) for v in config.TRACK_LABELS.values()],
-            fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT, button_hover_color=BG,
-            text_color=TEXT, dynamic_resizing=False, command=self._save_tracks,
-        )
-        self._tracks_menu.set(t(config.TRACK_LABELS[self.settings["tracks"]]))
-        self._tracks_menu.pack(fill="x")
-
-        # Transcription
-        box = section(t("Transcription"))
-        model_labels = [f"{k.split('/')[-1]} - {t(v['description'])}"
-                        for k, v in config.MODELS.items()]
-        self._model_map = dict(zip(model_labels, config.MODELS.keys(), strict=True))
-        self._model_menu = ctk.CTkOptionMenu(
-            field(box, t("Model")), values=model_labels, fg_color=PANEL_LIGHT,
-            button_color=PANEL_LIGHT, button_hover_color=BG, text_color=TEXT,
-            dynamic_resizing=False, command=self._save_model,
-        )
-        for label, repo in self._model_map.items():
-            if repo == self.settings["model"]:
-                self._model_menu.set(label)
-        self._model_menu.pack(fill="x")
-
-        self._model_label = ctk.CTkLabel(
-            box, text="", text_color=TEXT_MUTED, anchor="w",
-            font=ctk.CTkFont(size=11),
-        )
-        self._model_label.pack(fill="x", padx=12, pady=(0, 6))
-
-        self._download_button = ctk.CTkButton(
-            box, text=t("Download model"), height=32, corner_radius=8, fg_color=ACCENT,
-            hover_color=ACCENT_HOVER, text_color="#0b1220",
-            command=self._download_model,
-        )
-        self._download_button.pack(fill="x", padx=12, pady=(0, 10))
-
-        self._device_menu = ctk.CTkOptionMenu(
-            field(box, t("Compute device")), values=["GPU", "CPU"],
-            fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT, button_hover_color=BG,
-            text_color=TEXT, dynamic_resizing=False, command=self._save_device,
-        )
-        self._device_menu.pack(fill="x")
-
-        self._device_label = ctk.CTkLabel(
-            box, text="", text_color=TEXT_MUTED, anchor="w",
-            font=ctk.CTkFont(size=11),
-        )
-        self._device_label.pack(fill="x", padx=12, pady=(0, 10))
-
-        self._auto_switch = ctk.CTkSwitch(
-            box, text=t("Transcribe automatically after stopping"),
-            text_color=TEXT, progress_color=ACCENT, font=ctk.CTkFont(size=12),
-            command=self._save_auto,
-        )
-        self._auto_switch.pack(anchor="w", padx=12, pady=(0, 12))
-        if self.settings["transcribe_after_stop"]:
-            self._auto_switch.select()
-
-        # AI summary
-        box = section(t("AI summary (optional)"))
-        self._summary_switch = ctk.CTkSwitch(
-            box, text=t("Summarize after transcription"), text_color=TEXT,
-            progress_color=ACCENT, font=ctk.CTkFont(size=12),
-            command=self._save_summary_enabled,
-        )
-        self._summary_switch.pack(anchor="w", padx=12, pady=(12, 4))
-        if self.settings["summary_enabled"]:
-            self._summary_switch.select()
-
-        self._rename_switch = ctk.CTkSwitch(
-            box, text=t("Name the folder after the topic and names"), text_color=TEXT,
-            progress_color=ACCENT, font=ctk.CTkFont(size=12),
-            command=self._save_rename_folder,
-        )
-        self._rename_switch.pack(anchor="w", padx=12, pady=(0, 8))
-        if self.settings["rename_folder"]:
-            self._rename_switch.select()
-
-        llm_labels = [f"{k.split('/')[-1]} - {t(v['description'])}"
-                      for k, v in config.LLM_MODELS.items()]
-        self._llm_map = dict(zip(llm_labels, config.LLM_MODELS.keys(), strict=True))
-        self._llm_menu = ctk.CTkOptionMenu(
-            field(box, t("Language model")), values=llm_labels, fg_color=PANEL_LIGHT,
-            button_color=PANEL_LIGHT, button_hover_color=BG, text_color=TEXT,
-            dynamic_resizing=False, command=self._save_llm_model,
-        )
-        for label, repo in self._llm_map.items():
-            if repo == self.settings["summary_model"]:
-                self._llm_menu.set(label)
-        self._llm_menu.pack(fill="x")
-
-        self._llm_label = ctk.CTkLabel(
-            box, text="", text_color=TEXT_MUTED, anchor="w",
-            font=ctk.CTkFont(size=11),
-        )
-        self._llm_label.pack(fill="x", padx=12, pady=(0, 6))
-
-        self._download_llm_button = ctk.CTkButton(
-            box, text=t("Download model"), height=32, corner_radius=8, fg_color=ACCENT,
-            hover_color=ACCENT_HOVER, text_color="#0b1220",
-            command=self._download_llm_model,
-        )
-        self._download_llm_button.pack(fill="x", padx=12, pady=(0, 8))
-
-        ctk.CTkLabel(
-            box,
-            text=t("The model starts only after transcription and is released right after it —\n"
-                   "it does not stay in memory or in the background. Runs locally, offline."),
-            text_color=TEXT_MUTED, anchor="w", justify="left",
-            font=ctk.CTkFont(size=11),
-        ).pack(fill="x", padx=12, pady=(0, 12))
-
-        # Other
-        box = section(t("Other"))
-        row = field(box, t("Recordings folder"))
-        self._folder_entry = ctk.CTkEntry(
-            row, height=32, fg_color=PANEL_LIGHT, border_color=PANEL_LIGHT,
-            text_color=TEXT,
-        )
-        self._folder_entry.insert(0, str(self.settings.recordings_dir))
-        self._folder_entry.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(row, text=t("Save"), width=72, height=32, corner_radius=8,
-                      fg_color=PANEL_LIGHT, hover_color=ACCENT, text_color=TEXT,
-                      command=self._save_folder).pack(side="left", padx=(6, 0))
-
-        ui_labels = [t(v) for v in config.UI_LANGUAGE_LABELS.values()]
-        self._ui_map = dict(zip(ui_labels, config.UI_LANGUAGE_LABELS.keys(), strict=True))
-        self._ui_menu = ctk.CTkOptionMenu(
-            field(box, t("Interface language (after restart)")),
-            values=ui_labels, fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT,
-            button_hover_color=BG, text_color=TEXT, dynamic_resizing=False,
-            command=self._save_ui_language,
-        )
-        self._ui_menu.set(t(config.UI_LANGUAGE_LABELS.get(
-            self.settings["ui_language"], config.UI_LANGUAGE_LABELS["auto"])))
-        self._ui_menu.pack(fill="x")
-
-        ctk.CTkLabel(
-            box,
-            text=t("Global shortcut: {shortcut}", shortcut=self._shortcut_text()) + "\n"
-                 f"OpenVINO GenAI: {transcribe.genai_version()}  ·  {config.APP_NAME} {config.VERSION}",
-            text_color=TEXT_MUTED, anchor="w", justify="left",
-            font=ctk.CTkFont(size=11),
-        ).pack(fill="x", padx=12, pady=(4, 12))
-
-        self.after(300, self._refresh_model_status)
-        self.after(300, self._refresh_llm_status)
-        return frame
-
-    # --- settings: handlers -----------------------------------------------
-
-    def _load_devices(self) -> None:
+    def _on_callback_error(self, exc, value, trace) -> None:
+        log.error("Unhandled exception in the UI", exc_info=(exc, value, trace))
+
+    def window_handle(self, window=None) -> int:
+        """Handle of the top-level window the taskbar sees (wm_frame, not winfo_id)."""
+        window = window or self
         try:
-            devices = audio.list_devices()
-        except Exception as error:
-            log.exception("Could not enumerate audio devices")
-            self._queue.put(("error", t("Audio device error: {error}", error=error)))
+            return int(window.wm_frame(), 16)
+        except Exception:
+            return window.winfo_id()
+
+    def describe_window(self, window=None, dictation: bool = False) -> None:
+        if sys.platform != "win32" or self.smoke:
             return
-        self._queue.put(("devices", devices))
+        command = start_command() + (" --dictate" if dictation else "")
+        icon_file = DICTATE_ICON_FILE if dictation else ICON_FILE
+        ok = winshell.describe_window(self.window_handle(window), command, config.APP_NAME,
+                                      f"{icon_file},0", config.APP_ID)
+        log.info("Taskbar description of the %s window: %s", "dictation" if dictation else "main", ok)
 
-    def _apply_devices(self, devices: dict) -> None:
-        self._devices = devices
-
-        def fill(menu, device_list, selected_index):
-            labels = [t("(default)")] + [d.label for d in device_list]
-            menu.configure(values=labels)
-            selected = t("(default)")
-            for device in device_list:
-                if device.index == selected_index:
-                    selected = device.label
-            menu.set(selected)
-
-        fill(self._microphone_menu, devices["microphones"],
-             self.settings["microphone_index"])
-        fill(self._system_menu, devices["system"],
-             self.settings["system_index"])
-
-        if not devices["system"]:
-            self._status_label.configure(
-                text=t("Warning: no loopback device — system audio unavailable"),
-                text_color=RED,
-            )
-
-    def _save_devices(self) -> None:
-        def index_for(menu, device_list):
-            selected = menu.get()
-            if selected == t("(default)"):
-                return None
-            for device in device_list:
-                if device.label == selected:
-                    return device.index
-            return None
-
-        self.settings["microphone_index"] = index_for(
-            self._microphone_menu, self._devices["microphones"])
-        self.settings["system_index"] = index_for(
-            self._system_menu, self._devices["system"])
-        self.settings.save()
-
-    def _save_tracks(self, value: str) -> None:
-        for code, label in config.TRACK_LABELS.items():
-            if t(label) == value:
-                self.settings["tracks"] = code
-        self.settings.save()
-
-    def _save_model(self, value: str) -> None:
-        self.settings["model"] = self._model_map.get(value, config.DEFAULT_MODEL)
-        self.settings.save()
-        self._refresh_model_status()
-
-    def _save_device(self, value: str) -> None:
-        self.settings["device"] = value
-        self.settings.save()
-
-    def _save_auto(self) -> None:
-        self.settings["transcribe_after_stop"] = bool(self._auto_switch.get())
-        self.settings.save()
-
-    def _save_summary_enabled(self) -> None:
-        self.settings["summary_enabled"] = bool(self._summary_switch.get())
-        self.settings.save()
-
-    def _save_rename_folder(self) -> None:
-        self.settings["rename_folder"] = bool(self._rename_switch.get())
-        self.settings.save()
-
-    def _save_llm_model(self, value: str) -> None:
-        self.settings["summary_model"] = self._llm_map.get(
-            value, config.DEFAULT_LLM_MODEL)
-        self.settings.save()
-        self._refresh_llm_status()
-
-    def _save_ui_language(self, value: str) -> None:
-        self.settings["ui_language"] = self._ui_map.get(value, "auto")
-        self.settings.save()
-
-    def _save_folder(self) -> None:
-        path = Path(self._folder_entry.get().strip())
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError as error:
-            self._status_label.configure(text=t("Invalid folder: {error}", error=error),
-                                         text_color=RED)
+    def _after_start(self) -> None:
+        if self.smoke:
             return
-        self.settings["recordings_dir"] = str(path)
-        self.settings.save()
+        self.describe_window()
+        self._taskbar = winshell.TaskbarProgress(self.window_handle())
+        tasks = [
+            {"title": t("Record a meeting"), "arguments": f'"{STARTER}" --record',
+             "description": t("Start recording a meeting with Ucho"), "icon": f"{ICON_FILE},0"},
+            {"title": t("Dictate"), "arguments": f'"{STARTER}" --dictate',
+             "description": t("Open Ucho dictation"), "icon": f"{DICTATE_ICON_FILE},0"},
+        ]
+        for task in tasks:
+            task.update(program=str(_pythonw()), working_dir=str(config.PROJECT_DIR))
 
-    def _refresh_model_status(self) -> None:
-        model = self.settings["model"]
-        info = config.MODELS.get(model, {})
-        if transcribe.model_downloaded(model):
-            self._model_label.configure(
-                text=t("Model downloaded ({size})", size=info.get('size', '')), text_color=GREEN)
-            # Greyed out, so it does not look like a button waiting for a click.
-            self._download_button.configure(
-                state="disabled", text=t("Model ready"),
-                fg_color=PANEL_LIGHT, text_color_disabled=TEXT_MUTED)
-        else:
-            self._model_label.configure(
-                text=t("Model not downloaded ({size})", size=info.get('size', '')),
-                text_color=RED)
-            self._download_button.configure(
-                state="normal", text=t("Download model ({size})", size=info.get('size', '')),
-                fg_color=ACCENT, text_color="#0b1220")
+        def taskbar_setup():
+            log.info("Jump List: %s", winshell.set_jump_list(config.APP_ID, tasks))
+            _stamp_shortcuts()
+            from .settings_screen import sync_autostart
 
-        # Importing openvino takes a few seconds; we do not block the UI with it.
-        self._device_label.configure(text=t("Checking available devices..."))
-        threading.Thread(
-            target=lambda: self._queue.put(
-                ("ov_devices", transcribe.available_devices())),
-            daemon=True,
-        ).start()
+            sync_autostart(self.settings)
 
-    def _refresh_llm_status(self) -> None:
-        model = self.settings["summary_model"]
-        info = config.LLM_MODELS.get(model, {})
-        if transcribe.model_downloaded(model):
-            self._llm_label.configure(
-                text=t("Model downloaded ({size})", size=info.get('size', '')), text_color=GREEN)
-            self._download_llm_button.configure(
-                state="disabled", text=t("Model ready"),
-                fg_color=PANEL_LIGHT, text_color_disabled=TEXT_MUTED)
-        else:
-            self._llm_label.configure(
-                text=t("Model not downloaded ({size}) — transcription works without it, "
-                       "just with no summary", size=info.get('size', '')),
-                text_color=RED)
-            self._download_llm_button.configure(
-                state="normal", text=t("Download model ({size})", size=info.get('size', '')),
-                fg_color=ACCENT, text_color="#0b1220")
+        self._start_thread(taskbar_setup, "taskbar")
+        if self.options.record:
+            self.toggle_recording()
+        elif self.options.dictate:
+            self.show_dictation()
 
-    def _download_model(self) -> None:
-        model = self.settings["model"]
-        self._download_button.configure(state="disabled", text=t("Downloading..."))
+    # --- building -------------------------------------------------------------------
 
-        def job():
-            try:
-                transcribe.model_path(model, download=True)
-                self._queue.put(("model_downloaded", model))
-            except Exception as error:
-                self._queue.put(("error", t("Model download failed: {error}", error=error)))
-                self._queue.put(("model_downloaded", model))
-
-        threading.Thread(target=job, daemon=True).start()
-
-    def _download_llm_model(self) -> None:
-        model = self.settings["summary_model"]
-        self._download_llm_button.configure(state="disabled", text=t("Downloading..."))
-
-        def job():
-            try:
-                transcribe.model_path(model, download=True)
-            except Exception as error:
-                self._queue.put(
-                    ("error", t("Language model download failed: {error}", error=error)))
-            self._queue.put(("llm_downloaded", model))
-
-        threading.Thread(target=job, daemon=True).start()
-
-    # --- recording --------------------------------------------------------
-
-    def toggle_recording(self) -> None:
-        if self.recording:
-            self.stop_recording()
-        else:
-            self.start_recording()
-
-    def start_recording(self) -> None:
-        if self.recording or self.transcribing:
+    def build(self) -> None:
+        """(Re)builds the window content: wizard on first start, else the main layout."""
+        if self._body is not None:
+            self._body.destroy()
+        self._reset_listeners()
+        self._screens, self._nav, self._current = {}, {}, ""
+        self._toast = None
+        if self.dictation_window is not None:
+            self.dictation_window.destroy()
+            self.dictation_window = None
+        self._body = ctk.CTkFrame(self, fg_color=C.bg, corner_radius=0)
+        self._body.pack(fill="both", expand=True)
+        if not self.settings["setup_complete"]:
+            self._build_wizard(0, None)
             return
+        self._build_main()
+        if self.options.minimized and not self.smoke:
+            self.options.minimized = False
+            self.withdraw()
 
-        name = self._name_entry.get().strip() or t("Meeting")
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        folder = self.settings.recordings_dir / f"{stamp}_{slug(name) or 'Meeting'}"
+    def _reset_listeners(self) -> None:
+        """Screens are rebuilt; only the app's own listener survives."""
+        self.meeting.clear_listeners()
+        self.dictation.clear_listeners()
+        self.meeting.listen(self._meeting_event)
 
-        self.recorder = audio.Recorder(
-            tracks=self.settings["tracks"],
-            microphone_index=self.settings["microphone_index"],
-            system_index=self.settings["system_index"],
-        )
-        try:
-            self.recorder.start(folder)
-        except Exception as error:
-            log.exception("Could not start recording")
-            self._status_label.configure(text=str(error), text_color=RED)
-            self.recorder = None
+    def _meeting_event(self, event: str, data) -> None:
+        if event == "error":
+            self.toast(str(data), "warning", 6)
+        elif event == "summary_error":
+            log.warning("Summary skipped: %s", data)
+            self.toast(t("No summary: {reason}", reason=data), "warning", 6)
+
+    def _build_wizard(self, step: int, state: dict | None) -> None:
+        from .wizard import Wizard
+
+        Wizard(self._body, self, step, state).pack(fill="both", expand=True)
+
+    def show_wizard(self, step: int = 0, state: dict | None = None) -> None:
+        if self.settings["setup_complete"] and self._screens:
+            # "Run the setup again" from Settings.
+            self.settings["setup_complete"] = False
+        if self._body is not None:
+            self._body.destroy()
+        self._screens, self._nav = {}, {}
+        self._reset_listeners()
+        self._body = ctk.CTkFrame(self, fg_color=C.bg, corner_radius=0)
+        self._body.pack(fill="both", expand=True)
+        self._build_wizard(step, state)
+        self.show_main()
+
+    def wizard(self):
+        """The wizard frame while it is shown, else None."""
+        from .wizard import Wizard
+
+        children = self._body.winfo_children() if self._body is not None else []
+        return next((c for c in children if isinstance(c, Wizard)), None)
+
+    def finish_wizard(self) -> None:
+        self.recordings_dir_changed()
+        self.settings_changed()
+        self.build()
+        self.show("meeting")
+
+    def _build_main(self) -> None:
+        root = self._body
+        root.grid_columnconfigure(2, weight=1)
+        root.grid_rowconfigure(0, weight=1)
+        sidebar = ctk.CTkFrame(root, fg_color=C.surface, corner_radius=0, width=SIDEBAR_WIDTH)
+        sidebar.grid(row=0, column=0, sticky="ns")
+        sidebar.grid_propagate(False)
+        sidebar.grid_columnconfigure(0, weight=1)
+        ctk.CTkFrame(root, fg_color=C.border, corner_radius=0, width=1).grid(row=0, column=1, sticky="ns")
+        self._content = ctk.CTkFrame(root, fg_color=C.bg, corner_radius=0)
+        self._content.grid(row=0, column=2, sticky="nsew")
+
+        logo = ctk.CTkFrame(sidebar, fg_color="transparent")
+        logo.grid(row=0, column=0, sticky="ew", padx=18, pady=(22, 22))
+        ctk.CTkLabel(logo, text="", image=ui.mark(34)).pack(side="left")
+        ui.label(logo, "Ucho", theme.XL + 4, "bold", family="display").pack(side="left", padx=(8, 0))
+
+        items = [("meeting", t("Meeting"), "meeting")]
+        if self.settings["layout"] == "single":
+            items.append(("dictation", t("Dictation"), "mic"))
+        items += [("recordings", t("Recordings"), "list"), ("settings", t("Settings"), "settings")]
+        for i, (key, text, glyph) in enumerate(items):
+            button = ctk.CTkButton(sidebar, text=text, anchor="w", height=40,
+                                   corner_radius=theme.RADIUS_SM + 2, fg_color="transparent",
+                                   hover_color=C.hover, text_color=C.text_muted,
+                                   font=theme.font(theme.SM + 1), border_color=C.focus,
+                                   image=ui.icon(glyph, 18, C.text_muted), compound="left",
+                                   command=lambda k=key: self.show(k))
+            button.grid(row=1 + i, column=0, sticky="ew", padx=12, pady=2)
+            ui.focusable(button, button.invoke)
+            self._nav[key] = button
+        sidebar.grid_rowconfigure(10, weight=1)
+        if self.settings["layout"] == "tray":
+            ui.ghost(sidebar, t("Dictation window"), self.show_dictation, "window",
+                     color=C.text_muted, anchor="w").grid(row=11, column=0, sticky="ew", padx=12)
+
+        self._activity = ctk.CTkFrame(sidebar, fg_color=C.info_soft, corner_radius=theme.RADIUS_MD)
+        self._activity.grid_columnconfigure(0, weight=1)
+        self._activity_label = ui.label(self._activity, "", theme.XS + 1, "bold", color=C.info,
+                                        anchor="w")
+        self._activity_label.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 4))
+        self._activity_bar = ctk.CTkProgressBar(self._activity, height=6, progress_color=C.info)
+        self._activity_bar.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        for widget in (self._activity, self._activity_label, self._activity_bar):
+            widget.bind("<Button-1>", lambda _e: self.show("transcript", live=True), add="+")
+        self._activity_shown = False
+
+        privacy = ctk.CTkFrame(sidebar, fg_color="transparent")
+        privacy.grid(row=13, column=0, sticky="ew", padx=18, pady=(10, 18))
+        ctk.CTkLabel(privacy, text="", image=ui.icon("check", 14, C.success)).pack(side="left")
+        ui.muted(privacy, t("Offline. Nothing leaves this computer."), theme.XS, justify="left",
+                 wraplength=150, anchor="w").pack(side="left", padx=(6, 0))
+        self.show("meeting")
+
+    # --- navigation -------------------------------------------------------------------
+
+    def _screen(self, name: str):
+        if name not in self._screens:
+            from . import screens
+            from .settings_screen import SettingsScreen
+
+            factory = {
+                "meeting": screens.MeetingScreen, "dictation": screens.DictationScreen,
+                "recordings": screens.RecordingsScreen, "transcript": screens.TranscriptScreen,
+                "settings": SettingsScreen,
+            }[name]
+            self._screens[name] = factory(self._content, self)
+        return self._screens[name]
+
+    def show(self, name: str, **kwargs) -> None:
+        if not self.settings["setup_complete"]:
             return
-
-        self.recording = True
-        self.session_name = name
-        self.session_dir = folder
-        self.recording_start = time.time()
-
-        self._rec_button.configure(text="STOP", fg_color=PANEL_LIGHT, hover_color=RED)
-        status = t("Recording...")
-        if self.recorder.warnings:
-            status += "  (" + "; ".join(self.recorder.warnings) + ")"
-        self._status_label.configure(text=status, text_color=RED)
-        self._name_entry.configure(state="disabled")
-        self._tray.set_state(True, t("{app} - recording", app=config.APP_NAME))
-        self._show_view("record")
-
-    def stop_recording(self) -> None:
-        if not self.recording or self.recorder is None:
+        if name == "dictation" and self.settings["layout"] == "tray":
+            self.show_dictation()
             return
+        screen = self._screen(name)
+        for key, other in self._screens.items():
+            if key != name:
+                other.pack_forget()
+        screen.pack(fill="both", expand=True)
+        self._current = name
+        active = "recordings" if name == "transcript" else name
+        for key, button in self._nav.items():
+            selected = key == active
+            glyph = {"meeting": "meeting", "dictation": "mic", "recordings": "list",
+                     "settings": "settings"}[key]
+            button.configure(fg_color=C.selected if selected else "transparent",
+                             text_color=C.text if selected else C.text_muted,
+                             font=theme.font(theme.SM + 1, "bold" if selected else "normal"),
+                             image=ui.icon(glyph, 18, C.action if selected else C.text_muted))
+        screen.on_show(**kwargs)
 
-        self.recording = False
-        result = self.recorder.stop()
-        self.recorder = None
-
-        self._rec_button.configure(text="REC", fg_color=RED, hover_color=RED_HOVER)
-        self._status_label.configure(text=t("Stopped"), text_color=TEXT_MUTED)
-        self._name_entry.configure(state="normal")
-        self._tray.set_state(False)
-        for bar in self._level_bars.values():
-            bar.set(0)
-
-        files = {n: d["file"] for n, d in result["tracks"].items()}
-        if not files:
-            self._status_label.configure(text=t("Nothing was recorded."), text_color=RED)
-            return
-
-        meta = {
-            "name": self.session_name,
-            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "duration_s": result["duration_s"],
-            "model": self.settings["model"],
-            "language": self.settings["language"],
-            "microphone_device": result["tracks"].get("microphone", {}).get("device"),
-            "system_device": result["tracks"].get("system", {}).get("device"),
-            "genai": transcribe.genai_version(),
-        }
-        (result["folder"] / "meta.json").write_text(
-            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        if self.settings["transcribe_after_stop"]:
-            self._start_transcription(result["folder"], files, meta)
-        else:
-            self._show_view("recordings")
-
-    # --- transcription ----------------------------------------------------
-
-    def _transcribe_again(self, session_dir: Path) -> None:
-        files = session.audio_tracks(session_dir)
-        if not files:
-            self._status_label.configure(text=t("No audio files in this session."),
-                                         text_color=RED)
-            return
-
-        meta = session.read_meta(session_dir)
-        meta.pop("segments", None)
-        meta.setdefault("name", session_dir.name)
-        meta["model"] = self.settings["model"]
-        meta["language"] = self.settings["language"]
-        self._start_transcription(session_dir, files, meta)
-
-    def _start_transcription(self, folder: Path, files: dict, meta: dict) -> None:
-        if self.transcribing:
-            return
-
-        # Settings are read once, at start, and the app can sit in the tray for
-        # weeks. If the file changed in the meantime (by hand or from a second
-        # instance), after a recording we would reach for a stale model,
-        # including one no longer on disk. Every UI change goes to disk at
-        # once, so the file is always at least as fresh as memory.
-        self.settings.load()
-
-        if not transcribe.model_downloaded(self.settings["model"]):
-            # Without this log line there is no trace that transcription was
-            # supposed to start at all, and the window message is lost while
-            # the app sits in the tray.
-            log.warning("Transcription skipped: model %r is not downloaded",
-                        self.settings["model"])
-            self._status_label.configure(
-                text=t("The model is not downloaded — open Settings."), text_color=RED)
-            self._show_view("settings")
-            return
-
-        self.transcribing = True
-        self.session_dir = folder
-        self.cancel_transcription.clear()
-
-        self._transcript_title.configure(text=meta.get("name", folder.name))
-        self._transcript_subtitle.configure(
-            text=f"{self.settings['device']}  ·  {self.settings['model'].split('/')[-1]}")
-        self._transcript_box.delete("1.0", "end")
-        self._summary_card.pack_forget()
-        self._progress_bar.set(0)
-        self._progress_label.configure(text=t("Loading model..."))
-        self._cancel_button.configure(state="normal", text=t("Stop"))
-        self._show_view("transcript")
-
-        model = self.settings["model"]
-        device = self.settings["device"]
-        language = self.settings["language"]
-
-        def job():
-            start = time.monotonic()
-            try:
-                segments, used_device = transcribe.transcribe_session(
-                    files, model, device, language,
-                    progress=lambda fraction, text: self._queue.put(
-                        ("progress", fraction, text)),
-                    cancel=self.cancel_transcription,
-                    status=lambda text: self._queue.put(("transcription_status", text)),
-                )
-            except Exception as error:
-                log.exception("Transcription failed")
-                self._queue.put(("transcription_error", str(error)))
-                return
-
-            full = dict(meta)
-            full["device"] = used_device
-            full["transcription_time_s"] = round(time.monotonic() - start, 1)
-            try:
-                save_results(folder, segments, full)
-            except Exception as error:
-                self._queue.put(("transcription_error", t("Saving failed: {error}", error=error)))
-                return
-            # The transcript is shown right away; the summary arrives in a
-            # separate message, because the language model needs another half
-            # minute. The flag tells the view whether to keep "Stop" active.
-            self._queue.put(
-                ("transcription_done", segments, full, self._summary_expected(segments)))
-            self._summarize(folder, segments, full)
-
-        threading.Thread(target=job, daemon=True).start()
-
-    # --- summary ----------------------------------------------------------
-
-    def _summary_expected(self, segments: list[Segment]) -> bool:
-        return bool(
-            segments
-            and self.settings["summary_enabled"]
-            and transcribe.model_downloaded(self.settings["summary_model"])
-        )
-
-    def _summarize(self, folder: Path, segments: list[Segment], meta: dict,
-                   force: bool = False) -> None:
-        """Runs the local language model and tidies the session. Call from a thread!
-
-        No error in this step may spoil a finished transcript: at worst the
-        session stays without a summary and with its old name.
-        """
-        if not segments or not (force or self.settings["summary_enabled"]):
-            return
-        self.summarizing = True
-        try:
-            self._summarize_now(folder, segments, meta)
-        finally:
-            self.summarizing = False
-
-    def _summarize_now(self, folder: Path, segments: list[Segment], meta: dict) -> None:
-        model = self.settings["summary_model"]
-        if not transcribe.model_downloaded(model):
-            self._queue.put(
-                ("summary_error", t("The summary model is not downloaded — see Settings.")))
-            return
-
-        try:
-            result = summary_mod.summarize(
-                segments, model, self.settings["device"],
-                status=lambda text: self._queue.put(("transcription_status", text)),
-                cancel=self.cancel_transcription,
-            )
-        except Exception as error:
-            log.exception("Summary failed")
-            self._queue.put(("summary_error", str(error)))
-            return
-
-        if self.cancel_transcription.is_set():
-            self._queue.put(("summary_error", t("stopped")))
-            return
-        if not result:
-            self._queue.put(("summary_error", t("The model returned no summary.")))
-            return
-
-        try:
-            (folder / session.SUMMARY_MD).write_text(
-                summary_mod.as_markdown(result, meta), encoding="utf-8")
-            meta.update(result)
-            # Second save pass: transcript.md gets the summary block, meta.json
-            # the new fields. save_results is idempotent.
-            save_results(folder, segments, meta)
-        except OSError as error:
-            log.exception("Could not save the summary")
-            self._queue.put(("summary_error", t("Saving the summary: {error}", error=error)))
-            return
-
-        if self.settings["rename_folder"]:
-            folder = self._rename_session(folder, result)
-
-        self._queue.put(("summary", folder, result))
-
-    @staticmethod
-    def _rename_session(folder: Path, result: dict) -> Path:
-        """Replaces the name part with the topic and names. Returns the current path."""
-        new_name = summary_mod.folder_name(folder.name, result)
-        if not new_name:
-            return folder
-
-        target = folder.parent / new_name
-        counter = 2
-        while target.exists():
-            target = folder.parent / f"{new_name}-{counter}"
-            counter += 1
-
-        try:
-            folder.rename(target)
-        except OSError as error:
-            # Most common reason: the folder is open in Explorer. That is not a
-            # transcription error: the files are in place, only the name stays.
-            log.warning("Could not rename %s -> %s: %s",
-                        folder.name, new_name, error)
-            return folder
-
-        log.info("Session renamed: %s -> %s", folder.name, target.name)
-        return target
-
-    def _summarize_again(self, session_dir: Path) -> None:
-        """Summary on its own, without running the audio through Whisper again."""
-        if self.transcribing or self.summarizing:
-            return
-        meta = session.read_meta(session_dir)
-        segments = session.segments(meta)
-        if not segments:
-            self._status_label.configure(
-                text=t("No segments in meta.json — use “Transcribe again”."),
-                text_color=RED)
-            self._show_view("recordings")
-            return
-
-        self.summarizing = True
-        self.session_dir = session_dir
-        self.cancel_transcription.clear()
-        self._transcript_title.configure(text=meta.get("name", session_dir.name))
-        self._transcript_subtitle.configure(
-            text=self.settings["summary_model"].split("/")[-1])
-        self._progress_bar.set(1.0)
-        self._progress_label.configure(text=t("Summarizing..."))
-        self._summary_card.pack_forget()
-        self._cancel_button.configure(state="normal", text=t("Stop"))
-        self._show_transcript(segments)
-        self._show_view("transcript")
-
-        threading.Thread(
-            target=lambda: self._summarize(session_dir, segments, meta, force=True),
-            daemon=True,
-        ).start()
-
-    def _cancel_transcription(self) -> None:
-        if self.transcribing or self.summarizing:
-            self.cancel_transcription.set()
-            self._progress_label.configure(text=t("Stopping..."))
-            self._cancel_button.configure(state="disabled")
-
-    # --- UI loop ----------------------------------------------------------
-
-    def _tick(self) -> None:
-        if self.recording and self.recorder is not None:
-            self._time_label.configure(
-                text=format_hms(time.time() - self.recording_start))
-            levels = self.recorder.levels
-            for key, bar in self._level_bars.items():
-                bar.set(levels.get(key, 0.0))
-
-        while True:
-            try:
-                message = self._queue.get_nowait()
-            except queue.Empty:
-                break
-            self._handle_message(message)
-
-        self.after(100, self._tick)
-
-    def _handle_message(self, message: tuple) -> None:
-        kind = message[0]
-
-        if kind == "devices":
-            self._apply_devices(message[1])
-
-        elif kind == "transcription_status":
-            self._progress_label.configure(text=message[1])
-
-        elif kind == "ov_devices":
-            devices = message[1]
-            self._device_menu.configure(values=devices)
-            chosen = self.settings["device"]
-            self._device_menu.set(chosen if chosen in devices else devices[0])
-            self._device_label.configure(
-                text=t("Detected by OpenVINO: {list}", list=", ".join(devices)))
-
-        elif kind == "progress":
-            _, fraction, text = message
-            self._progress_bar.set(max(0.0, min(1.0, fraction)))
-            self._progress_label.configure(text=f"{int(fraction * 100)}%")
-            if text:
-                self._transcript_box.insert("end", text.strip() + "\n\n")
-                self._transcript_box.see("end")
-
-        elif kind == "transcription_done":
-            _, segments, meta, summary_expected = message
-            self.transcribing = False
-            self._progress_bar.set(1.0)
-            elapsed = meta.get("transcription_time_s", 0)
-            self._progress_label.configure(
-                text=t("Done in {time} s  ·  {device}  ·  {n} utterances",
-                       time=f"{elapsed:.0f}", device=meta.get('device', '?'),
-                       n=len(segments)))
-            self._show_transcript(segments)
-            # With a summary coming, the button stays active; otherwise there
-            # would be no way to stop the language model that is just starting.
-            if not summary_expected:
-                self._cancel_button.configure(state="disabled", text=t("Finished"))
-
-        elif kind == "transcription_error":
-            self.transcribing = False
-            self._progress_label.configure(text=t("Error: {error}", error=message[1]))
-            self._cancel_button.configure(state="disabled", text=t("Error"))
-
-        elif kind == "summary":
-            _, folder, result = message
-            # The folder may have been renamed; otherwise "Open folder" would
-            # point to a path that no longer exists.
-            self.session_dir = folder
-            self._show_summary(result)
-            self._cancel_button.configure(state="disabled", text=t("Finished"))
-
-        elif kind == "summary_error":
-            log.warning("Summary skipped: %s", message[1])
-            self._progress_label.configure(
-                text=t("{text}  ·  no summary ({reason})",
-                       text=self._progress_label.cget('text'), reason=message[1]))
-            self._cancel_button.configure(state="disabled", text=t("Finished"))
-
-        elif kind == "model_downloaded":
-            self._refresh_model_status()
-
-        elif kind == "llm_downloaded":
-            self._refresh_llm_status()
-
-        elif kind == "error":
-            self._status_label.configure(text=message[1], text_color=RED)
-
-    def _show_summary(self, result: dict) -> None:
-        if result.get("topic"):
-            self._transcript_title.configure(text=result["topic"])
-
-        header = t("Participants: {list}", list=(", ".join(result["participants"])
-                                                 if result.get("participants")
-                                                 else t("no names recognized")))
-        self._participants_label.configure(text=header)
-
-        lines = [result.get("tldr", "")]
-        if result.get("key_points"):
-            lines += [""] + [f"•  {point}" for point in result["key_points"]]
-        if result.get("decisions"):
-            lines += ["", t("Decisions:")] + [f"→  {d}" for d in result["decisions"]]
-        self._summary_label.configure(text="\n".join(lines).strip())
-
-        self._summary_card.pack(fill="x", pady=(0, 10), before=self._transcript_box)
-
-    def _show_transcript(self, segments: list[Segment]) -> None:
-        self._transcript_box.delete("1.0", "end")
-        if not segments:
-            self._transcript_box.insert("end", t("No speech was recognized.") + "\n")
-            return
-        for seg in segments:
-            self._transcript_box.insert(
-                "end", f"[{format_hms(seg.start)}] {speaker_label(seg.speaker)}: {seg.text}\n\n")
-        self._transcript_box.see("1.0")
-
-    # --- helpers ----------------------------------------------------------
-
-    def _open(self, path: Path) -> None:
-        try:
-            os.startfile(str(path))
-        except Exception as error:
-            log.warning("Could not open %s: %s", path, error)
-
-    def _open_session_folder(self) -> None:
-        if self.session_dir is not None:
-            self._open(self.session_dir)
-
-    def _show_window(self) -> None:
+    def show_main(self, screen: str | None = None) -> None:
         self.deiconify()
         self.lift()
         self.focus_force()
+        if screen:
+            self.show(screen, focus=True)
+
+    def show_dictation(self) -> None:
+        if not self.settings["setup_complete"]:
+            self.show_main()
+            return
+        if self.settings["layout"] == "single":
+            self.show_main("dictation")
+            return
+        if self.dictation_window is None or not self.dictation_window.winfo_exists():
+            from .screens import DictationWindow
+
+            self.dictation_window = DictationWindow(self)
+        self.dictation_window.show()
+
+    def sync_dictation_widgets(self) -> None:
+        panels = []
+        if "dictation" in self._screens:
+            panels.append(self._screens["dictation"].panel)
+        if self.dictation_window is not None and self.dictation_window.winfo_exists():
+            panels.append(self.dictation_window.panel)
+        for panel in panels:
+            panel.sync()
+
+    # --- actions ----------------------------------------------------------------------
+
+    def toggle_recording(self) -> None:
+        name = ""
+        if "meeting" in self._screens:
+            name = self._screens["meeting"].name.get()
+        was_recording = self.meeting.recording
+        self.meeting.toggle(name)
+        if self.state() != "withdrawn" and self.settings["setup_complete"]:
+            if was_recording and self.meeting.transcribing:
+                self.show("transcript", live=True)
+            elif not was_recording:
+                self.show("meeting")
+
+    def _on_hotkey(self, name: str) -> None:
+        if name == "record":
+            self.post(self.toggle_recording)
+        elif name == "dictate":
+            self.post(self._dictate_hotkey)
+        elif name == Hotkeys.ESCAPE:
+            self.post(self.dictation.cancel)
+
+    def _dictate_hotkey(self) -> None:
+        self.dictation.toggle()
+        # In the tray layout the small window appears without taking the focus,
+        # so the text still goes to the window you are typing in.
+        if (self.settings["layout"] == "tray" and self.dictation.recording
+                and self.settings["setup_complete"]):
+            if self.dictation_window is None or not self.dictation_window.winfo_exists():
+                from .screens import DictationWindow
+
+                self.dictation_window = DictationWindow(self)
+                self.dictation_window.withdraw()
+            _show_without_focus(self.window_handle(self.dictation_window))
+
+    def on_command(self, command: str) -> None:
+        """A second start of Ucho (shortcut, pinned tile, Jump List)."""
+        if command == "record":
+            self.show_main()
+            if not self.meeting.recording:
+                self.toggle_recording()
+        elif command == "dictate":
+            self.show_dictation()
+        else:
+            if self.settings["layout"] == "tray" and self.state() == "withdrawn" and \
+                    self.dictation_window is not None and self.dictation_window.winfo_viewable():
+                self.dictation_window.show()
+            else:
+                self.show_main()
+
+    def status_pill(self) -> tuple[str, str]:
+        m, d = self.meeting, self.dictation
+        if m.recording:
+            return t("Recording"), "recording"
+        if d.recording:
+            return t("Dictating"), "recording"
+        if m.transcribing:
+            return t("Transcribing {percent}%", percent=int(m.progress * 100)), "working"
+        if m.summarizing:
+            return t("Summarizing"), "working"
+        if d.queued:
+            return t("Recognizing"), "working"
+        return t("Ready"), "ready"
+
+    def dictation_hotkey_label(self) -> str:
+        return hotkey_label(self.settings["dictation_hotkey"])
+
+    def toast(self, text: str, style: str = "ready", seconds: float = 3.0) -> None:
+        """Short message at the bottom of the window."""
+        target = getattr(self, "_content", None) or self._body
+        if target is None or not target.winfo_exists():
+            return
+        if self._toast is None or not self._toast.winfo_exists():
+            self._toast = ctk.CTkLabel(target, text="", corner_radius=999, height=34, padx=16,
+                                       font=theme.font(theme.SM - 1, "bold"))
+        color = {"warning": C.warning}.get(style, C.text)
+        self._toast.configure(text=text, fg_color=color, text_color=C.bg)
+        self._toast.place(relx=0.5, rely=1.0, y=-24, anchor="s")
+        self._toast.lift()
+        self._toast_until = time.monotonic() + seconds
+
+    # --- settings changes ------------------------------------------------------------
+
+    def settings_changed(self) -> None:
+        """Model, device or dictation settings changed: reload what dictation keeps in memory."""
+        if not self.smoke:
+            self.dictation.preload()
+
+    def recordings_dir_changed(self) -> None:
+        self.archive = Archive(self.settings.recordings_dir)
+        try:
+            self.settings.recordings_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+
+    def set_theme(self, value: str) -> None:
+        self.settings["theme"] = value
+        self.settings.save()
+        # customtkinter re-colors the title bar by hiding and showing the window
+        # and then gives the focus back to the widget that had it; if a rebuild
+        # destroyed that widget meanwhile, Tk raises. Park the focus on the root.
+        tkinter.Misc.focus_set(self)
+        ctk.set_appearance_mode(theme.appearance_mode(value))
+
+    def set_layout(self, value: str) -> None:
+        if value == self.settings["layout"]:
+            return
+        self.settings["layout"] = value
+        self.settings.save()
+        if value == "tray" and not self.tray.running:
+            self.tray.start()
+        current = self._current or "settings"
+        self.build()
+        self.show("meeting" if current in ("dictation", "transcript") else current)
+        self.tray.refresh()
+
+    def apply_language(self) -> None:
+        used = i18n.set_language(self.settings["ui_language"])
+        log.info("Interface language: %s", used)
+
+    def set_ui_language(self, value: str) -> None:
+        self.settings["ui_language"] = value
+        self.settings.save()
+        self.apply_language()
+        self.build()
+        self.show("settings")
+
+    def set_autostart(self, enabled: bool) -> None:
+        from .settings_screen import autostart_command
+
+        self.settings["start_with_windows"] = enabled
+        self.settings.save()
+        if not self.smoke and not winshell.set_autostart(enabled, autostart_command()):
+            self.toast(t("Could not change the autostart entry."), "warning")
+
+    # --- hardware ------------------------------------------------------------------------
+
+    def load_hardware(self, callback: Callable[[], None]) -> None:
+        """Hardware profile and recommendation (OpenVINO import takes a few seconds)."""
+        if self.hardware_profile is not None:
+            callback()
+            return
+        self._hardware_waiting.append(callback)
+        if len(self._hardware_waiting) > 1:
+            return
+
+        def work():
+            try:
+                # The smoke test must not touch OpenVINO devices: an empty
+                # profile goes through the same rules.
+                profile = hardware.profile() if self.probe_hardware else hardware.HardwareProfile()
+                rec = hardware.recommend(profile)
+            except Exception:
+                log.exception("Hardware profile failed")
+                profile, rec = hardware.HardwareProfile(), None
+            if rec is None:
+                rec = hardware.recommend(profile)
+
+            def deliver():
+                self.hardware_profile, self.hardware_rec = profile, rec
+                waiting, self._hardware_waiting = self._hardware_waiting, []
+                for cb in waiting:
+                    try:
+                        cb()
+                    except Exception:
+                        log.exception("Hardware callback failed")
+            self.post(deliver)
+
+        self._start_thread(work, "hardware")
+
+    def run_benchmark(self, rec, on_done: Callable, on_error: Callable) -> None:
+        """hardware.benchmark through the engine (all Whisper models released meanwhile)."""
+        profile = self.hardware_profile
+
+        def work(job):
+            measured = hardware.benchmark(rec.model, rec.device)
+            new_rec = hardware.after_benchmark(copy.deepcopy(rec), profile, measured.speed)
+            if measured.device != rec.device:
+                new_rec.warnings.append(t("The model did not start on {device}; the measurement is for {used}.",
+                                          device=rec.device, used=measured.device))
+            return measured, new_rec
+
+        self.engine.exclusive(work, "benchmark",
+                              on_done=lambda result: self.post(lambda: on_done(result)),
+                              on_error=lambda error: self.post(lambda: on_error(error)))
+
+    # --- audio devices -------------------------------------------------------------------
+
+    def _load_devices(self) -> None:
+        try:
+            from . import audio
+
+            devices = audio.list_devices()
+        except Exception as error:
+            # No PortAudio devices (e.g. a CI runner) must not stop the app.
+            log.warning("Could not enumerate audio devices: %s", error)
+            devices = {"microphones": [], "system": [], "error": str(error)}
+        self.post(lambda: self._apply_devices(devices))
+
+    def _apply_devices(self, devices: dict) -> None:
+        self.devices = devices
+        self.audio_ok = bool(devices.get("microphones") or devices.get("system"))
+        if not self.audio_ok:
+            log.warning("No audio devices found")
+        for callback in list(self._device_callbacks):
+            try:
+                callback(devices)
+            except Exception:
+                log.exception("Device callback failed")
+
+    def on_devices(self, callback: Callable[[dict], None]) -> None:
+        self._device_callbacks.append(callback)
+        if self.devices is not None:
+            callback(self.devices)
+
+    def dictation_prepare(self) -> None:
+        try:
+            self.dictation.microphone.prepare()
+        except Exception:
+            log.warning("PortAudio did not start up front", exc_info=True)
+
+    # --- loop ------------------------------------------------------------------------------
+
+    def post(self, fn: Callable[[], None]) -> None:
+        """Runs `fn` on the UI thread (safe to call from any thread)."""
+        self._posted.put(fn)
+
+    def _start_thread(self, target: Callable, name: str) -> None:
+        thread = threading.Thread(target=target, name=name, daemon=True)
+        self._threads.append(thread)
+        thread.start()
+
+    def _tick(self) -> None:
+        for _ in range(200):
+            try:
+                fn = self._posted.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception:
+                log.exception("UI callback failed")
+        try:
+            self._update()
+        except Exception:
+            log.exception("UI update failed")
+        self.after(TICK_MS, self._tick)
+
+    def _update(self) -> None:
+        self.dictation.check_limit()
+        screen = self._screens.get(self._current)
+        if screen is not None and self.state() != "withdrawn":
+            screen.tick()
+        if self.dictation_window is not None and self.dictation_window.winfo_exists():
+            self.dictation_window.tick()
+        if self._toast is not None and self._toast.winfo_exists() and time.monotonic() > self._toast_until:
+            self._toast.place_forget()
+        self._update_activity()
+        active = self.meeting.recording or self.dictation.recording
+        self.tray.set_state(active, t("{app} - recording", app=config.APP_NAME) if active else None)
+        if self._taskbar is not None:
+            m = self.meeting
+            if active:
+                self._taskbar.set(winshell.TaskbarProgress.ERROR, 100)
+            elif m.transcribing:
+                self._taskbar.set(winshell.TaskbarProgress.NORMAL, max(1, int(m.progress * 100)))
+            elif m.summarizing or self.dictation.queued:
+                self._taskbar.set(winshell.TaskbarProgress.INDETERMINATE)
+            else:
+                self._taskbar.set(winshell.TaskbarProgress.NONE)
+
+    def _update_activity(self) -> None:
+        if not self._screens or not hasattr(self, "_activity") or not self._activity.winfo_exists():
+            return
+        m = self.meeting
+        busy = m.busy and self._current != "transcript"
+        if busy:
+            text, _style = self.status_pill()
+            self._activity_label.configure(text=text)
+            if m.transcribing:
+                self._activity_bar.configure(mode="determinate")
+                self._activity_bar.set(m.progress)
+            if not self._activity_shown:
+                self._activity.grid(row=12, column=0, sticky="ew", padx=12, pady=(8, 0))
+                self._activity_shown = True
+        elif self._activity_shown:
+            self._activity.grid_forget()
+            self._activity_shown = False
+
+    # --- closing -------------------------------------------------------------------------
 
     def _on_close(self) -> None:
-        if self.settings["tray"]:
+        if self.tray.running and (self.settings["tray"] or self.settings["layout"] == "tray"):
             self.withdraw()
         else:
             self.quit_app()
 
     def quit_app(self) -> None:
-        if self.recording:
-            # Do not lose a recording in progress: close the files properly.
-            self.stop_recording()
-        self.cancel_transcription.set()
-        self._hotkey.stop()
-        self._tray.stop()
-        self.settings.save()
-        self.destroy()
+        log.info("Quit")
+        self.shutdown()
+        self.quit()
+
+    def shutdown(self) -> None:
+        """Stops recording, hotkeys, tray and engine. Safe to call twice."""
+        if getattr(self, "_shut_down", False):
+            return
+        self._shut_down = True
+        for step in (self.meeting.quit, self.dictation.quit, self.hotkeys.stop, self.tray.stop,
+                     lambda: self.engine.stop(timeout=5.0), self.settings.save):
+            try:
+                step()
+            except Exception:
+                log.exception("Shutdown step failed")
+        for thread in self._threads:
+            thread.join(timeout=5.0)
+
+    def close(self) -> None:
+        """Destroys the window after mainloop returned, without stray Tcl callbacks."""
+        try:
+            for pending in self.tk.call("after", "info"):
+                self.after_cancel(pending)
+        except Exception:
+            pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
+# --- helpers --------------------------------------------------------------------------------
+
+STARTER = config.PROJECT_DIR / "ucho.pyw"
+
+
+def _pythonw() -> Path:
+    interpreter = Path(sys.executable)
+    windowless = interpreter.with_name("pythonw.exe")
+    return windowless if windowless.exists() else interpreter
 
 
 def start_command() -> str:
-    """Command the taskbar uses to bring the app back from a pinned tile.
+    """Command the taskbar uses to start the app again from a pinned tile.
 
-    Deliberately `ucho.pyw`, not `-m ucho`: the tile starts without the project
-    working directory, and the script adds it to `sys.path` itself.
+    Deliberately `ucho.pyw`, not `-m ucho`: the tile starts without the
+    project working directory, and the script adds it to `sys.path` itself.
     """
-    interpreter = Path(sys.executable)
-    windowless = interpreter.with_name("pythonw.exe")
-    if windowless.exists():
-        interpreter = windowless
-    starter = config.PROJECT_DIR / "ucho.pyw"
-    return f'"{interpreter}" "{starter}"'
+    return f'"{_pythonw()}" "{STARTER}"'
+
+
+def _last_dictation() -> str:
+    from .dictate import last_text_from_log
+
+    return last_text_from_log()
 
 
 def _stamp_shortcuts() -> None:
+    """Our shortcuts get the AppUserModelID, so a pinned tile and the window are one button."""
     for shortcut in winshell.shortcut_paths():
         if shortcut.exists():
             log.info("Shortcut %s id: %s", shortcut.name,
                      winshell.set_shortcut_app_id(shortcut, config.APP_ID))
+
+
+def _work_area() -> tuple[int, int]:
+    """Size of the primary monitor without the taskbar, in physical pixels."""
+    if sys.platform != "win32":
+        return 0, 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        rect = wintypes.RECT()
+        ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA
+        return rect.right - rect.left, rect.bottom - rect.top
+    except Exception:
+        return 0, 0
+
+
+def _show_without_focus(hwnd: int) -> None:
+    if sys.platform == "win32" and hwnd:
+        import ctypes
+
+        ctypes.windll.user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
 
 
 def _set_app_id() -> None:
@@ -1291,7 +806,27 @@ def _set_app_id() -> None:
         log.debug("Could not set AppUserModelID", exc_info=True)
 
 
-def run() -> None:
+class _ErrorCounter(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def _install_excepthooks() -> None:
+    def thread_hook(args):
+        log.error("Unhandled exception in thread %s", args.thread.name if args.thread else "?",
+                  exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    threading.excepthook = thread_hook
+
+
+def run(argv: list[str] | None = None) -> int:
+    options = parse_args(argv)
+    if options.smoke_test is not None:
+        return smoke_test(options)
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -1299,7 +834,96 @@ def run() -> None:
         filemode="a",
         encoding="utf-8",
     )
-    used = i18n.set_language(config.Settings()["ui_language"])
-    log.info("Start %s %s (UI: %s)", config.APP_NAME, config.VERSION, used)
+    _install_excepthooks()
+    command = "record" if options.record else "dictate" if options.dictate else "show"
+    instance = SingleInstance()
+    if not instance.acquire():
+        log.info("Ucho already runs; passing on: %s", command)
+        instance.signal(command)
+        return 0
+    settings = config.Settings()
+    used = i18n.set_language(settings["ui_language"])
+    log.info("Start %s %s (UI: %s, layout: %s)", config.APP_NAME, config.VERSION, used,
+             settings["layout"])
     _set_app_id()
-    App().mainloop()
+    config.prepare_dirs(settings)
+    app = App(settings, options)
+    instance.listen(lambda c: app.post(lambda: app.on_command(c)))
+    try:
+        app.mainloop()
+    finally:
+        app.shutdown()
+        instance.close()
+        app.close()
+    return 0
+
+
+def smoke_test(options: Options) -> int:
+    """Builds the full UI with a temporary settings file and recordings folder.
+
+    No audio capture (devices are only listed) and no model load. Walks
+    through the wizard, every screen, both layouts and both themes, then
+    exits: 0 when nothing logged an error, 1 otherwise.
+    """
+    seconds = max(1.0, options.smoke_test or 3.0)
+    counter = _ErrorCounter()
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger().addHandler(counter)
+    _install_excepthooks()
+    with tempfile.TemporaryDirectory(prefix="ucho-smoke-") as folder:
+        root = Path(folder)
+        recordings = root / "recordings"
+        _synthetic_session(recordings)
+        (root / "settings.json").write_text(json.dumps({"recordings_dir": str(recordings),
+                                                        "ui_language": "en"}), encoding="utf-8")
+        settings = config.Settings(root / "settings.json")
+        i18n.set_language(settings["ui_language"])
+        app = App(settings, options)
+        session_dir = next(recordings.iterdir())
+        steps: list[Callable[[], None]] = [
+            lambda: app.show_wizard(1), lambda: app.show_wizard(2), lambda: app.show_wizard(3),
+            lambda: app.wizard().finish(),
+            lambda: app.show("dictation"), lambda: app.show("recordings"),
+            lambda: app.show("transcript", folder=session_dir, query="budget"),
+            lambda: app.show("settings"),
+            lambda: app.set_theme("dark"), lambda: app.show("meeting"),
+            lambda: app.set_layout("tray"), lambda: app.show_dictation(),
+            lambda: app.set_theme("light"), lambda: app.set_layout("single"),
+        ]
+        delay = int(seconds * 1000 / (len(steps) + 1))
+        for i, step in enumerate(steps, start=1):
+            app.after(delay * i, step)
+        app.after(int(seconds * 1000) + 200, app.quit_app)
+        started = time.monotonic()
+        try:
+            app.mainloop()
+        finally:
+            app.shutdown()
+            app.close()
+        log.info("Smoke test finished in %.1f s", time.monotonic() - started)
+    errors = [r for r in counter.records if r.levelno >= logging.ERROR]
+    for record in errors:
+        print(f"SMOKE TEST ERROR: {record.getMessage()}", file=sys.stderr)
+    print("Smoke test: " + ("FAILED" if errors else "OK"), file=sys.stderr)
+    return 1 if errors else 0
+
+
+def _synthetic_session(recordings: Path) -> None:
+    """One made-up meeting for the smoke test (no real data)."""
+    folder = recordings / "2026-01-05_10-00_Budget-review"
+    folder.mkdir(parents=True)
+    meta = {
+        "name": "Budget review", "date": "2026-01-05 10:00", "duration_s": 754,
+        "tldr": "The team agreed on the Q1 budget and a second supplier quote.",
+        "segments": [
+            {"start": 5, "end": 9, "text": "Let us start with the budget for the first quarter.",
+             "speaker": "me"},
+            {"start": 12, "end": 18, "text": "The supplier raised the price by ten percent.",
+             "speaker": "meeting"},
+        ],
+    }
+    (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+__all__ = ["App", "Options", "run", "smoke_test", "start_command"]

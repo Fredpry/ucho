@@ -18,7 +18,6 @@ Ucho's own code is Apache-2.0. The installer downloads the components below; the
 | customtkinter | 6.0.0 | MIT (PyPI classifier; the metadata license field says CC0-1.0) |
 | pillow | 13.0.0 | MIT-CMU |
 | pystray | 0.19.5 | LGPL-3.0 |
-| pynput | 1.8.2 | LGPL-3.0 |
 
 The LGPL libraries are installed as separate, unmodified packages in a normal virtual environment and imported at run time, so you can replace them with any compatible version.
 
@@ -27,7 +26,7 @@ The LGPL libraries are installed as separate, unmodified packages in a normal vi
 | Model | Used for | License |
 |---|---|---|
 | OpenVINO/whisper-large-v3-int8-ov (default) | transcription | Apache-2.0 |
-| OpenVINO/whisper-large-v3-fp16-ov | transcription (default in Dictate) | Apache-2.0 |
+| OpenVINO/whisper-large-v3-fp16-ov | dictation (separate model, recommended with 16 GB RAM or more) | Apache-2.0 |
 | OpenVINO/whisper-large-v3-turbo-int8-ov | transcription, optional | MIT |
 | OpenVINO/whisper-large-v3-turbo-int4-ov | transcription, optional | MIT |
 | OpenVINO/Qwen3-8B-int4-ov | summaries, optional | Apache-2.0 |
