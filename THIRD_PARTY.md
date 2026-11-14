@@ -16,7 +16,7 @@ Ucho's own code is Apache-2.0. The installer downloads the components below; the
 | soundfile (Windows wheel bundles libsndfile, LGPL-2.1) | 0.14.0 | BSD-3-Clause |
 | numpy | 2.5.3 | BSD-3-Clause and others (0BSD, MIT, Zlib, CC0-1.0) |
 | customtkinter | 6.0.0 | MIT (PyPI classifier; the metadata license field says CC0-1.0) |
-| pillow | 12.3.0 | MIT-CMU |
+| pillow | 13.0.0 | MIT-CMU |
 | pystray | 0.19.5 | LGPL-3.0 |
 | pynput | 1.8.2 | LGPL-3.0 |
 
