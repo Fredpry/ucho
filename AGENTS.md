@@ -29,6 +29,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/screens.py`, `ucho/settings_screen.py`, `ucho/wizard.py` | Screens: Meeting, Dictation (+ small window), Recordings with search, Transcript; Settings with the Hardware panel; first-run wizard |
 | `ucho/theme.py`, `ucho/ui.py` | Theme from `design/tokens.json` (light/dark pairs), fonts, WCAG checks; components (buttons, status pill, PIL-drawn record button, transcript text) and keyboard focus (`ui.focusable`) |
 | `ucho/archive.py` | Archive listing and full-text search (SQLite FTS5), shared by the recordings list and the MCP server |
+| `ucho/retention.py` | Deleting a session folder and the audio retention setting. Every path goes through `session_folder()` (a direct, non-link child of the recordings folder); logs carry counts, never names |
 | `ucho/hotkeys.py`, `ucho/instance.py` | Global hotkeys via `RegisterHotKey` (busy hotkeys are reported, not fatal); single instance via a named mutex and events |
 | `ucho/audio.py` | Two-track recording (PyAudioWPatch WASAPI loopback), resampling to 16 kHz, incremental FLAC |
 | `ucho/transcribe.py` | Whisper via OpenVINO GenAI: silence cutting, per-chunk language detection restricted to `config.LANGUAGES`, GPU to CPU fallback; `create_engine` picks Whisper or Parakeet for a model id |
