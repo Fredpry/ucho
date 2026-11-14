@@ -14,7 +14,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, hardware, i18n, theme, transcribe, ui, winshell
+from . import config, hardware, i18n, retention, theme, transcribe, ui, winshell
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .screens import PAD, Screen, header, open_path
@@ -490,7 +490,7 @@ class SettingsScreen(Screen):
     # --- storage ------------------------------------------------------------------------
 
     def _build_storage(self) -> None:
-        s = self._section(t("Recordings folder"))
+        s = self._section(t("Storing recordings"))
 
         def folder(master):
             row = ctk.CTkFrame(master, fg_color="transparent")
@@ -508,7 +508,41 @@ class SettingsScreen(Screen):
         self.folder_note = ui.muted(holder, "", theme.XS + 1, anchor="w", justify="left", wraplength=620)
         self.folder_note.pack(anchor="w", fill="x", pady=(6, 0))
         self._folder_warning()
+
+        current = retention.retention_days(self.settings["audio_retention_days"])
+        choices = list(retention.RETENTION_CHOICES)
+        if current not in choices:
+            choices.append(current)  # a value set by hand in settings.json
+        self.retention_labels = {(t("{n} days", n=d) if d else t("Never")): d for d in choices}
+        self.retention_current = current
+        self.retention = s.row(t("Delete audio after"), lambda m: ui.option_menu(
+            m, list(self.retention_labels), self._retention_label(current), self._retention, width=200),
+            t("Only the audio files of recordings that already have a transcript. Transcripts and "
+              "summaries stay. Ucho checks this at start and once a day."))
         s.end()
+
+    def _retention_label(self, days: int) -> str:
+        return next(label for label, d in self.retention_labels.items() if d == days)
+
+    def _retention(self, value: str) -> None:
+        days = self.retention_labels.get(value, 0)
+        if days == self.retention_current:
+            return
+        if days:
+            # Shortening the period deletes at once: say how much, and let the user back out.
+            expired = retention.select_expired(self.settings.recordings_dir, days,
+                                               active=self.app.meeting.is_active)
+            if expired and not ui.confirm(
+                    self, t("Delete old audio?"),
+                    t("Recordings with a transcript whose audio is older than {days} days: {n}. "
+                      "Their audio files will be deleted now. Transcripts and summaries stay. "
+                      "This cannot be undone.", days=days, n=len(expired)),
+                    t("Delete audio"), destructive=True):
+                self.retention.set(self._retention_label(self.retention_current))
+                return
+        self.retention_current = days
+        self._save("audio_retention_days", days)
+        self.app.run_retention()
 
     def _browse(self) -> None:
         from tkinter import filedialog

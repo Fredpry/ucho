@@ -45,6 +45,7 @@ GLYPHS = {
     "summary": "\uE8BD",     # Message
     "speed": "\uEC4A",       # Speed high
     "close": "\uE711",
+    "delete": "\uE74D",
 }
 _icon_font_path: str | None = None
 _icon_cache: dict = {}
@@ -231,6 +232,18 @@ def secondary(master, text: str, command: Callable, icon_name: str | None = None
                            fg_color=C.surface, hover_color=C.hover, text_color=C.text,
                            border_color=C.border, border_width=1,
                            image=icon(icon_name, 15, C.text) if icon_name else None, **kwargs)
+    focusable(button, button.invoke)
+    return button
+
+
+def danger(master, text: str, command: Callable, icon_name: str | None = None,
+           height: int = 34, **kwargs) -> ctk.CTkButton:
+    """Secondary button for a destructive action: text and icon in the recording (clay) color."""
+    button = ctk.CTkButton(master, text=text, command=command, height=height,
+                           corner_radius=theme.RADIUS_SM + 2, font=font(theme.SM - 1),
+                           fg_color=C.surface, hover_color=C.recording_soft, text_color=C.recording,
+                           border_color=C.border, border_width=1,
+                           image=icon(icon_name, 15, C.recording) if icon_name else None, **kwargs)
     focusable(button, button.invoke)
     return button
 
@@ -603,8 +616,12 @@ class TranscriptText(ctk.CTkTextbox):
 # --- dialogs --------------------------------------------------------------------------------
 
 
-def confirm(parent, title: str, message: str, ok_text: str) -> bool:
-    """Small modal dialog in the app style. True when the user confirms."""
+def confirm(parent, title: str, message: str, ok_text: str, destructive: bool = False) -> bool:
+    """Small modal dialog in the app style. True when the user confirms.
+
+    destructive: the confirm button is drawn in the recording (clay) color.
+    Cancel has the focus either way, so Enter does not confirm by accident.
+    """
     from .i18n import t
 
     root = parent.winfo_toplevel()
@@ -626,7 +643,10 @@ def confirm(parent, title: str, message: str, ok_text: str) -> bool:
         dialog.grab_release()
         dialog.destroy()
 
-    primary(buttons, ok_text, lambda: close(True), width=10).pack(side="right")
+    ok = primary(buttons, ok_text, lambda: close(True), width=10)
+    if destructive:
+        ok.configure(fg_color=C.recording, hover_color=C.recording_hover)
+    ok.pack(side="right")
     cancel = secondary(buttons, t("Cancel"), lambda: close(False), width=10, height=38)
     cancel.pack(side="right", padx=(0, 8))
     dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))

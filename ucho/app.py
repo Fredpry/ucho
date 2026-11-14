@@ -31,7 +31,7 @@ from typing import Callable
 
 import customtkinter as ctk
 
-from . import config, hardware, i18n, theme, ui, winshell
+from . import config, hardware, i18n, retention, theme, ui, winshell
 from .archive import Archive
 from .dictation import DictationController
 from .engine import Engine
@@ -49,6 +49,12 @@ ICON_FILE = Path(__file__).resolve().parent / "assets" / "icon.ico"
 DICTATE_ICON_FILE = Path(__file__).resolve().parent / "assets" / "dictate.ico"
 TICK_MS = 66
 SIDEBAR_WIDTH = 212
+# Audio retention runs 20 s after start (the window and the dictation preload
+# come first), then about once a day. The hourly check only compares two
+# numbers; a single 24 h timer could drift a lot across sleep and hibernation.
+RETENTION_FIRST_MS = 20_000
+RETENTION_CHECK_MS = 3_600_000
+RETENTION_INTERVAL_S = 23.5 * 3600
 
 
 @dataclass
@@ -147,6 +153,8 @@ class App(ctk.CTk):
         self.after(TICK_MS, self._tick)
         # The window must exist in the system before it is described for the taskbar.
         self.after(600, self._after_start)
+        self._retention_last: float | None = None  # time.monotonic() of the last run
+        self.after(RETENTION_FIRST_MS, self._retention_tick)
 
     # --- window -------------------------------------------------------------------
 
@@ -509,6 +517,52 @@ class App(ctk.CTk):
             self.settings.recordings_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+
+    # --- audio retention -------------------------------------------------------------
+
+    def _retention_tick(self) -> None:
+        last = self._retention_last
+        if last is None or time.monotonic() - last >= RETENTION_INTERVAL_S:
+            self.run_retention()
+        self.after(RETENTION_CHECK_MS, self._retention_tick)
+
+    def run_retention(self) -> None:
+        """Removes expired audio (Settings: "Delete audio after"); a no-op when set to never.
+
+        The folders are selected on a worker thread (it reads every meta.json);
+        the files are deleted on the UI thread, where each session is checked
+        again against the meeting controller, so a transcription started in the
+        meantime is never touched.
+        """
+        self._retention_last = time.monotonic()
+        days = retention.retention_days(self.settings["audio_retention_days"])
+        if not days:
+            return
+        folder = self.settings.recordings_dir
+
+        def work():
+            try:
+                selected = retention.select_expired(folder, days)
+            except Exception as error:
+                # The type only: messages of file errors contain paths, i.e. meeting titles.
+                log.error("Audio retention: selection failed (%s)", type(error).__name__)
+                return
+            if selected:
+                self.post(lambda: self._apply_retention(folder, days, selected))
+
+        self._start_thread(work, "retention")
+
+    def _apply_retention(self, folder: Path, days: int, selected: list[Path]) -> None:
+        if folder != self.settings.recordings_dir:
+            return  # the folder was changed in the meantime; the next run uses the new one
+        try:
+            sessions, _files = retention.apply_retention(folder, days, active=self.meeting.is_active,
+                                                         folders=selected)
+        except Exception as error:
+            log.error("Audio retention failed (%s)", type(error).__name__)
+            return
+        if sessions and self._current == "recordings":
+            self._screens["recordings"].search()
 
     def set_theme(self, value: str) -> None:
         self.settings["theme"] = value
