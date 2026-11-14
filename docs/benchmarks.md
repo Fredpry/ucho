@@ -64,6 +64,19 @@ Limits: a synthetic voice is clean, steady and has no accent, background noise o
 .\.venv\Scripts\python.exe tools\benchmark_wer.py C:\bench\tts-pl --language pl --model OpenVINO/whisper-large-v3-fp16-ov
 ```
 
+## OpenVINO 2026.3.1 → 2026.4.1 (v0.2)
+
+Checked before accepting the Dependabot update, same laptop, GPU, same 20 synthetic sentences:
+
+| | OpenVINO 2026.3.1 | OpenVINO 2026.4.1 |
+|---|---|---|
+| WER / CER (large-v3 INT8) | 3.2 % / 3.3 % | 3.2 % / 3.3 % |
+| Processing, 95.5 s of audio | 12.2 s (7.8x) | 12.1 s (7.9x) |
+| Dictation during a 3-minute meeting, max / median | | 2.3 s / 1.8 s |
+| `python -m ucho --smoke-test` | OK | OK |
+
+The text is identical, so the update was accepted (with numpy 2.5.4).
+
 ## 1. Hardware matrix
 
 ### Laptops

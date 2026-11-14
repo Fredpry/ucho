@@ -6,15 +6,15 @@ Ucho's own code is Apache-2.0. The installer downloads the components below; the
 
 | Package | Version | License |
 |---|---|---|
-| openvino | 2026.3.1 | Apache-2.0 |
-| openvino-genai | 2026.3.1.0 | Apache-2.0 |
-| openvino-tokenizers | 2026.3.1.0 | Apache-2.0 |
+| openvino | 2026.4.1 | Apache-2.0 |
+| openvino-genai | 2026.4.1.0 | Apache-2.0 |
+| openvino-tokenizers | 2026.4.1.0 | Apache-2.0 |
 | openvino-telemetry (dependency of openvino, not used by Ucho) | 2025.2.0 | Apache-2.0 |
 | huggingface_hub | 1.30.0 | Apache-2.0 |
 | PyAudioWPatch (bundles PortAudio, MIT) | 0.2.12.8 | Apache-2.0 |
 | soxr | 1.1.0 | LGPL-2.1-or-later |
 | soundfile (Windows wheel bundles libsndfile, LGPL-2.1) | 0.14.0 | BSD-3-Clause |
-| numpy | 2.5.3 | BSD-3-Clause and others (0BSD, MIT, Zlib, CC0-1.0) |
+| numpy | 2.5.4 | BSD-3-Clause and others (0BSD, MIT, Zlib, CC0-1.0) |
 | customtkinter | 6.0.0 | MIT (PyPI classifier; the metadata license field says CC0-1.0) |
 | pillow | 13.0.0 | MIT-CMU |
 | pystray | 0.19.5 | LGPL-3.0 |
