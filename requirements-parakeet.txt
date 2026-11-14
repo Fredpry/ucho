@@ -1,0 +1,4 @@
+# Optional Parakeet speech-to-text backend (install.ps1 -WithParakeet), see ucho/parakeet.py.
+# Versions tested on Windows 11, Python 3.12 (November 2026). CPU-only wheels, bundle ONNX Runtime.
+sherpa-onnx==2.0.1
+sherpa-onnx-core==2.0.1

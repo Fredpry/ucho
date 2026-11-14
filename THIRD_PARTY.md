@@ -19,6 +19,13 @@ Ucho's own code is Apache-2.0. The installer downloads the components below; the
 | pillow | 13.0.0 | MIT-CMU |
 | pystray | 0.19.5 | LGPL-3.0 |
 
+Optional, only with `install.ps1 -WithParakeet` (`requirements-parakeet.txt`):
+
+| Package | Version | License |
+|---|---|---|
+| sherpa-onnx (k2-fsa) | 2.0.1 | Apache-2.0 |
+| sherpa-onnx-core (native libraries of sherpa-onnx; bundles ONNX Runtime, MIT) | 2.0.1 | Apache-2.0 |
+
 The LGPL libraries are installed as separate, unmodified packages in a normal virtual environment and imported at run time, so you can replace them with any compatible version.
 
 ## Models (Hugging Face, pinned revisions in `ucho/config.py`, `REVISIONS`)
@@ -33,7 +40,12 @@ The LGPL libraries are installed as separate, unmodified packages in a normal vi
 | OpenVINO/Qwen3-4B-int4-ov | summaries, optional | Apache-2.0 |
 | OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov | summaries, optional | Apache-2.0 |
 
+| csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3 | transcription and dictation, optional (Parakeet backend, only with `-WithParakeet`) | CC BY 4.0 |
+| csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 | measurements only (`tools/benchmark_wer.py`), not offered in the app | CC BY 4.0 |
+
 Whisper was created by OpenAI; the OpenVINO conversions are published by Intel. Qwen models are by the Qwen team, Alibaba Cloud.
+
+**Parakeet attribution (CC BY 4.0).** The Parakeet models are [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) ("ready for commercial/non-commercial use" per the model card). The ONNX exports Ucho downloads were made by the sherpa-onnx project, unmodified by Ucho. NVIDIA does not endorse Ucho. CC BY 4.0 lets anyone use and redistribute the weights, also commercially, as long as this credit and the license link are kept.
 
 ## Runtime
 

@@ -29,7 +29,7 @@ MODE_LABELS = config.DICTATION_MODE_LABELS
 
 def model_label(repo: str) -> str:
     info = config.MODELS.get(repo, {})
-    return f"{repo.split('/')[-1]}  ({info.get('size', '?')})"
+    return f"{info.get('name', repo.split('/')[-1])}  ({info.get('size', '?')})"
 
 
 def short_model(repo: str) -> str:
@@ -174,7 +174,7 @@ class SettingsScreen(Screen):
             m, devices, current if current in devices else "GPU", self._device),
             t("NPU is experimental: the first start compiles the model for about 3 minutes. "
               "AUTO lets OpenVINO choose."))
-        model_labels = {model_label(k): k for k in config.MODELS}
+        model_labels = {model_label(k): k for k in transcribe.offered_models()}
         self.model_labels = model_labels
         def model_row(master):
             box = ctk.CTkFrame(master, fg_color="transparent")
@@ -299,10 +299,14 @@ class SettingsScreen(Screen):
         model = self.settings["model"]
         size = config.MODELS.get(model, {}).get("size", "")
         self.download.pack_forget()
+        # Parakeet (optional backend) ignores the device setting.
+        cpu_only = config.MODELS.get(model, {}).get("backend") == "parakeet"
+        note = " " + t("Runs on the CPU only.") if cpu_only else ""
         if transcribe.model_downloaded(model):
-            self.model_state.configure(text=t("Model downloaded ({size})", size=size), text_color=C.success)
+            self.model_state.configure(text=t("Model downloaded ({size})", size=size) + note,
+                                       text_color=C.success)
         else:
-            self.model_state.configure(text=t("Model not downloaded ({size})", size=size),
+            self.model_state.configure(text=t("Model not downloaded ({size})", size=size) + note,
                                        text_color=C.warning)
             self.download.configure(text=t("Download model ({size})", size=size), state="normal")
             self.download.pack(side="left", padx=(12, 0))
@@ -340,7 +344,7 @@ class SettingsScreen(Screen):
                                             "The text goes where the cursor is.",
                                             shortcut=hotkey_label(self.settings["dictation_hotkey"])))
         options = {t("Same as transcription (one model in memory)"): config.DICTATION_SHARED}
-        options.update({model_label(k): k for k in config.MODELS})
+        options.update({model_label(k): k for k in transcribe.offered_models()})
         current = self.settings["dictation_model"]
         if current == self.settings["model"] or current == config.DICTATION_SHARED:
             current_label = next(iter(options))

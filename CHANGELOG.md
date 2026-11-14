@@ -18,8 +18,12 @@
 - `python -m ucho --dictate | --record | --minimized`.
 - `tools/screenshots.py` (window screenshots on synthetic data) and `tools/benchmark_engine.py` (dictation latency during a transcription and a 20-sentence TTS set for WER, synthetic speech from the offline Windows voice). Results in `docs/benchmarks.md`.
 - `ucho/archive.py`: the archive search of the MCP server, now shared with the app.
+- **Optional Parakeet backend** (W6): NVIDIA Parakeet TDT 0.6B v3 (fp32 ONNX, CC BY 4.0) through sherpa-onnx, CPU only. Not installed by default: `install.ps1 -WithParakeet` adds the pinned `sherpa-onnx` package (`requirements-parakeet.txt`); the model (~2.5 GB, pinned revision) is then offered in Settings → Hardware and downloaded on demand. Same transcript segments as Whisper, so the transcript files, search and MCP server do not change. Measured on synthetic Polish speech: within 1 pp WER of Whisper large-v3 and 3 to 10 times faster on the CPU, but clearly worse with English phrases in Polish sentences; never recommended automatically, Whisper stays the default. The int8 export was rejected (7.6 % vs 2.7 % WER). Details in `docs/benchmarks.md`.
+- `tools/benchmark_wer.py --backend parakeet [--threads N]`; the JSON report also records the backend and the peak working set.
 
 ### Changed
+
+- Models can be downloaded partially (`config.DOWNLOAD_PATTERNS`, used by `transcribe.model_path` both for the download and the offline check).
 
 - `dictate.pyw` and the *Ucho Dictate* shortcut start Ucho with dictation open (or open it in the running Ucho). The installer creates *Ucho* and *Ucho Dictate* shortcuts on the Desktop and in the Start menu, both with the Ucho AppUserModelID.
 - Dictation settings live in `settings.json` (`dictation_language`, `dictation_enter`, `dictation_mode`, `dictation_sounds`, `dictation_max_s`, `dictation_dictionary`, `dictation_preload`, `dictation_hotkey`); dictation logs to `ucho.log`. New keys `theme`, `layout`, `start_with_windows`, `setup_complete`.
