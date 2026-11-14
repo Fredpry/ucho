@@ -370,9 +370,9 @@ class RecordingCard(ctk.CTkFrame):
         return "break"
 
     def _bind_all(self, widget) -> None:
-        for sequence, handler in (("<Button-1>", lambda _e: self.open()),
-                                  ("<Enter>", lambda _e: self._hover(True)),
-                                  ("<Leave>", lambda _e: self._hover(False))):
+        for sequence, handler in (("<Button-1>", lambda e=None: e is not None and self.open()),
+                                  ("<Enter>", lambda _e=None: self._hover(True)),
+                                  ("<Leave>", lambda _e=None: self._hover(False))):
             widget.bind(sequence, handler, add="+")
         try:
             widget.configure(cursor="hand2")
@@ -389,7 +389,10 @@ class RecordingCard(ctk.CTkFrame):
             excerpt.configure(wraplength=max(160, width - 190))
 
     def _hover(self, inside: bool) -> None:
-        self.configure(fg_color=C.hover if inside else C.surface)
+        # customtkinter can deliver Enter/Leave without an event, also while the
+        # list is being rebuilt; a card that is already gone has nothing to repaint.
+        if self.winfo_exists():
+            self.configure(fg_color=C.hover if inside else C.surface)
 
     def open(self) -> None:
         self.app.show("transcript", folder=self.folder, query=self.app.last_query)
