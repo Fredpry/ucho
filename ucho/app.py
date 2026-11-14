@@ -765,9 +765,14 @@ def _last_dictation() -> str:
 
 
 def _stamp_shortcuts() -> None:
-    """Our shortcuts get the AppUserModelID, so a pinned tile and the window are one button."""
+    """Our shortcuts get the AppUserModelID, so a pinned tile and the window are one button.
+
+    Only shortcuts that start this copy of Ucho: another installation (or an
+    older Ucho Dictate) keeps its own id.
+    """
     for shortcut in winshell.shortcut_paths():
-        if shortcut.exists():
+        arguments = winshell.shortcut_arguments(shortcut) if shortcut.exists() else None
+        if arguments and str(STARTER).lower() in arguments.lower():
             log.info("Shortcut %s id: %s", shortcut.name,
                      winshell.set_shortcut_app_id(shortcut, config.APP_ID))
 

@@ -33,10 +33,6 @@ SYNCHRONIZE = 0x00100000
 ASFW_ANY = 0xFFFFFFFF
 
 
-def _event_name(command: str) -> str:
-    return f"Local\\Ucho.Command.{command}"
-
-
 class SingleInstance:
     def __init__(self, name: str = MUTEX_NAME):
         self._name = name
@@ -62,7 +58,8 @@ class SingleInstance:
         kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL,
                                           wintypes.LPCWSTR]
         kernel32.CreateEventW.restype = wintypes.HANDLE
-        self._events = [kernel32.CreateEventW(None, False, False, _event_name(c)) for c in COMMANDS]
+        self._events = [kernel32.CreateEventW(None, False, False, self._event_name(c))
+                        for c in COMMANDS]
         handles = (wintypes.HANDLE * len(self._events))(*self._events)
 
         def loop():
@@ -78,8 +75,10 @@ class SingleInstance:
 
         threading.Thread(target=loop, name="single-instance", daemon=True).start()
 
-    @staticmethod
-    def signal(command: str) -> bool:
+    def _event_name(self, command: str) -> str:
+        return f"{self._name}.Command.{command}"
+
+    def signal(self, command: str) -> bool:
         """Second instance: asks the running Ucho to run `command`."""
         if sys.platform != "win32" or command not in COMMANDS:
             return False
@@ -93,7 +92,7 @@ class SingleInstance:
         # The first instance creates its events a moment after the mutex.
         for _ in range(30):
             event = kernel32.OpenEventW(EVENT_MODIFY_STATE | SYNCHRONIZE, False,
-                                        _event_name(command))
+                                        self._event_name(command))
             if event:
                 break
             time.sleep(0.1)
