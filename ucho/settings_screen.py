@@ -531,7 +531,7 @@ class SettingsScreen(Screen):
         if days:
             # Shortening the period deletes at once: say how much, and let the user back out.
             expired = retention.select_expired(self.settings.recordings_dir, days,
-                                               active=self.app.meeting.is_active)
+                                               active=self.app.meeting.in_use)
             if expired and not ui.confirm(
                     self, t("Delete old audio?"),
                     t("Recordings with a transcript whose audio is older than {days} days: {n}. "

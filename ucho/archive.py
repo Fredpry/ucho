@@ -10,6 +10,13 @@ and `meta.json` keys).
 Search: an in-memory SQLite FTS5 index over the transcript segments
 (diacritics-insensitive, prefix match), rebuilt when any `meta.json` changes.
 Standard library only, because the MCP server must not need anything else.
+
+The index holds a folded copy of each segment (`fold`: lowercase, no
+diacritics) and queries are folded the same way. The FTS5 tokenizer option
+`remove_diacritics 2` alone is not enough: "ł" has no Unicode decomposition,
+so "zlotych" did not find "złotych" and "Lodz" did not find "Łódź". Results
+always carry the original text; `match_spans` maps a folded match back to
+offsets in that original text for highlighting.
 """
 
 from __future__ import annotations
@@ -45,6 +52,52 @@ def fold(text: str) -> str:
 
 def query_words(query: str) -> list[str]:
     return re.findall(r"\w+", query or "", flags=re.UNICODE)
+
+
+def folded_words(query: str) -> list[str]:
+    """The query words as they are matched against the index."""
+    return [w for w in (fold(word) for word in query_words(query)) if w]
+
+
+def fold_map(text: str) -> tuple[str, list[int]]:
+    """`fold(text)` character by character, with the original index of every folded character.
+
+    Folding can change the length ('ﬁ' -> 'fi'), so offsets in the folded
+    text are mapped back through this list.
+    """
+    folded: list[str] = []
+    origin: list[int] = []
+    for index, char in enumerate(text):
+        piece = fold(char) if not char.isascii() else char.lower()
+        folded.append(piece)
+        origin.extend([index] * len(piece))
+    return "".join(folded), origin
+
+
+def match_spans(text: str, words: list[str]) -> list[tuple[int, int]]:
+    """(start, end) offsets in the original `text` of words that start with a query word.
+
+    The same rule as the search: folded, a prefix of a word. 'zlot' marks
+    'Złot' in 'Złotych', 'lodz' marks 'Łódź'.
+    """
+    folded, origin = fold_map(text)
+    spans = []
+    for word in {fold(w) for w in words if w}:
+        for found in re.finditer(r"(?<!\w)" + re.escape(word), folded):
+            start, end = found.start(), found.end()
+            if end > start:
+                spans.append((origin[start], origin[end - 1] + 1))
+    return sorted(set(spans))
+
+
+def _like_escape(word: str) -> str:
+    return word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _matches_words(folded: str, words: list[str]) -> bool:
+    """Every query word is a prefix of a word in the folded text (the FTS5 rule)."""
+    tokens = re.findall(r"\w+", folded)
+    return all(any(token.startswith(word) for token in tokens) for word in words)
 
 
 @dataclass
@@ -131,13 +184,15 @@ class Archive:
                 return self._index
             # The app searches from a worker thread; the lock serializes access.
             db = sqlite3.connect(":memory:", check_same_thread=False)
+            # `text` is the original, returned in results; only `folded` is searched.
             try:
                 db.execute("CREATE VIRTUAL TABLE u USING fts5(session UNINDEXED, start UNINDEXED,"
-                           " speaker UNINDEXED, text, tokenize='unicode61 remove_diacritics 2')")
+                           " speaker UNINDEXED, text UNINDEXED, folded,"
+                           " tokenize='unicode61 remove_diacritics 2')")
                 self.fts = True
             except sqlite3.OperationalError:
-                # SQLite without FTS5: a plain table and LIKE search.
-                db.execute("CREATE TABLE u (session, start, speaker, text)")
+                # SQLite without FTS5: a plain table, LIKE to narrow, then the same prefix rule.
+                db.execute("CREATE TABLE u (session, start, speaker, text, folded)")
                 self.fts = False
             titles = []
             for name, _ in state:
@@ -146,9 +201,10 @@ class Archive:
                     "topic", "name", "tldr")) + " " + " ".join(meta.get("participants") or []))))
                 for seg in meta.get("segments") or []:
                     if seg.get("text"):
-                        db.execute("INSERT INTO u VALUES (?, ?, ?, ?)",
+                        text = str(seg["text"])
+                        db.execute("INSERT INTO u VALUES (?, ?, ?, ?, ?)",
                                    (name, float(seg.get("start", 0)), seg.get("speaker", ""),
-                                    str(seg["text"])))
+                                    text, fold(text)))
             db.commit()
             if self._index is not None:
                 self._index.close()
@@ -158,7 +214,7 @@ class Archive:
 
     def search(self, query: str, limit: int) -> list[Hit]:
         """Transcript segments matching all words of `query` (prefix, no diacritics)."""
-        words = query_words(query)
+        words = folded_words(query)
         if not words:
             raise ArchiveError("Empty query.")
         with self._lock:
@@ -169,10 +225,12 @@ class Archive:
                     "SELECT session, start, speaker, text FROM u WHERE u MATCH ? "
                     "ORDER BY rank LIMIT ?", (match, limit)).fetchall()
             else:
-                condition = " AND ".join("text LIKE ?" for _ in words)
-                rows = db.execute(
-                    f"SELECT session, start, speaker, text FROM u WHERE {condition} LIMIT ?",
-                    [f"%{w}%" for w in words] + [limit]).fetchall()
+                # LIKE only narrows (substring); the prefix rule decides, as in FTS5.
+                condition = " AND ".join("folded LIKE ? ESCAPE '\\'" for _ in words)
+                candidates = db.execute(
+                    f"SELECT session, start, speaker, text, folded FROM u WHERE {condition}",
+                    [f"%{_like_escape(w)}%" for w in words]).fetchall()
+                rows = [row[:4] for row in candidates if _matches_words(row[4], words)][:limit]
         return [Hit(s, float(st), str(sp or ""), str(tx)) for s, st, sp, tx in rows]
 
     def find(self, query: str, limit: int = 60, hits_per_session: int = 3) -> list[Match]:
@@ -182,7 +240,7 @@ class Archive:
         topic, one-line summary or participants, or when transcript segments
         match. Up to `hits_per_session` segment hits are kept per session.
         """
-        words = [fold(w) for w in query_words(query)]
+        words = folded_words(query)
         if not words:
             return [Match(s) for s in self.sessions()[:limit]]
         hits = self.search(query, limit=2000)

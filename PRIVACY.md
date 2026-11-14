@@ -36,6 +36,10 @@ Ucho keeps a recording until you delete it. **Delete recording** on the transcri
 
 **Delete audio after** in Settings (Never, 7, 30 or 90 days; default Never) removes only the audio files of recordings that already have a transcript, at start and then once a day. Transcripts, summaries and `meta.json` stay, and `meta.json` notes that the audio was removed. The log records only how many files were removed.
 
+### Dictation and the clipboard
+
+Paste mode puts the dictated text on the clipboard for a moment and presses Ctrl+V. The text is marked so that Windows keeps it out of clipboard history (Win+V) and cloud clipboard sync, and the text you had copied before is put back right after the paste (only text: an image or copied files on the clipboard are not restored). Text Ucho copies on request (*Copy all*, *Copy*) is marked the same way. If the window you dictated into is closed or does not come back to the front, nothing is pasted: the text stays on the clipboard for you to paste with Ctrl+V.
+
 ### Check it yourself
 
 While Ucho is recording or transcribing, list external connections of its Python processes (no admin rights needed):
@@ -102,6 +106,10 @@ Domyślny folder nagrań celowo **nie** leży w Dokumentach: na wielu firmowych 
 Ucho przechowuje nagranie, dopóki go nie usuniesz. **Usuń nagranie** na ekranie transkryptu (albo klawisz Delete na nagraniu zaznaczonym na liście) po potwierdzeniu usuwa cały folder sesji: dźwięk, transkrypt i podsumowanie. Pliki są kasowane od razu, nie trafiają do Kosza. Kopie zrobione poza Ucho (kopie zapasowe, folder synchronizowany) zostają bez zmian.
 
 **Usuwaj nagrania audio po** w Ustawieniach (Nigdy, 7, 30 albo 90 dniach; domyślnie Nigdy) usuwa przy starcie, a potem raz dziennie, tylko pliki audio nagrań, które mają już transkrypt. Transkrypty, podsumowania i `meta.json` zostają, a w `meta.json` zapisuje się informacja o usunięciu dźwięku. Log odnotowuje tylko liczbę usuniętych plików.
+
+### Dyktowanie a schowek
+
+W trybie wklejania podyktowany tekst na chwilę trafia do schowka, a Ucho naciska Ctrl+V. Tekst jest oznaczony tak, żeby Windows nie zapisał go w historii schowka (Win+V) ani nie zsynchronizował przez chmurę, a tekst skopiowany wcześniej wraca do schowka zaraz po wklejeniu (tylko tekst: obrazu ani skopiowanych plików Ucho nie przywraca). Tak samo oznaczony jest tekst kopiowany na żądanie (*Kopiuj całość*, *Kopiuj*). Jeśli okno, w którym dyktujesz, zostało zamknięte albo nie wraca na wierzch, Ucho niczego nie wkleja: tekst zostaje w schowku i możesz go wkleić Ctrl+V.
 
 ### Sprawdź sam
 

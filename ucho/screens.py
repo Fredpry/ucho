@@ -76,6 +76,11 @@ def describe(meta: dict, folder: Path) -> tuple[str, str]:
     return title, "  ·  ".join(p for p in parts if p)
 
 
+def _busy_with(app, folder: Path) -> bool:
+    """Recorded, transcribed or summarized right now (a queued session can be deleted)."""
+    return app.meeting.in_use(folder) and not app.meeting.queue_position(folder)
+
+
 def delete_recording(app, folder: Path, parent) -> bool:
     """Asks, then deletes a whole session folder. True when it was deleted.
 
@@ -83,7 +88,7 @@ def delete_recording(app, folder: Path, parent) -> bool:
     The search index needs no extra step: it rebuilds when the list of
     sessions changes (archive.Archive.index).
     """
-    if app.meeting.is_active(folder):
+    if _busy_with(app, folder):
         app.toast(t("This recording is being recorded, transcribed or summarized. "
                     "Delete it when that has finished."), "warning", 6)
         return False
@@ -100,10 +105,11 @@ def delete_recording(app, folder: Path, parent) -> bool:
                       destructive=True):
         return False
     # The dialog was modal but the app kept running: check again.
-    if app.meeting.is_active(folder):
+    if _busy_with(app, folder):
         app.toast(t("This recording is being recorded, transcribed or summarized. "
                     "Delete it when that has finished."), "warning", 6)
         return False
+    app.meeting.dequeue(folder)  # waiting for a transcription: drop it from the queue first
     try:
         retention.delete_session(app.settings.recordings_dir, folder)
     except retention.DeleteError as error:
@@ -114,6 +120,16 @@ def delete_recording(app, folder: Path, parent) -> bool:
     app.show("recordings")
     app.toast(t("Recording deleted"))
     return True
+
+
+def transcription_status(meeting, folder: Path) -> str:
+    """Short status for a recordings card: running, queued, ready or missing."""
+    if meeting.is_active(folder):
+        return t("transcribing…") if meeting.transcribing else t("summarizing…")
+    position = meeting.queue_position(folder)
+    if position:
+        return t("Queued ({n})", n=position)
+    return t("transcript ready") if session.find_file(folder, TRANSCRIPT_MD) else t("no transcript")
 
 
 def session_title(folder_name: str) -> str:
@@ -403,7 +419,8 @@ class RecordingsScreen(Screen):
         self.list.grid_columnconfigure(0, weight=1)
         self._after = None
         self._generation = 0
-        app.meeting.listen(lambda event, _d: event in ("saved", "summary", "transcribed")
+        # "state" too: the status of queued and running transcriptions changes with it.
+        app.meeting.listen(lambda event, _d: event in ("state", "saved", "summary", "transcribed")
                            and self.winfo_ismapped() and self.search())
 
     def on_show(self, **kwargs) -> None:
@@ -458,8 +475,7 @@ class RecordingsScreen(Screen):
         words = [fold(w) for w in query_words(query)]
         for i, (match, meta) in enumerate(results):
             title, line = describe(meta, match.session)
-            status = t("transcript ready") if session.find_file(match.session, TRANSCRIPT_MD) else t(
-                "no transcript")
+            status = transcription_status(self.app.meeting, match.session)
             if retention.audio_removed(meta):
                 status += "  ·  " + t("audio deleted")
             line = f"{line}  ·  {status}" if line else status
@@ -582,6 +598,9 @@ class TranscriptScreen(Screen):
                     text.write((file.read_text(encoding="utf-8"), "body"))
                 except OSError:
                     pass
+            elif self.meeting.queue_position(self.folder):
+                text.write((t("Waiting in the queue: the transcription starts when the one before "
+                              "it finishes.") + "\n", "muted"))
             elif session.audio_tracks(self.folder):
                 text.write((t("No transcript yet. Use “Transcribe again”.") + "\n", "muted"))
             else:
@@ -593,7 +612,8 @@ class TranscriptScreen(Screen):
             text.see("1.0")
 
     def _update_actions(self) -> None:
-        busy = self.meeting.busy and self.folder == self.meeting.session_dir
+        busy = self.meeting.is_active(self.folder)
+        position = self.meeting.queue_position(self.folder)
         has_audio = bool(self.folder and session.audio_tracks(self.folder))
         has_summary = bool(self.folder and session.find_file(self.folder, session.SUMMARY_MD))
         self.again.pack_forget()
@@ -602,6 +622,10 @@ class TranscriptScreen(Screen):
         self.progress_row.pack_forget()
         if busy:
             self.stop.pack(side="left", padx=(0, 8))
+            self.progress_row.pack(side="left")
+        elif position:
+            self.progress.set(0)
+            self.progress_label.configure(text=t("Queued ({n})", n=position))
             self.progress_row.pack(side="left")
         else:
             if has_audio:
@@ -612,11 +636,20 @@ class TranscriptScreen(Screen):
     # --- events ----------------------------------------------------------------
 
     def _event(self, event: str, data) -> None:
+        m = self.meeting
         if not self.live:
+            if event == "state" and self.folder is not None:
+                if m.transcribing and m.is_active(self.folder):
+                    # This session waited in the queue and has just started.
+                    self._show_live()
+                self._update_actions()
             return
+        if event == "state" and not m.is_active(self.folder):
+            # Finished or failed; what comes next belongs to another session.
+            self.live = False
         if event == "progress":
             fraction, text = data
-            if text:
+            if text and m.is_active(self.folder):
                 self.text.write((text + "\n", "body"))
                 self.text.see("end")
         elif event == "transcribed":
@@ -664,7 +697,12 @@ class TranscriptScreen(Screen):
 
     def _again(self) -> None:
         if self.folder is not None and self.meeting.transcribe_again(self.folder):
-            self.on_show(live=True)
+            if self.meeting.is_active(self.folder):
+                self.on_show(live=True)
+            else:
+                # Queued behind another session; it turns live when it starts.
+                self._show_session(self.folder)
+                self._update_actions()
 
     def _summarize(self) -> None:
         if self.folder is not None and self.meeting.summarize_again(self.folder):
