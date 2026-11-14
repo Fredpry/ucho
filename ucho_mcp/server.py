@@ -28,13 +28,13 @@ from pathlib import Path
 from ucho import session as sessions
 from ucho.archive import Archive, ArchiveError
 from ucho.archive import hms as _hms
+from ucho.config import VERSION  # one version for the app and the server
 from ucho.merge import SPEAKER_LABELS, TRANSCRIPT_MD
 
 log = logging.getLogger("ucho_mcp")
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 NAME = "ucho"
-VERSION = "0.1.0"
 
 INSTRUCTIONS = (
     "Archive of local meeting recordings and transcripts from the Ucho app. "
