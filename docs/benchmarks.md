@@ -77,6 +77,68 @@ Checked before accepting the Dependabot update, same laptop, GPU, same 20 synthe
 
 The text is identical, so the update was accepted (with numpy 2.5.4).
 
+## Parakeet TDT 0.6B v3 as an optional backend (v0.2)
+
+Plan v0.2, W6: is NVIDIA's Parakeet TDT 0.6B v3 (25 European languages, Polish among them), run through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), good enough to offer as an alternative to Whisper? Measure first; Whisper stays the default whatever the result.
+
+**Result: offered as an optional backend, fp32 export only, never recommended automatically.** On synthetic Polish speech the fp32 export is within 1 pp WER of Whisper large-v3 and 3 to 10 times faster on the CPU, with less memory. The int8 export is twice as fast again but loses Polish word endings and fails the quality bar (more than 2 pp worse). Both exports handle English phrases inside Polish sentences much worse than Whisper, so Parakeet is not a drop-in replacement for bilingual meetings.
+
+Setup: Core Ultra 7 258V (4 P-cores + 4 LP E-cores), Arc 140V, 32 GB, Windows 11, Python 3.12, OpenVINO GenAI 2026.4.1, sherpa-onnx 2.0.1 (PyPI), 14.11.2026. Whisper is large-v3 INT8 (the app default). Parakeet: `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3` (fp32, revision `5fcc012`) and `...-v3-int8` (revision `ed5d745`), both exported by the sherpa-onnx project; file hashes in `ucho/config.py`. Parakeet on 2 CPU threads. Every run goes through the app's code path (`transcribe_file`: silence gate, chunking, hallucination filter) via `tools/benchmark_wer.py`. All audio is synthetic, from the offline Windows voices *Microsoft Paulina* (Polish) and *Microsoft Zira* (English); nobody was recorded.
+
+The sets:
+
+- **20 sentences**: `tools/benchmark_engine.py --make-wer-set`, 95.5 s, 158 words (the set used above).
+- **Meeting**: the 20 sentences and the 8-sentence meeting monologue of `benchmark_engine.py`, whole sentences only, at four speaking rates (Paulina, rate -1 to 2), 1 s between blocks: 5.2 minutes, 523 words.
+- **Quiet meeting**: the same at -30 dB (peak 0.03).
+- **Mixed PL/EN**: 6 utterances, 54 words. Four Polish sentences with an English phrase spoken by Zira ("Klient pytał o the service level agreement dla drugiej linii.") and two English sentences.
+- **Noise**: 30 s each of digital silence, white noise (RMS 0.002 and 0.03), 50 Hz hum and speech-shaped noise.
+
+| Set | Engine | Device | WER | CER | Processing | Speed | Load | Peak RAM |
+|---|---|---|---|---|---|---|---|---|
+| 20 sentences | Whisper large-v3 INT8 | GPU | 3.2 % | 3.3 % | 11.7 s | 8.2x | 2.0 s | 2.8 GB |
+| 20 sentences | Whisper large-v3 INT8 | CPU | 3.2 % | 3.3 % | 89.0 s | 1.1x | 4.5 s | 3.8 GB |
+| 20 sentences | Parakeet fp32 | CPU | 3.2 % | 3.4 % | 8.6 s | 11.1x | 2.6 s | 2.6 GB |
+| 20 sentences | Parakeet int8 | CPU | 6.3 % | 4.0 % | 4.3 s | 22.4x | 1.8 s | 0.8 GB |
+| Meeting, `pl` | Whisper large-v3 INT8 | GPU | 2.7 % | 3.3 % | 26.2 s | 11.9x | 2.0 s | 2.8 GB |
+| Meeting, `auto` | Whisper large-v3 INT8 | GPU | 4.2 % | 4.3 % | 35.0 s | 8.9x | 1.9 s | 2.8 GB |
+| Meeting, `pl` | Whisper large-v3 INT8 | CPU | 2.7 % | 3.3 % | 81.3 s | 3.8x | 3.4 s | 3.8 GB |
+| Meeting, `auto` | Whisper large-v3 INT8 | CPU | 4.4 % | 4.4 % | 222.4 s | 1.4x | 3.5 s | 3.8 GB |
+| Meeting, `pl` | Parakeet fp32 | CPU | 3.6 % | 3.5 % | 25.7 s | 12.1x | 2.7 s | 2.7 GB |
+| Meeting, `auto` | Parakeet fp32 | CPU | 3.6 % | 3.5 % | 26.9 s | 11.6x | 2.7 s | 2.7 GB |
+| Meeting, `pl` | Parakeet int8 | CPU | 7.6 % | 4.5 % | 12.8 s | 24.2x | 1.7 s | 1.0 GB |
+| Quiet meeting, `pl` | Whisper large-v3 INT8 | GPU | 2.9 % | 3.5 % | 26.5 s | 11.7x | | |
+| Quiet meeting, `pl` | Parakeet fp32 | CPU | 3.4 % | 3.4 % | | | | |
+| Mixed PL/EN, `auto` | Whisper large-v3 INT8 | GPU | 14.8 % | 6.1 % | | | | |
+| Mixed PL/EN | Parakeet fp32 | CPU | 27.8 % | 12.1 % | | | | |
+| Mixed PL/EN | Parakeet int8 | CPU | 27.8 % | 12.1 % | | | | |
+
+Load is with the OpenVINO GPU cache already filled (the first GPU compile took 9.4 s). Peak RAM is the peak working set of the benchmark process (Python included); on the Arc iGPU part of Whisper's memory is shared GPU memory that this number does not show. The 20 sentences and the meeting share their sentences, so the two are not independent samples.
+
+What the numbers say:
+
+- **Quality.** Whisper's only errors on Polish are numbers written as digits ("dziesiątej" → "10"), which the WER normalization counts as wrong. Parakeet makes the same digit errors; fp32 adds a few real ones (3.6 % vs 2.7 % on the meeting), int8 many more: it drops word endings, mostly a final nasal vowel ("salę" → "sal", "Dziękuję" → "Dziękuje", "rusza" → "rus", "szkoleniu" → "szkoleni"). The int8 numbers are why the app offers fp32 only.
+- **Mixed PL/EN is Parakeet's weak spot.** English phrases come out spelled the Polish way: "the service level agreement" → "Deserwice Level Agreement", "the shared backlog" → "Deshred Bike Lock". Whisper with `auto` gets three of the four phrases right. One English-only sentence was garbled by both. Parakeet has no language setting; it picks the language per utterance on its own.
+- **Speed.** On the CPU Parakeet fp32 is 3.2x faster than Whisper with a forced language and 8.3x faster in `auto` mode (Whisper's 12 s auto chunks each pay a language detection), and about as fast as Whisper on the Arc GPU. That is the case it is for: laptops without a usable Intel GPU (L2 and L3 in the matrix below, not measured yet).
+- **Threads.** Meeting, fp32: 1 thread 6.8x, 2 threads 12.1x, 4 threads 12.1x. int8: 1 thread 16.5x, 2 threads 24.2x, 4 threads 17.6x, 8 threads 8.4x. The E-cores slow the P-cores down; Ucho uses 2 threads (`parakeet.default_threads`). Other CPUs were not measured.
+- **GPU.** The PyPI wheel of sherpa-onnx contains only the CPU execution provider. Asking for DirectML, OpenVINO or CUDA logs a warning and falls back to the CPU. A GPU build would mean building sherpa-onnx with ONNX Runtime DirectML ourselves, which is out of scope.
+- **Silence and noise.** Neither engine wrote anything on the noise set. Parakeet also wrote nothing with Ucho's silence gate switched off, so unlike Whisper it does not invent text on noise.
+- **Quiet input.** The model README warns that very quiet input decodes badly. At -30 dB the meeting scored 3.4 % without any gain and 3.8 % when each piece was first scaled to a 0.5 peak, so Ucho applies no gain.
+- **Paragraphs.** A transcript paragraph ends where one track pauses for more than 1.5 s (`merge.merge_tracks`). Parakeet's sentence times come from its token times and durations and match the real pauses closely: the ~0.7 s breaks of the synthetic meeting came out as 0.5 to 1.6 s gaps. Whisper's timestamps stretch the same pauses to 1.4 to 2.6 s. So the same 5-minute meeting became 36 paragraphs with Whisper and 3 with Parakeet. The text is the same quality, but on the system audio track, where all remote speakers share one track, Parakeet transcripts have fewer and longer paragraphs. A different joining rule for Parakeet should be decided on real meetings, not on synthetic speech.
+- **Long audio.** The model README says long audio must be split at silences into 15 to 20 s pieces. Ucho's forced-language chunks are up to 5 minutes, so `ucho/parakeet.py` splits them again into pieces of at most 20 s (`MAX_PIECE_S`); the `pl` and `auto` meeting rows show the same WER.
+
+Limits: a synthetic voice is clean and steady, without accents, crosstalk, Teams compression or hesitations. Real meetings may change the ranking in either direction, and the mixed PL/EN set is only 54 words. Check on a few real recordings (local only) before recommending Parakeet to anyone.
+
+```powershell
+# Optional package (or: .\install.ps1 -WithParakeet), then download the model in Settings > Hardware
+.\.venv\Scripts\python.exe -m pip install -r requirements-parakeet.txt
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --make-wer-set C:\bench\tts-pl
+.\.venv\Scripts\python.exe tools\benchmark_wer.py C:\bench\tts-pl --language pl --backend parakeet
+.\.venv\Scripts\python.exe tools\benchmark_wer.py C:\bench\tts-pl --language pl --backend parakeet --threads 4
+.\.venv\Scripts\python.exe tools\benchmark_wer.py C:\bench\tts-pl --language pl --backend parakeet --model csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8
+```
+
+The int8 model is not offered in the app. For a comparison, download it once by hand: `python -c "from ucho.transcribe import model_path; model_path('csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8', download=True)"`.
+
 ## 1. Hardware matrix
 
 ### Laptops
@@ -173,7 +235,7 @@ For every audio file in a folder that has a same-name reference text, it transcr
 
 Both texts are normalized first: Unicode NFKC, lowercase, punctuation and symbols removed (apostrophes join, hyphens split), whitespace collapsed. Totals are corpus-level (all errors over all reference words), so long files weigh more than short ones. The definitions match jiwer's; the implementation is a few dozen lines of standard library code, so scoring needs no extra dependency and `--wer-only` runs in the dev environment without OpenVINO. Unit tests: `tests/test_wer.py`.
 
-Results go to a table on screen and to JSON (`<folder>/wer_results.json` by default) with model, device actually used, load time, per-file counts and totals.
+Results go to a table on screen and to JSON (`<folder>/wer_results.json` by default) with backend, model, device actually used, load time, peak working set, per-file counts and totals.
 
 ### Folder layout
 
@@ -196,7 +258,7 @@ $py = "C:\Users\<you>\Ucho\app\.venv\Scripts\python.exe"
 & $py tools\benchmark_wer.py C:\bench\cv-pl --wer-only --baseline C:\bench\v0.1.json
 ```
 
-Options: `--model` (OpenVINO repo id, default: the app default), `--device` (GPU, CPU, NPU, AUTO; GPU falls back to CPU), `--language` (auto, pl, en), `--limit N`, `--json`, `--baseline` (prints the change in percentage points), `--models-dir` (Hugging Face cache with the models; default `HF_HOME`, else `<repo>\models`), `--from-tsv` (see below).
+Options: `--backend` (`whisper`, the default, or the optional `parakeet`, see above), `--model` (model repo id, default: the backend's default), `--threads` (CPU threads for Parakeet), `--device` (GPU, CPU, NPU, AUTO; GPU falls back to CPU), `--language` (auto, pl, en), `--limit N`, `--json`, `--baseline` (prints the change in percentage points), `--models-dir` (Hugging Face cache with the models; default `HF_HOME`, else `<repo>\models`), `--from-tsv` (see below).
 
 The tool works offline: it sets `HF_HUB_OFFLINE=1` and loads models from the local cache only. The model is loaded before the first file, so the per-file speed is not distorted by the one-off GPU compilation. The compiled GPU model is cached in `<checkout>\models\ovcache` (ignored by git, about 3 GB for large-v3); delete it when you are done.
 

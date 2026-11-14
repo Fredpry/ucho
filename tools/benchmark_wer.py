@@ -18,6 +18,8 @@ Usage:
     python tools/benchmark_wer.py DATA_DIR --from-tsv test.tsv  # write references from a
                                                                 # Common Voice TSV, then exit
     python tools/benchmark_wer.py DATA_DIR --baseline old.json  # show the change vs a past run
+    python tools/benchmark_wer.py DATA_DIR --backend parakeet   # optional Parakeet backend
+                                                                # (needs sherpa-onnx)
 
 Scoring needs only the standard library. Transcription imports `ucho.transcribe`
 (OpenVINO) lazily, so `--wer-only` works in the dev environment without models.
@@ -212,7 +214,8 @@ def references_from_tsv(tsv: Path, folder: Path, limit: int | None = None) -> in
 
 
 class Transcriber:
-    def __init__(self, model: str, device: str, language: str, models_dir: Path | None = None):
+    def __init__(self, model: str, device: str, language: str, models_dir: Path | None = None,
+                 backend: str = "whisper", threads: int | None = None):
         # Both variables before anything imports huggingface_hub (ucho.config only
         # sets HF_HOME if it is unset). HF_HUB_OFFLINE: the model must already be
         # on disk, this tool never downloads.
@@ -226,7 +229,12 @@ class Transcriber:
             raise SystemExit(f"Unknown language {language!r}, choose from: {', '.join(config.LANGUAGES)}")
         self._transcribe = transcribe
         self.language_token = config.LANGUAGES[language]
-        self.engine = transcribe.Engine(model or config.DEFAULT_MODEL, device)
+        if backend == "parakeet":
+            from ucho import parakeet
+
+            self.engine = parakeet.Engine(model or parakeet.REPO_ID, device, threads)
+        else:
+            self.engine = transcribe.Engine(model or config.DEFAULT_MODEL, device)
         # Load (and on GPU compile) before the first file, so that file's
         # processing time and speed are not inflated by the one-off load.
         start = time.perf_counter()
@@ -242,6 +250,39 @@ class Transcriber:
 
     def close(self) -> None:
         self.engine.release()
+
+
+def peak_memory_gb() -> float | None:
+    """Peak working set of this process in GB (Windows only, None elsewhere).
+
+    Includes Python, numpy and the runtime, not just the model. On Intel iGPUs
+    a GPU model lives in shared memory that this number does not show.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                        ("PeakWorkingSetSize", ctypes.c_size_t),
+                        ("WorkingSetSize", ctypes.c_size_t)] + [
+                (name, ctypes.c_size_t) for name in (
+                    "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
+                    "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+                    "PagefileUsage", "PeakPagefileUsage")]
+
+        counters = Counters()
+        counters.cb = ctypes.sizeof(counters)
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters),
+                                                     wintypes.DWORD]
+        if not kernel32.K32GetProcessMemoryInfo(kernel32.GetCurrentProcess(),
+                                                ctypes.byref(counters), counters.cb):
+            return None
+        return round(counters.PeakWorkingSetSize / 1024 ** 3, 2)
+    except Exception:
+        return None
 
 
 def audio_seconds(path: Path) -> float | None:
@@ -347,7 +388,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("folder", type=Path, help="folder with audio, <stem>.txt and <stem>.hyp.txt")
     parser.add_argument("--wer-only", action="store_true",
                         help="do not transcribe, score existing <stem>.hyp.txt files")
-    parser.add_argument("--model", default="", help="OpenVINO model repo id (default: app default)")
+    parser.add_argument("--backend", choices=("whisper", "parakeet"), default="whisper",
+                        help="whisper (OpenVINO, the app default) or parakeet (optional, sherpa-onnx, "
+                             "CPU only)")
+    parser.add_argument("--model", default="",
+                        help="model repo id (default: the backend's default model)")
+    parser.add_argument("--threads", type=int, default=None,
+                        help="CPU threads for --backend parakeet (default: 2, or 1 with fewer than "
+                             "4 logical CPUs; see ucho/parakeet.py)")
     parser.add_argument("--models-dir", type=Path, default=None,
                         help="Hugging Face cache holding the models, e.g. the installed app's models "
                              "folder (default: HF_HOME, else <repo>/models)")
@@ -380,7 +428,8 @@ def main(argv: list[str]) -> int:
         print(f"No pairs found in {folder} (expected {wanted})", file=sys.stderr)
         return 2
 
-    transcriber = None if args.wer_only else Transcriber(args.model, args.device, args.language, args.models_dir)
+    transcriber = None if args.wer_only else Transcriber(
+        args.model, args.device, args.language, args.models_dir, args.backend, args.threads)
     results: list[Result] = []
     try:
         for n, item in enumerate(items, 1):
@@ -411,11 +460,14 @@ def main(argv: list[str]) -> int:
     report = {
         "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "mode": "wer-only" if args.wer_only else "transcribe",
+        "backend": None if args.wer_only else args.backend,
         "model": None if args.wer_only else (transcriber.engine.repo_id if transcriber else None),
+        "threads": getattr(transcriber.engine, "threads", None) if transcriber else None,
         "device_requested": None if args.wer_only else args.device,
         "device_used": None if args.wer_only else (transcriber.engine.device if transcriber else None),
         "model_load_s": transcriber.load_s if transcriber else None,
         "language": None if args.wer_only else args.language,
+        "peak_working_set_gb": None if args.wer_only else peak_memory_gb(),
         "normalization": "NFKC, lowercase, punctuation and symbols removed, whitespace collapsed",
         "total": summary,
         "files": [asdict(r) for r in results],

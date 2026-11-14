@@ -53,6 +53,10 @@ Up to v0.1 meetings and dictation were two processes with two tray icons and two
 
 Measured on a Core Ultra 7 258V (Arc 140V, 32 GB), 6 minutes of synthetic Polish speech transcribed on the GPU while six 10 s dictations were submitted (`tools/benchmark_engine.py`): a dictation was answered in 1.2 to 1.7 s (median 1.3 s) with the shared INT8 model and 1.3 to 1.7 s (median 1.5 s) with a separate FP16 model; alone, 1.0 to 1.4 s. Details in [benchmarks.md](benchmarks.md#dictation-during-a-transcription-v02).
 
+## 8. Optional second backend: Parakeet
+
+NVIDIA Parakeet TDT 0.6B v3 runs through sherpa-onnx (ONNX Runtime) on the CPU only; the PyPI wheel has no GPU execution provider. It is installed only with `install.ps1 -WithParakeet` and appears in the model list only when `sherpa_onnx` is importable. `transcribe.create_engine` returns a `parakeet.Engine` for its model id; that class has the same surface as the Whisper engine and returns results shaped like OpenVINO's (`.texts`, `.chunks` with timestamps, one chunk per sentence), so the engine thread, silence gate, chunking, hallucination filter, `merge_tracks` and the MCP server are shared. Two things differ: the model has no language setting (it picks among 25 European languages itself), and long audio has to be cut into pieces of at most 20 s, so the 5-minute chunks of forced-language mode are split again. Measured on synthetic speech it is close to Whisper on Polish and much faster on the CPU, but weak with English phrases inside Polish sentences, so it is never chosen automatically ([benchmarks.md](benchmarks.md#parakeet-tdt-06b-v3-as-an-optional-backend-v02)).
+
 ## Files per meeting
 
 ```

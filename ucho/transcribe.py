@@ -97,14 +97,16 @@ def model_path(repo_id: str, download: bool = False) -> Path:
     from huggingface_hub import snapshot_download
 
     revision = config.REVISIONS.get(repo_id)
+    patterns = config.DOWNLOAD_PATTERNS.get(repo_id)
     if download:
-        return Path(snapshot_download(repo_id, revision=revision))
+        return Path(snapshot_download(repo_id, revision=revision, allow_patterns=patterns))
     try:
-        return Path(snapshot_download(repo_id, revision=revision, local_files_only=True))
+        return Path(snapshot_download(repo_id, revision=revision, allow_patterns=patterns,
+                                      local_files_only=True))
     except Exception:
         if revision is None:
             raise
-        return Path(snapshot_download(repo_id, local_files_only=True))
+        return Path(snapshot_download(repo_id, allow_patterns=patterns, local_files_only=True))
 
 
 def model_downloaded(repo_id: str) -> bool:
@@ -118,6 +120,27 @@ def model_downloaded(repo_id: str) -> bool:
         if type(error).__name__ != "LocalEntryNotFoundError":
             log.warning("Checking model %r failed: %r", repo_id, error)
         return False
+
+
+def create_engine(repo_id: str, device: str = "GPU"):
+    """The engine for `repo_id`: Whisper on OpenVINO, or the optional Parakeet backend.
+
+    Both have the same surface (load, release, generate, device), so the rest
+    of the app does not care which one it got.
+    """
+    from . import parakeet
+
+    if config.MODELS.get(repo_id, {}).get("backend") == parakeet.BACKEND or repo_id in parakeet.FILES:
+        return parakeet.Engine(repo_id, device)
+    return Engine(repo_id, device)
+
+
+def offered_models() -> list[str]:
+    """Transcription models to offer in Settings: Parakeet only when its package is installed."""
+    from . import parakeet
+
+    return [repo for repo, info in config.MODELS.items()
+            if info.get("backend") != parakeet.BACKEND or parakeet.available()]
 
 
 def available_devices() -> list[str]:
@@ -569,7 +592,7 @@ def transcribe_session(
     Builds and releases its own model; the app uses `iter_transcribe_session`
     through the shared engine instead.
     """
-    engine = Engine(model, device)
+    engine = create_engine(model, device)
     try:
         segments = drain(iter_transcribe_session(files, engine, language_code, progress,
                                                  cancel, status))

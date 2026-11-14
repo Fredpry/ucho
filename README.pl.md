@@ -69,7 +69,7 @@ Godzinne spotkanie transkrybuje się na karcie Arc w ok. 4 minuty.
    Nie trzeba uprawnień administratora. Instalator doinstaluje Pythona 3.12 (przez winget, jeśli go nie ma), środowisko z przypiętymi wersjami pakietów, pobierze model Whisper (ok. 1,6 GB, w przypiętej wersji) i utworzy skróty.
 3. Uruchom **Ucho** z Menu Start. Przy pierwszym uruchomieniu krótki kreator zapyta o język, folder nagrań, pokaże model dobrany do Twojego sprzętu (z opcjonalnym pomiarem szybkości) i przypomni o zgodzie uczestników. Skrót **Ucho Dictate** uruchamia tę samą aplikację z otwartym dyktowaniem.
 
-Opcjonalnie `-WithSummary` pobiera też model podsumowań (ok. 5 GB) i włącza podsumowania.
+Opcjonalnie `-WithSummary` pobiera też model podsumowań (ok. 5 GB) i włącza podsumowania. `-WithParakeet` instaluje dodatkowy silnik rozpoznawania mowy NVIDIA Parakeet (działa tylko na procesorze), przydatny na laptopach bez karty graficznej Intela: po polsku jest prawie tak dokładny jak Whisper i kilka razy szybszy na procesorze, ale gorzej radzi sobie z angielskimi wtrąceniami w polskich zdaniach. Wybierzesz go w Ustawieniach → Sprzęt, gdzie pobierzesz też jego model (ok. 2,5 GB). Domyślnym silnikiem zostaje Whisper.
 
 Nagrania trafiają do `C:\Users\<Ty>\Ucho\recordings`, celowo poza OneDrive. Katalog zmienisz w Ustawieniach.
 

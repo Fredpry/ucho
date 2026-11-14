@@ -69,7 +69,7 @@ A one-hour meeting transcribes in about 4 minutes on the Arc GPU.
    No admin rights needed. It installs Python 3.12 (via winget if missing), a virtual environment with pinned dependencies, downloads the Whisper model (~1.6 GB, pinned revision) and creates shortcuts.
 3. Start **Ucho** from the Start menu. The first start shows a short setup: language, recordings folder, the model chosen for your hardware (with an optional speed test) and a note on consent. **Ucho Dictate** starts the same app with dictation open.
 
-Optional: `-WithSummary` also downloads the summary model (~5 GB) and turns summaries on.
+Optional: `-WithSummary` also downloads the summary model (~5 GB) and turns summaries on. `-WithParakeet` installs an optional second speech-to-text engine, NVIDIA Parakeet (CPU only), for laptops without an Intel GPU: on Polish it is nearly as accurate as Whisper and several times faster on the CPU, but weaker with English phrases in Polish sentences. Choose it in Settings → Hardware, where its model (~2.5 GB) is downloaded. Whisper stays the default.
 
 Recordings are saved in `C:\Users\<you>\Ucho\recordings`, outside OneDrive on purpose. You can change it in Settings.
 

@@ -16,6 +16,7 @@
 param(
     [switch]$SkipModel,            # skip the Whisper model / nie pobieraj modelu Whisper
     [switch]$WithSummary,          # also download the summary model / pobierz tez model podsumowan
+    [switch]$WithParakeet,         # optional Parakeet backend (CPU) / opcjonalny silnik Parakeet (CPU)
     [switch]$ReinstallPackages     # force reinstall of packages / wymus ponowna instalacje
 )
 
@@ -30,6 +31,7 @@ $DictateIcon = Join-Path $Root 'ucho\assets\dictate.ico'
 $Settings = Join-Path $Root 'settings.json'
 $LegacySettings = Join-Path $Root 'ustawienia.json'
 $Requirements = Join-Path $Root 'requirements.txt'
+$ParakeetRequirements = Join-Path $Root 'requirements-parakeet.txt'
 $Recordings = Join-Path $env:USERPROFILE 'Ucho\recordings'
 $DefaultModel = 'OpenVINO/whisper-large-v3-int8-ov'
 $DefaultLlmModel = 'OpenVINO/Qwen3-8B-int4-ov'
@@ -111,6 +113,20 @@ if ($ReinstallPackages) { $pipArgs += '--force-reinstall' }
 & $VenvPy @pipArgs
 if ($LASTEXITCODE -ne 0) { Fail (T 'Instalacja zaleznosci nie powiodla sie' 'Dependency installation failed'); exit 1 }
 Ok (T 'Zaleznosci zainstalowane' 'Dependencies installed')
+
+# Optional second speech-to-text backend (NVIDIA Parakeet via sherpa-onnx,
+# CPU only). Not installed by default; Whisper stays the default model. The
+# model itself (~2.5 GB) is downloaded later from Settings -> Hardware.
+if ($WithParakeet) {
+    $pipArgs = @('-m', 'pip', 'install', '-r', $ParakeetRequirements)
+    if ($ReinstallPackages) { $pipArgs += '--force-reinstall' }
+    & $VenvPy @pipArgs
+    if ($LASTEXITCODE -ne 0) {
+        Warn (T 'Instalacja Parakeet nie powiodla sie - Whisper dziala bez zmian' 'Parakeet installation failed - Whisper works as before')
+    } else {
+        Ok (T 'Parakeet zainstalowany - wybierz go w Ustawieniach > Sprzet' 'Parakeet installed - choose it in Settings > Hardware')
+    }
+}
 
 # The openvino-telemetry package comes with OpenVINO. The app does not use it
 # (only the model conversion tools do), but we record the opt-out anyway, so

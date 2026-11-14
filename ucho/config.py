@@ -85,6 +85,18 @@ MODELS = {
         "description": "Turbo INT4 — fastest, for long recordings",
         "size": "~500 MB",
     },
+    # Optional second backend (ucho/parakeet.py, sherpa-onnx, CPU only). Offered
+    # in Settings only when `install.ps1 -WithParakeet` installed sherpa-onnx
+    # (transcribe.offered_models). Never recommended automatically: on synthetic
+    # Polish speech it matches Whisper closely and is 3-10x faster on the CPU,
+    # but English phrases inside Polish sentences come out badly
+    # (docs/benchmarks.md, "Parakeet").
+    "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3": {
+        "name": "parakeet-tdt-0.6b-v3",
+        "description": "Parakeet TDT 0.6B v3 — fast on the CPU, weak with English phrases in Polish",
+        "size": "~2.5 GB",
+        "backend": "parakeet",
+    },
 }
 
 DEFAULT_MODEL = "OpenVINO/whisper-large-v3-int8-ov"
@@ -121,6 +133,31 @@ REVISIONS = {
     "OpenVINO/Qwen3-8B-int4-ov": "5c47abf4b8e12ebe8e99745bb0c1ec17e0c0abcc",
     "OpenVINO/Qwen3-4B-int4-ov": "b467368d16b75df14055562fe927ae8e1f15f7ef",
     "OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov": "4d14c299e35d8b74e3471f9e92bd1377fae50736",
+    # Optional Parakeet backend (ucho/parakeet.py): ONNX exports of NVIDIA's
+    # parakeet-tdt-0.6b-v3 (CC BY 4.0) by the sherpa-onnx project. SHA-256 of
+    # the files at these revisions (equal to the Hugging Face LFS ids):
+    # fp32: encoder.onnx    36b758364dfddce472b9a9f75bf6049bbd35c886d7927e3eda80d4ceb3348512
+    #       encoder.weights 3af3f51af5f2d01dbbf5af47d42c7962a2c205f11004254bb4f2b979862f39a8
+    #       decoder.onnx    caed31af1bb08edcc09a01a1c3cbb4d4eb5bfdb9c4e5f307012f84bbf5dbfdbc
+    #       joiner.onnx     0f294e5ba9021a3d80e492de94abe4c116f0afce78452c7debb5dd07690d0340
+    # int8: encoder.int8.onnx 1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479
+    #       decoder.int8.onnx 0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5
+    #       joiner.int8.onnx  cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98
+    # both: tokens.txt        d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d
+    "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3": "5fcc0122fe87e8365e339e467af90c67b746218f",
+    "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8": "ed5d745623472f97cfc2e6c2916ee248798fc5a8",
+}
+
+# Repos of which only some files are downloaded (the Parakeet repos also hold
+# test recordings). The same patterns must be passed to the offline check, or
+# huggingface_hub reports the snapshot as incomplete.
+DOWNLOAD_PATTERNS = {
+    "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3": [
+        "encoder.onnx", "encoder.weights", "decoder.onnx", "joiner.onnx", "tokens.txt", "README.md",
+    ],
+    "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8": [
+        "encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt", "README.md",
+    ],
 }
 
 # Whisper expects the language token in this form. None = auto-detection.

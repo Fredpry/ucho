@@ -85,7 +85,8 @@ class Engine:
         if pipeline_factory is None:
             from . import transcribe
 
-            pipeline_factory = transcribe.Engine
+            # Whisper, or the optional Parakeet backend for its model id.
+            pipeline_factory = transcribe.create_engine
         self._factory = pipeline_factory
         self._pipelines: dict[Key, Any] = {}
         self._keep: set[Key] = set()  # pipelines to keep loaded between jobs

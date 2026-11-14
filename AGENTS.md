@@ -26,7 +26,8 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/archive.py` | Archive listing and full-text search (SQLite FTS5), shared by the recordings list and the MCP server |
 | `ucho/hotkeys.py`, `ucho/instance.py` | Global hotkeys via `RegisterHotKey` (busy hotkeys are reported, not fatal); single instance via a named mutex and events |
 | `ucho/audio.py` | Two-track recording (PyAudioWPatch WASAPI loopback), resampling to 16 kHz, incremental FLAC |
-| `ucho/transcribe.py` | Whisper via OpenVINO GenAI: silence cutting, per-chunk language detection restricted to `config.LANGUAGES`, GPU to CPU fallback |
+| `ucho/transcribe.py` | Whisper via OpenVINO GenAI: silence cutting, per-chunk language detection restricted to `config.LANGUAGES`, GPU to CPU fallback; `create_engine` picks Whisper or Parakeet for a model id |
+| `ucho/parakeet.py` | Optional Parakeet backend (sherpa-onnx, CPU only, `install.ps1 -WithParakeet`): same surface as `transcribe.Engine`, Whisper-shaped results, splits long chunks into 20 s pieces. Offered only when `sherpa_onnx` is installed |
 | `ucho/merge.py` | `Segment`, speaker codes and labels, merging tracks, hallucination filter, `transcript.md/.srt/.txt`, `meta.json` |
 | `ucho/session.py` | The one reader of session folders, for the app and the MCP server; maps v0.1 Polish file names and `meta.json` keys to the current ones |
 | `ucho/summary.py` | Optional LLM summary: JSON schema output, map-reduce for long meetings, name and date filters, folder naming |
@@ -38,7 +39,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 
 ## Change freely
 
-- Model lists in `config.py` (OpenVINO IR repos only). Add the pinned revision to `REVISIONS` and update `THIRD_PARTY.md`.
+- Model lists in `config.py` (OpenVINO IR repos, plus the one optional Parakeet entry with `"backend": "parakeet"`). Add the pinned revision to `REVISIONS` and update `THIRD_PARTY.md`. Never make Parakeet the default or a hardware recommendation without a WER check on real meetings (`docs/benchmarks.md`).
 - Output formats in `merge.py`, hallucination patterns `_HALLUCINATIONS`.
 - Summary prompts and limits in `summary.py` (if you change `SUMMARY_SCHEMA`, update `_normalize` and `as_markdown`).
 - Screen layouts in `screens.py`, `settings_screen.py`, `wizard.py`. Colors come from `design/tokens.json` through `theme.py`; do not hard-code hex colors in screens. Check the result with `tools/screenshots.py` (also at `--size 1093x535`, a 1366x768 screen at 125 %).
