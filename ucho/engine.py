@@ -229,7 +229,7 @@ class Engine:
 
     # --- what the app runs ------------------------------------------------------
 
-    def configure(self, dictation: Key | None, preload: bool) -> Job:
+    def configure(self, dictation: Key | None, preload: bool, on_done=None, on_error=None) -> Job:
         """Which pipeline stays loaded for instant dictation; loads it in the background."""
         def work(job: Job):
             self._keep = {dictation} if (dictation and preload) else set()
@@ -244,7 +244,7 @@ class Engine:
                 return getattr(pipe, "device", dictation[1])
             return None
 
-        return self.submit(work, BACKGROUND, "configure")
+        return self.submit(work, BACKGROUND, "configure", on_done, on_error)
 
     def _busy_keys(self) -> set[Key]:
         """Pipelines used by step jobs that are still running."""

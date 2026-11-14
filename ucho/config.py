@@ -145,6 +145,22 @@ TRACK_LABELS = {
     "system": "System audio only",
 }
 
+THEME_LABELS = {
+    "system": "Same as Windows",
+    "light": "Light",
+    "dark": "Dark",
+}
+
+LAYOUT_LABELS = {
+    "single": "One window: Meeting and Dictation",
+    "tray": "Tray icon with separate windows",
+}
+
+DICTATION_MODE_LABELS = {
+    "paste": "Paste (clipboard + Ctrl+V)",
+    "type": "Type (simulated keyboard)",
+}
+
 UI_LANGUAGE_LABELS = {
     "auto": "Auto (same as system)",
     "pl": "Polski",

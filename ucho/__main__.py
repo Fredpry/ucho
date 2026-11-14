@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Entry point: `pythonw -m ucho`.
+"""Entry point: `pythonw -m ucho [--dictate | --record | --minimized | --smoke-test]`.
 
 We run under pythonw (no console), so every unhandled exception must reach
 the log file and a message box - otherwise the app vanishes without a trace.
@@ -28,12 +28,11 @@ def _show_error(message: str) -> None:
         pass
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     try:
         from .app import run
 
-        run()
-        return 0
+        return run(argv)
     except Exception:
         trace = traceback.format_exc()
         try:
