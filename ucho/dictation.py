@@ -991,7 +991,8 @@ class DictationController:
                         log.exception("Could not insert the text")
                 report(None)
 
-            threading.Thread(target=insert, name="insert-text", daemon=True).start()
+            self._insert_thread = threading.Thread(target=insert, name="insert-text", daemon=True)
+            self._insert_thread.start()
 
         def failed(error):
             self.app.post(lambda: self._failed(str(error)))
@@ -1005,7 +1006,11 @@ class DictationController:
         self.queued = max(0, self.queued - 1)
         if text:
             self.last_text, self.last_seconds = text, seconds
-            if where in CLIPBOARD_ONLY:
+            if where == NOT_TAKEN:
+                # The Ctrl+V is still queued in a slow window, which may paste on its own.
+                self.show_message(t("The window has not taken the text yet. If it does not "
+                                    "appear, press Ctrl+V."), "warning", 8)
+            elif where in CLIPBOARD_ONLY:
                 # The window you dictated into is gone, did not come back or
                 # did not take the text, or only the desktop was active: better
                 # on the clipboard than pasted into the wrong window or nowhere.
@@ -1055,6 +1060,11 @@ class DictationController:
             self.stop()
 
     def quit(self) -> None:
+        # A paste may still be waiting for the target (up to PASTE_TIMEOUT_S): let it
+        # finish, so the dictation is rendered onto the clipboard before we exit.
+        thread = getattr(self, "_insert_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(PASTE_TIMEOUT_S + 1.0)
         if self.recording:
             self.microphone.stop()
             self.recording = False

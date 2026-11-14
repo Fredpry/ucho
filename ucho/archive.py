@@ -56,7 +56,7 @@ def query_words(query: str) -> list[str]:
 
 def folded_words(query: str) -> list[str]:
     """The query words as they are matched against the index."""
-    return [w for w in (fold(word) for word in query_words(query)) if w]
+    return [token for word in query_words(query) for token in tokens(fold(word)) if token]
 
 
 def fold_map(text: str) -> tuple[str, list[int]]:

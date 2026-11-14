@@ -12,7 +12,7 @@
 | Installation | Python packages pinned in `requirements.txt` | PyPI (`pypi.org`, `files.pythonhosted.org`) |
 | Installation, or *Download model* in Settings | Model files, pinned to a fixed revision in `ucho/config.py` | Hugging Face: `huggingface.co` and its download servers under `*.hf.co` |
 
-Hugging Face answers a file request on `huggingface.co` with a redirect to its download servers (for example `cas-server.xethub.hf.co` and `*.cdn.hf.co`; the exact host can change), so a firewall has to allow `*.hf.co` as well. Nothing else. Recording, transcription, optional summaries and the MCP server work offline.
+Hugging Face answers a file request on `huggingface.co` with a redirect to its download servers (for example `cas-bridge.xethub.hf.co` and `*.cdn.hf.co`; the exact host can change), so a firewall has to allow `*.hf.co` as well. Nothing else. Recording, transcription, optional summaries and the MCP server work offline.
 
 ### Telemetry switched off
 
@@ -83,7 +83,7 @@ No bot in the call does not make recording legal. In the EU, recording people wi
 | Instalacja | Pakiety Pythona przypięte w `requirements.txt` | PyPI (`pypi.org`, `files.pythonhosted.org`) |
 | Instalacja albo *Pobierz model* w Ustawieniach | Pliki modelu w przypiętej wersji z `ucho/config.py` | Hugging Face: `huggingface.co` i jego serwery pobierania w domenie `*.hf.co` |
 
-Na żądanie pliku `huggingface.co` odpowiada przekierowaniem na swoje serwery pobierania (np. `cas-server.xethub.hf.co` i `*.cdn.hf.co`; konkretny adres może się zmienić), więc zapora musi przepuszczać także `*.hf.co`. Nic więcej. Nagrywanie, transkrypcja, opcjonalne podsumowania i serwer MCP działają offline.
+Na żądanie pliku `huggingface.co` odpowiada przekierowaniem na swoje serwery pobierania (np. `cas-bridge.xethub.hf.co` i `*.cdn.hf.co`; konkretny adres może się zmienić), więc zapora musi przepuszczać także `*.hf.co`. Nic więcej. Nagrywanie, transkrypcja, opcjonalne podsumowania i serwer MCP działają offline.
 
 ### Wyłączona telemetria
 
