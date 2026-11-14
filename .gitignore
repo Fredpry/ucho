@@ -1,0 +1,27 @@
+# Srodowiska i cache
+.venv/
+.venv-dev/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Dane uzytkownika i modele: nigdy w repozytorium
+modele/
+nagrania/
+ustawienia.json
+dyktuj.json
+*.log
+*.flac
+*.wav
+
+# Pliki generowane przez instalator i budowanie paczek
+Ucho (diagnostyka).cmd
+ucho/assets/*.ico
+!ucho/assets/ikona.ico
+!ucho/assets/dyktuj.ico
+dist/
+*.zip
+
+# Lokalne materialy robocze
+.ref/

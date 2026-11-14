@@ -1,0 +1,14 @@
+# Wersje sprawdzone na Windows 11, Python 3.12 (listopad 2026).
+# Versions tested on Windows 11, Python 3.12 (November 2026).
+openvino-genai==2026.3.1.0
+openvino==2026.3.1
+openvino-tokenizers==2026.3.1.0
+huggingface_hub==1.30.0
+PyAudioWPatch==0.2.12.8
+soxr==1.1.0
+soundfile==0.14.0
+numpy==2.5.3
+customtkinter==6.0.0
+pillow==12.3.0
+pystray==0.19.5
+pynput==1.8.2
