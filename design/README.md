@@ -48,7 +48,9 @@ Timestamps in transcripts (`[00:12:31]`) always use the mono font so columns lin
 - Fast 140 ms for hover and press, base 240 ms for panels, slow 2.4 s for the ear's sound waves.
 - `prefers-reduced-motion` turns animation off; the logo then shows static waves.
 
-## Components (v0.1 targets)
+## Components
+
+Implemented in the app (v0.2): the theme is built from `tokens.json` in `ucho/theme.py`, the components below live in `ucho/ui.py`. Screenshots: [`docs/screens`](../docs/screens).
 
 | Component | Rules |
 |---|---|

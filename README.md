@@ -21,9 +21,16 @@ Ucho (pronounced *oo-ho*, Polish for "ear") records your Teams, Zoom or Meet cal
 ## What it does
 
 - **Meetings.** Records two separate tracks: your microphone ("Me") and system audio ("Meeting"). You get a transcript split by speaker without any diarization model, because the sources are already separate.
-- **Dictation.** *Ucho Dictate*: press Ctrl+Shift+Space, speak, press again, and the text is pasted where your cursor is (terminal, browser, Teams).
+- **Dictation.** Press Ctrl+Shift+Space, speak, press again, and the text is pasted where your cursor is (terminal, browser, Teams). Meetings and dictation are one app since v0.2: one tray icon, one Whisper engine, and a dictation goes ahead of a running meeting transcription.
 - **Archive for AI agents.** A small read-only MCP server lets Claude Code, Claude Desktop, Cursor, Codex or any MCP client list, search and read your transcripts. Ucho does not ship its own chatbot; your agent does the summarizing.
 - **Optional local summaries.** Off by default. If you turn them on, a local Qwen model writes a short summary and checks it mechanically against the transcript, so it cannot invent names or dates that were never said.
+
+<p align="center">
+  <img src="docs/screens/meeting-recording-light.png" alt="Recording a meeting in Ucho" width="49%">
+  <img src="docs/screens/transcript-dark.png" alt="A transcript with timestamps and speakers" width="49%">
+</p>
+
+More screenshots (both themes, the dictation window, the first-start wizard): [docs/screens](docs/screens).
 
 ## Why another transcription app
 
@@ -60,22 +67,25 @@ A one-hour meeting transcribes in about 4 minutes on the Arc GPU.
    powershell -ExecutionPolicy Bypass -File .\install.ps1
    ```
    No admin rights needed. It installs Python 3.12 (via winget if missing), a virtual environment with pinned dependencies, downloads the Whisper model (~1.6 GB, pinned revision) and creates shortcuts.
-3. Start **Ucho** or **Ucho Dictate** from the Start menu.
+3. Start **Ucho** from the Start menu. The first start shows a short setup: language, recordings folder, the model chosen for your hardware (with an optional speed test) and a note on consent. **Ucho Dictate** starts the same app with dictation open.
 
 Optional: `-WithSummary` also downloads the summary model (~5 GB) and turns summaries on.
 
 Recordings are saved in `C:\Users\<you>\Ucho\recordings`, outside OneDrive on purpose. You can change it in Settings.
 
-Updating from v0.1: unpack over the old folder and run `install.ps1` again. Your `ustawienia.json` is migrated to `settings.json` (your recordings folder stays where it was), `modele\` is renamed to `models\`, and old recordings with Polish file names keep working in the app and the MCP server.
+Updating from v0.1: unpack over the old folder and run `install.ps1` again. Your `ustawienia.json` is migrated to `settings.json` (your recordings folder stays where it was), the dictation settings from `dyktuj.json` / `dictate.json` move into `settings.json`, `modele\` is renamed to `models\`, and old recordings with Polish file names keep working in the app and the MCP server. Quit the old *Ucho Dyktuj* window first: it holds Ctrl+Shift+Space.
 
 ## Use
 
 - Type a meeting name, press **REC**, or use **Ctrl+Alt+R** anywhere (also when the window is hidden in the tray).
 - **STOP** starts transcription. You can stop it; finished parts are kept.
+- **Dictate** with **Ctrl+Shift+Space** (again to insert, **Esc** to cancel), also while a meeting is being transcribed.
+- **Recordings** lists every meeting with its one-line summary; the search box looks in titles, summaries and all transcripts, with or without Polish letters.
+- Right-click the Ucho taskbar button for *Record a meeting* and *Dictate*. Settings can start Ucho with Windows.
 - **Use headphones.** On speakers the microphone also picks up the other people and you get everything twice.
 - **Tell participants you are recording.** Ucho has no bot and is technically invisible; that does not make recording legal. See [PRIVACY.md](PRIVACY.md).
 
-The interface is in Polish or English (Settings → Interface language, or automatically from Windows).
+The interface is in Polish or English (Settings → Interface language, or automatically from Windows), with a light and a dark theme that follow Windows unless you pick one. Settings → *Window layout* chooses between one window with Meeting and Dictation, and the tray icon as the hub with a small separate dictation window. Every control works with the keyboard (Tab, Enter, Space).
 
 ## Connect your AI agent (MCP)
 
@@ -95,11 +105,12 @@ Your agent sends the transcript text it reads to its model provider (for Claude 
 
 Short version: audio, transcripts and settings stay on your disk. Telemetry of Hugging Face and OpenVINO is disabled. Details and a one-line check you can run yourself: [PRIVACY.md](PRIVACY.md).
 
-## Limitations (v0.1)
+## Limitations
 
 - Windows only. macOS comes in v0.2.
 - Everyone on the far end of a call is labeled "Meeting"; individual remote speakers are not separated.
 - No live transcript while recording.
+- With a forced transcription language (Polski or English instead of Auto) the meeting is transcribed in chunks of up to 5 minutes, so a dictation started during that transcription can wait up to one chunk (about 20 s on an Arc GPU). In Auto mode it waits at most ~1 s.
 - The app is not code-signed yet, so Windows may show a warning.
 
 ## Development
@@ -109,6 +120,7 @@ py -3.12 -m venv .venv-dev
 .\.venv-dev\Scripts\python.exe -m pip install pytest ruff numpy soundfile
 .\.venv-dev\Scripts\python.exe -m pytest
 .\.venv-dev\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m ucho --smoke-test     # GUI start test, no audio and no model (CI runs it)
 ```
 
 Architecture notes: [docs/architecture.md](docs/architecture.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
