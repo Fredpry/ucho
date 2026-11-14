@@ -15,17 +15,18 @@ from __future__ import annotations
 
 import gc
 import logging
+import re
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Generator
 
 import numpy as np
 import soundfile as sf
 
 from . import config
 from .i18n import t
-from .merge import SPEAKER_ME, SPEAKER_MEETING, Segment, merge_tracks
+from .merge import SPEAKER_ME, SPEAKER_MEETING, Segment, is_hallucination, merge_tracks
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +68,20 @@ MIN_SILENCE_S = 0.35
 SPEECH_RMS_THRESHOLD = 0.003
 
 ProgressFn = Callable[[float, str], None]
+
+# A transcription that yields between chunks, so the shared engine
+# (ucho/engine.py) can run a dictation in between. The return value of the
+# generator is the result.
+Steps = Generator[None, None, "list[Segment]"]
+
+
+def drain(steps: Generator):
+    """Runs a step generator to the end and returns its result."""
+    while True:
+        try:
+            next(steps)
+        except StopIteration as stop:
+            return stop.value
 
 
 # --- model ---------------------------------------------------------------
@@ -444,6 +459,19 @@ def transcribe_file(
     `weight` is the (from, to) range of the global progress bar this file
     takes - so two tracks can report one shared 0..1 progress.
     """
+    return drain(iter_transcribe_file(file, engine, speaker, language, progress, cancel, weight))
+
+
+def iter_transcribe_file(
+    file: Path,
+    engine: Engine,
+    speaker: str,
+    language: str | None = None,
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+    weight: tuple[float, float] = (0.0, 1.0),
+) -> Steps:
+    """`transcribe_file` as steps: yields after every chunk sent to the model."""
     audio, sr = sf.read(str(file), dtype="float32", always_2d=False)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -489,6 +517,7 @@ def transcribe_file(
             if progress:
                 progress(weight_from + span * (i + 1) / len(ranges),
                          f"[segment {i + 1} error: {error}]")
+            yield
             continue
 
         end_s = end / SAMPLE_RATE
@@ -520,6 +549,8 @@ def transcribe_file(
         if progress:
             last_text = segments[-1].text if segments else ""
             progress(weight_from + span * (i + 1) / len(ranges), last_text)
+        # Between two chunks the engine may run a dictation (W3).
+        yield
 
     return segments
 
@@ -533,38 +564,107 @@ def transcribe_session(
     cancel: threading.Event | None = None,
     status: Callable[[str], None] | None = None,
 ) -> tuple[list[Segment], str]:
-    """Transcribes all tracks of a session. Returns (segments, used_device)."""
-    language = config.LANGUAGES.get(language_code)
-    engine = Engine(model, device)
+    """Transcribes all tracks of a session. Returns (segments, used_device).
 
+    Builds and releases its own model; the app uses `iter_transcribe_session`
+    through the shared engine instead.
+    """
+    engine = Engine(model, device)
+    try:
+        segments = drain(iter_transcribe_session(files, engine, language_code, progress,
+                                                 cancel, status))
+    finally:
+        used_device = engine.device
+        engine.release()
+    return segments, used_device
+
+
+def iter_transcribe_session(
+    files: dict[str, Path],
+    engine: Engine,
+    language_code: str = "auto",
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+    status: Callable[[str], None] | None = None,
+) -> Steps:
+    """All tracks of a session as steps (one per chunk). Returns the merged segments.
+
+    `engine` is loaded here if needed and NOT released: the caller owns it
+    (the shared engine keeps it when dictation uses the same model).
+    """
+    language = config.LANGUAGES.get(language_code)
     speakers = {"microphone": SPEAKER_ME, "system": SPEAKER_MEETING}
     to_do = [(n, p) for n, p in files.items() if p and Path(p).exists()]
     if not to_do:
-        return [], device
+        return []
 
     # The first load on the GPU can take tens of seconds (model compilation),
     # so we say so before the first chunk starts.
     if status:
-        status(t("Loading model on {device}...", device=device))
+        status(t("Loading model on {device}...", device=engine.requested_device))
     engine.load()
     if status:
         status(t("Transcribing on {device}...", device=engine.device))
+    yield
 
     step = 1.0 / len(to_do)
     results: list[list[Segment]] = []
-    try:
-        for i, (name, file) in enumerate(to_do):
-            if cancel is not None and cancel.is_set():
-                break
-            results.append(
-                transcribe_file(
-                    Path(file), engine, speakers.get(name, name), language,
-                    progress=progress, cancel=cancel,
-                    weight=(i * step, (i + 1) * step),
-                )
-            )
-    finally:
-        used_device = engine.device
-        engine.release()
+    for i, (name, file) in enumerate(to_do):
+        if cancel is not None and cancel.is_set():
+            break
+        segments = yield from iter_transcribe_file(
+            Path(file), engine, speakers.get(name, name), language,
+            progress=progress, cancel=cancel, weight=(i * step, (i + 1) * step),
+        )
+        results.append(segments)
+    return merge_tracks(*results)
 
-    return merge_tracks(*results), used_device
+
+# --- dictation ------------------------------------------------------------
+
+DICTATION_MIN_S = 0.3
+
+
+def apply_dictionary(text: str, dictionary: dict | None) -> str:
+    """Replaces whole-word, case-insensitive matches (names Whisper keeps getting wrong)."""
+    for wrong, right in (dictionary or {}).items():
+        if wrong and isinstance(right, str):
+            text = re.sub(rf"(?<!\w){re.escape(wrong)}(?!\w)", right, text,
+                          flags=re.IGNORECASE)
+    return text
+
+
+def recognize_dictation(engine: Engine, recording: np.ndarray, language_code: str,
+                        dictionary: dict | None = None) -> str:
+    """One short in-memory recording -> text, in a single model call."""
+    if recording.size < DICTATION_MIN_S * SAMPLE_RATE:
+        return ""
+    # On silence Whisper invents sentences; better to insert nothing.
+    if peak_rms(recording) < SPEECH_RMS_THRESHOLD:
+        log.info("Recording skipped - silence only")
+        return ""
+
+    # Pauses for thinking are the main source of invented "Dziękuję." and of
+    # lost fragments; see shorten_pauses.
+    before = recording.size
+    recording = shorten_pauses(recording)
+    if recording.size < before:
+        log.info("Pauses shortened: %.1f s -> %.1f s",
+                 before / SAMPLE_RATE, recording.size / SAMPLE_RATE)
+    if recording.size < DICTATION_MIN_S * SAMPLE_RATE:
+        return ""
+
+    engine.load()
+    result = engine.generate(recording, config.LANGUAGES.get(language_code))
+
+    texts = getattr(result, "texts", None)
+    if texts:
+        text = str(texts[0])
+    else:
+        chunks = _chunks(result)
+        text = " ".join(str(getattr(c, "text", "")) for c in chunks) if chunks else str(result)
+
+    text = re.sub(r"\s+", " ", text).strip()
+    if is_hallucination(text):
+        return ""
+    return apply_dictionary(text, dictionary)
