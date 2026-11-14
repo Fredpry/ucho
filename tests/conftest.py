@@ -9,10 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 @pytest.fixture(autouse=True)
-def jezyk_polski():
-    """Testy porownuja teksty zrodlowe, wiec interfejs zawsze po polsku."""
+def english_ui():
+    """Tests compare source texts, so the UI is always in English."""
     from ucho import i18n
 
-    i18n.ustaw_jezyk("pl")
+    i18n.set_language("en")
     yield
-    i18n.ustaw_jezyk("pl")
+    i18n.set_language("en")

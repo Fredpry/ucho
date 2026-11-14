@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Tlumaczenia interfejsu: polski (tekst zrodlowy) i angielski.
+"""UI translations: English (source text) and Polish.
 
-Kluczem jest polski tekst wpisany w kodzie, a `locale/en.json` mapuje go na
-angielski. Brak tlumaczenia oznacza polski tekst, wiec nic sie nie wysypie,
-a test `tests/test_i18n.py` pilnuje, zeby kazde `t("...")` mialo wpis w en.json.
+The key is the English text written in the code, and `locale/pl.json` maps it
+to Polish. A missing translation falls back to English, so nothing breaks, and
+`tests/test_i18n.py` checks that every `t("...")` has an entry in pl.json.
 
-Jezyk wybiera ustawienie `jezyk_interfejsu` ("auto", "pl", "en"). "auto" bierze
-jezyk interfejsu Windows: polski dla polskiego systemu, angielski dla reszty.
+The language comes from the `ui_language` setting ("auto", "pl", "en"). "auto"
+follows the Windows display language: Polish for a Polish system, English
+for everything else.
 """
 
 from __future__ import annotations
@@ -19,56 +20,57 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-JEZYKI_INTERFEJSU = ("auto", "pl", "en")
-_KATALOG = Path(__file__).resolve().parent / "locale"
+UI_LANGUAGES = ("auto", "pl", "en")
+SOURCE_LANGUAGE = "en"
+_LOCALE_DIR = Path(__file__).resolve().parent / "locale"
 
-_jezyk = "pl"
-_tlumaczenia: dict[str, str] = {}
+_language = SOURCE_LANGUAGE
+_translations: dict[str, str] = {}
 
 
-def jezyk_systemu() -> str:
-    """'pl' dla polskiego interfejsu Windows, 'en' dla kazdego innego."""
+def system_language() -> str:
+    """'pl' for a Polish Windows display language, 'en' for any other."""
     if sys.platform == "win32":
         try:
             import ctypes
 
             langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
-            # Mlodsze 10 bitow to jezyk glowny; 0x15 = polski.
+            # The lower 10 bits are the primary language; 0x15 = Polish.
             return "pl" if (langid & 0x3FF) == 0x15 else "en"
         except Exception:
-            log.debug("Nie udalo sie odczytac jezyka systemu", exc_info=True)
+            log.debug("Could not read the system language", exc_info=True)
     import locale
 
-    kod = (locale.getlocale()[0] or "").lower()
-    return "pl" if kod.startswith(("pl", "polish")) else "en"
+    code = (locale.getlocale()[0] or "").lower()
+    return "pl" if code.startswith(("pl", "polish")) else "en"
 
 
-def wczytaj_tlumaczenia(jezyk: str) -> dict[str, str]:
-    if jezyk == "pl":
+def load_translations(language: str) -> dict[str, str]:
+    if language == SOURCE_LANGUAGE:
         return {}
     try:
-        dane = json.loads((_KATALOG / f"{jezyk}.json").read_text(encoding="utf-8"))
+        data = json.loads((_LOCALE_DIR / f"{language}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        log.warning("Brak tlumaczen dla jezyka %s", jezyk)
+        log.warning("No translations for language %s", language)
         return {}
-    return {k: v for k, v in dane.items() if isinstance(v, str) and not k.startswith("_")}
+    return {k: v for k, v in data.items() if isinstance(v, str) and not k.startswith("_")}
 
 
-def ustaw_jezyk(jezyk: str | None) -> str:
-    """Ustawia jezyk interfejsu dla calego procesu. Zwraca faktycznie uzyty kod."""
-    global _jezyk, _tlumaczenia
-    if jezyk not in ("pl", "en"):
-        jezyk = jezyk_systemu()
-    _jezyk = jezyk
-    _tlumaczenia = wczytaj_tlumaczenia(jezyk)
-    return _jezyk
+def set_language(language: str | None) -> str:
+    """Sets the UI language for the whole process. Returns the code actually used."""
+    global _language, _translations
+    if language not in ("pl", "en"):
+        language = system_language()
+    _language = language
+    _translations = load_translations(language)
+    return _language
 
 
-def jezyk() -> str:
-    return _jezyk
+def language() -> str:
+    return _language
 
 
-def t(tekst: str, **pola) -> str:
-    """Tekst w biezacym jezyku; pola wstawiane przez str.format."""
-    wynik = _tlumaczenia.get(tekst, tekst)
-    return wynik.format(**pola) if pola else wynik
+def t(text: str, **fields) -> str:
+    """Text in the current language; fields are inserted with str.format."""
+    result = _translations.get(text, text)
+    return result.format(**fields) if fields else result

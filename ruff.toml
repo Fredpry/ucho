@@ -1,8 +1,8 @@
 line-length = 110
 target-version = "py312"
-extend-exclude = [".venv", ".venv-dev", ".ref", "modele"]
+extend-exclude = [".venv", ".venv-dev", ".ref", "models", "modele"]
 
 [lint]
 select = ["E", "F", "W", "B", "I"]
-# Komentarze i docstringi celowo bez polskich znakow, teksty UI z polskimi znakami.
+# Long lines are allowed: UI strings and comments with measurements read better unwrapped.
 ignore = ["E501", "B008", "I001"]

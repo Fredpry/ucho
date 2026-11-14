@@ -23,10 +23,10 @@ Nothing else. Recording, transcription, optional summaries and the MCP server wo
 
 | What | Where |
 |---|---|
-| Recordings (`mikrofon.flac`, `spotkanie.flac`), transcripts, `meta.json` | `C:\Users\<you>\Ucho\nagrania` (changeable in Settings) |
-| Settings | `ustawienia.json`, `dyktuj.json` in the program folder |
-| Logs | `ucho.log`, `dyktuj.log` in the program folder. **`dyktuj.log` contains the dictated text** (it is used to restore the last text after a restart). Delete it whenever you like. |
-| Models | `modele\` in the program folder |
+| Recordings (`microphone.flac`, `meeting.flac`), transcripts, `meta.json` | `C:\Users\<you>\Ucho\recordings` (changeable in Settings; v0.1 used `Ucho\nagrania`) |
+| Settings | `settings.json`, `dictate.json` in the program folder (v0.1: `ustawienia.json`, `dyktuj.json`, kept after migration) |
+| Logs | `ucho.log`, `dictate.log` in the program folder. **`dictate.log` contains the dictated text** (it is used to restore the last text after a restart). Delete it whenever you like. |
+| Models | `models\` in the program folder |
 
 The default recordings folder is deliberately **not** in Documents: on many company laptops Documents are redirected to OneDrive, which would upload recordings to the cloud.
 
@@ -84,10 +84,10 @@ Nic więcej. Nagrywanie, transkrypcja, opcjonalne podsumowania i serwer MCP dzia
 
 | Co | Gdzie |
 |---|---|
-| Nagrania, transkrypty, `meta.json` | `C:\Users\<Ty>\Ucho\nagrania` (do zmiany w Ustawieniach) |
-| Ustawienia | `ustawienia.json`, `dyktuj.json` w folderze programu |
-| Logi | `ucho.log`, `dyktuj.log` w folderze programu. **`dyktuj.log` zawiera podyktowany tekst** (służy do odtworzenia ostatniego tekstu po restarcie). Możesz go w każdej chwili usunąć. |
-| Modele | `modele\` w folderze programu |
+| Nagrania, transkrypty, `meta.json` | `C:\Users\<Ty>\Ucho\recordings` (do zmiany w Ustawieniach; w v0.1 `Ucho\nagrania`) |
+| Ustawienia | `settings.json`, `dictate.json` w folderze programu (w v0.1 `ustawienia.json`, `dyktuj.json`, zostają po migracji) |
+| Logi | `ucho.log`, `dictate.log` w folderze programu. **`dictate.log` zawiera podyktowany tekst** (służy do odtworzenia ostatniego tekstu po restarcie). Możesz go w każdej chwili usunąć. |
+| Modele | `models\` w folderze programu |
 
 Domyślny folder nagrań celowo **nie** leży w Dokumentach: na wielu firmowych laptopach Dokumenty są przekierowane do OneDrive, więc nagrania trafiłyby do chmury.
 
