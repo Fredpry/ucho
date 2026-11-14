@@ -126,33 +126,68 @@ Krok (T 'Generuje ikone aplikacji' 'Generating the app icon')
 & $VenvPy -c "from ucho.ikona import zapisz_ico; from pathlib import Path; zapisz_ico(Path(r'$Ikona'))"
 if ($LASTEXITCODE -eq 0) { Ok $Ikona } else { Uwaga (T 'Nie udalo sie wygenerowac ikony (aplikacja zadziala bez niej)' 'Could not generate the icon (the app works without it)') }
 
-# --- 5. Sprzet: co widzi OpenVINO ----------------------------------------
+# --- 5. Ustawienia poczatkowe --------------------------------------------
 
-Krok (T 'Sprawdzam akceleracje sprzetowa' 'Checking hardware acceleration')
-$skryptUrzadzen = Join-Path $Tmp 'urzadzenia.py'
-@'
-import openvino
-print(",".join(openvino.Core().available_devices))
-'@ | Out-File -FilePath $skryptUrzadzen -Encoding utf8
-
-$urzadzenia = & $VenvPy $skryptUrzadzen
-if ($LASTEXITCODE -ne 0 -or -not $urzadzenia) {
-    Uwaga (T 'Nie udalo sie odpytac OpenVINO - ustawiam CPU' 'Could not query OpenVINO - using CPU')
-    $urzadzenia = 'CPU'
-}
-$urzadzenia = $urzadzenia.Trim()
-Ok "OpenVINO: $urzadzenia"
-
-$device = 'CPU'
-if ($urzadzenia -match 'GPU') {
-    $device = 'GPU'
-    Ok (T 'Wykryto zintegrowana grafike Intela - transkrypcja pojdzie na GPU' 'Intel integrated GPU found - transcription will run on the GPU')
+# Najpierw plik z wartosciami domyslnymi (klucze jak w config.DOMYSLNE), potem
+# krok 6 wpisuje do niego rekomendacje sprzetowa. Odwrotna kolejnosc nadpisalaby
+# rekomendacje wartosciami domyslnymi.
+Krok (T 'Zapisuje ustawienia poczatkowe' 'Writing initial settings')
+$noweUstawienia = -not (Test-Path $Ustawienia)
+if ($noweUstawienia) {
+    $konfiguracja = [ordered]@{
+        katalog_nagran          = $Nagrania
+        model                   = $ModelDomyslny
+        device                  = 'GPU'
+        jezyk                   = 'auto'
+        jezyk_interfejsu        = 'auto'
+        sciezki                 = 'obie'
+        mikrofon_index          = $null
+        system_index            = $null
+        hotkey                  = '<ctrl>+<alt>+r'
+        tray                    = $true
+        transkrybuj_po_stopie   = $true
+        podsumowanie            = [bool]$ZPodsumowaniem
+        model_llm               = $ModelLLMDomyslny
+        zmiana_nazwy            = [bool]$ZPodsumowaniem
+        dictation_model         = 'OpenVINO/whisper-large-v3-fp16-ov'
+        hardware_profile        = $null
+    }
+    $konfiguracja | ConvertTo-Json | Out-File -FilePath $Ustawienia -Encoding utf8
+    Ok $Ustawienia
 } else {
-    Uwaga (T 'Brak GPU w OpenVINO - transkrypcja pojdzie na CPU (wolniej, ale dziala)' 'No GPU in OpenVINO - transcription will run on the CPU (slower, but it works)')
-    Uwaga (T 'Jesli masz Intel Arc, zaktualizuj sterownik graficzny i uruchom instalator ponownie' 'If you have Intel Arc, update the graphics driver and run the installer again')
+    Ok (T 'ustawienia.json juz istnieje - zostawiam wybory uzytkownika' 'ustawienia.json already exists - keeping the user choices')
+}
+New-Item -ItemType Directory -Force -Path $Nagrania | Out-Null
+Ok ((T 'Nagrania: ' 'Recordings: ') + $Nagrania)
+
+# --- 6. Sprzet i dobor modelu --------------------------------------------
+
+# ucho.hardware czyta RAM, procesor i urzadzenia OpenVINO, dobiera model
+# i urzadzenie z tabeli regul (docs/hardware.md) i zapisuje je w ustawieniach.
+# Przy ponownej instalacji --keep-choice nadpisuje tylko to, czego uzytkownik
+# nie zmienil recznie (np. po aktualizacji sterownika GPU wejdzie na GPU).
+Krok (T 'Sprawdzam sprzet i dobieram model' 'Checking the hardware and choosing the model')
+$argiSprzetu = @('-m', 'ucho.hardware', '--save')
+if (-not $noweUstawienia) { $argiSprzetu += '--keep-choice' }
+& $VenvPy @argiSprzetu
+if ($LASTEXITCODE -ne 0) {
+    Uwaga (T 'Nie udalo sie sprawdzic sprzetu - zostaja ustawienia domyslne' 'Hardware check failed - keeping the default settings')
 }
 
-# --- 6. Modele ------------------------------------------------------------
+$Model = $ModelDomyslny
+$device = 'GPU'
+try {
+    $zapisane = Get-Content -Raw -Encoding UTF8 -Path $Ustawienia | ConvertFrom-Json
+    if ($zapisane.model) { $Model = [string]$zapisane.model }
+    if ($zapisane.device) { $device = [string]$zapisane.device }
+} catch {
+    Uwaga (T 'Nie udalo sie odczytac ustawien - pobiore model domyslny' 'Could not read the settings - downloading the default model')
+}
+if ($device -eq 'CPU') {
+    Uwaga (T 'Jesli masz Intel Arc lub Iris Xe, zaktualizuj sterownik graficzny i uruchom instalator ponownie' 'If you have Intel Arc or Iris Xe, update the graphics driver and run the installer again')
+}
+
+# --- 7. Modele ------------------------------------------------------------
 
 # Pobieranie przez aplikacje: ta sama przypieta rewizja co w config.REWIZJE.
 $skryptModelu = Join-Path $Tmp 'model.py'
@@ -164,8 +199,12 @@ print(sciezka_modelu(sys.argv[2], pobierz=True))
 '@ | Out-File -FilePath $skryptModelu -Encoding utf8
 
 if (-not $PomijModel) {
-    Krok (T "Pobieram model $ModelDomyslny (~1,6 GB, tylko raz)" "Downloading model $ModelDomyslny (~1.6 GB, only once)")
-    & $VenvPy $skryptModelu $Root $ModelDomyslny
+    $rozmiar = & $VenvPy -c "from ucho import config; print(config.MODELE.get(r'$Model', {}).get('rozmiar', '?'))"
+    if ($LASTEXITCODE -ne 0 -or -not $rozmiar) { $rozmiar = '?' }
+    $rozmiar = "$rozmiar".Trim()
+    if (-not $PL) { $rozmiar = $rozmiar -replace ',', '.' }
+    Krok (T "Pobieram model $Model ($rozmiar, tylko raz)" "Downloading model $Model ($rozmiar, only once)")
+    & $VenvPy $skryptModelu $Root $Model
     if ($LASTEXITCODE -ne 0) {
         Uwaga (T 'Pobieranie nie powiodlo sie - mozesz je powtorzyc w Ustawieniach aplikacji' 'Download failed - you can retry from the app Settings')
     } else {
@@ -185,34 +224,6 @@ if ($ZPodsumowaniem) {
         Ok (T 'Model podsumowan gotowy' 'Summary model ready')
     }
 }
-
-# --- 7. Ustawienia poczatkowe --------------------------------------------
-
-Krok (T 'Zapisuje ustawienia poczatkowe' 'Writing initial settings')
-if (-not (Test-Path $Ustawienia)) {
-    $konfiguracja = [ordered]@{
-        katalog_nagran          = $Nagrania
-        model                   = $ModelDomyslny
-        device                  = $device
-        jezyk                   = 'auto'
-        jezyk_interfejsu        = 'auto'
-        sciezki                 = 'obie'
-        mikrofon_index          = $null
-        system_index            = $null
-        hotkey                  = '<ctrl>+<alt>+r'
-        tray                    = $true
-        transkrybuj_po_stopie   = $true
-        podsumowanie            = [bool]$ZPodsumowaniem
-        model_llm               = $ModelLLMDomyslny
-        zmiana_nazwy            = [bool]$ZPodsumowaniem
-    }
-    $konfiguracja | ConvertTo-Json | Out-File -FilePath $Ustawienia -Encoding utf8
-    Ok "$Ustawienia (device: $device)"
-} else {
-    Ok (T 'ustawienia.json juz istnieje - nie nadpisuje' 'ustawienia.json already exists - not overwriting')
-}
-New-Item -ItemType Directory -Force -Path $Nagrania | Out-Null
-Ok ((T 'Nagrania: ' 'Recordings: ') + $Nagrania)
 
 # --- 8. Skroty ------------------------------------------------------------
 

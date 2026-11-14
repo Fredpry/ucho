@@ -140,6 +140,13 @@ DOMYSLNE = {
     "podsumowanie": False,
     "model_llm": MODEL_LLM_DOMYSLNY,
     "zmiana_nazwy": False,
+    # Written by `python -m ucho.hardware --save` (the installer runs it). The
+    # dictation window does not read it yet: it still uses dyktuj.json until
+    # both windows are merged (plan v0.2, W3).
+    "dictation_model": "OpenVINO/whisper-large-v3-fp16-ov",
+    # Short hardware summary with the last automatic recommendation, so that
+    # re-running the installer can tell an automatic choice from a manual one.
+    "hardware_profile": None,
 }
 
 
