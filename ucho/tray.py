@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Ikona w zasobniku systemowym i globalny skrot klawiszowy.
+"""System tray icon and the global keyboard shortcut.
 
-Oba mechanizmy sa opcjonalne - jesli pystray albo pynput nie wystartuja
-(np. przez polityke systemowa), aplikacja dziala dalej, tylko bez nich.
+Both are optional: if pystray or pynput fail to start (e.g. because of a
+system policy), the app keeps working without them.
 """
 
 from __future__ import annotations
@@ -13,177 +13,177 @@ import threading
 import time
 from typing import Callable
 
-from . import ikona as ikona_mod
+from . import icon as icon_mod
 from .i18n import t
 
 log = logging.getLogger(__name__)
 
 
-class Zasobnik:
-    """Cienka nakladka na pystray. Wszystkie metody sa bezpieczne przy braku biblioteki."""
+class TrayIcon:
+    """Thin wrapper over pystray. Every method is safe when the library is missing."""
 
-    def __init__(self, tytul: str, on_przelacz: Callable[[], None],
-                 on_pokaz: Callable[[], None], on_zakoncz: Callable[[], None]):
-        self._tytul = tytul
-        self._on_przelacz = on_przelacz
-        self._on_pokaz = on_pokaz
-        self._on_zakoncz = on_zakoncz
-        self._ikona = None
-        self._nagrywa = False
+    def __init__(self, title: str, on_toggle: Callable[[], None],
+                 on_show: Callable[[], None], on_quit: Callable[[], None]):
+        self._title = title
+        self._on_toggle = on_toggle
+        self._on_show = on_show
+        self._on_quit = on_quit
+        self._icon = None
+        self._recording = False
 
     def start(self) -> bool:
         try:
             import pystray
         except ImportError:
-            log.warning("Brak pystray - zasobnik wylaczony")
+            log.warning("pystray missing - tray icon disabled")
             return False
 
         menu = pystray.Menu(
-            pystray.MenuItem(t("Pokaż okno"), lambda: self._on_pokaz(), default=True),
+            pystray.MenuItem(t("Show window"), lambda: self._on_show(), default=True),
             pystray.MenuItem(
-                lambda _: t("Zatrzymaj nagrywanie") if self._nagrywa else t("Rozpocznij nagrywanie"),
-                lambda: self._on_przelacz(),
+                lambda _: t("Stop recording") if self._recording else t("Start recording"),
+                lambda: self._on_toggle(),
             ),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem(t("Zakończ"), lambda: self._on_zakoncz()),
+            pystray.MenuItem(t("Quit"), lambda: self._on_quit()),
         )
         try:
-            self._ikona = pystray.Icon(
-                "ucho", ikona_mod.rysuj(64, nagrywa=False), self._tytul, menu
+            self._icon = pystray.Icon(
+                "ucho", icon_mod.draw(64, recording=False), self._title, menu
             )
-            self._ikona.run_detached()
-            log.info("Ikona w zasobniku uruchomiona")
+            self._icon.run_detached()
+            log.info("Tray icon started")
             return True
-        except Exception as blad:
-            log.warning("Nie udalo sie uruchomic zasobnika: %s", blad)
-            self._ikona = None
+        except Exception as error:
+            log.warning("Could not start the tray icon: %s", error)
+            self._icon = None
             return False
 
-    def ustaw_stan(self, nagrywa: bool, opis: str | None = None) -> None:
-        self._nagrywa = nagrywa
-        if self._ikona is None:
+    def set_state(self, recording: bool, description: str | None = None) -> None:
+        self._recording = recording
+        if self._icon is None:
             return
         try:
-            self._ikona.icon = ikona_mod.rysuj(64, nagrywa=nagrywa)
-            self._ikona.title = opis or self._tytul
-            self._ikona.update_menu()
+            self._icon.icon = icon_mod.draw(64, recording=recording)
+            self._icon.title = description or self._title
+            self._icon.update_menu()
         except Exception:
             pass
 
     def stop(self) -> None:
-        if self._ikona is None:
+        if self._icon is None:
             return
         try:
-            self._ikona.stop()
+            self._icon.stop()
         except Exception:
             pass
-        self._ikona = None
+        self._icon = None
 
 
-# Kody wirtualne klawiszy - niezalezne od ukladu klawiatury i od tego,
-# czy Windows przetlumaczyl klawisz na znak.
-_VK_LITER = {litera: 0x41 + i for i, litera in enumerate("abcdefghijklmnopqrstuvwxyz")}
-_VK_FUNKCYJNE = {f"f{n}": 0x6F + n for n in range(1, 13)}
+# Virtual key codes: independent of the keyboard layout and of whether Windows
+# translated the key into a character.
+_VK_LETTERS = {letter: 0x41 + i for i, letter in enumerate("abcdefghijklmnopqrstuvwxyz")}
+_VK_FUNCTION = {f"f{n}": 0x6F + n for n in range(1, 13)}
 
-_ODSTEP_POWTORZEN_S = 0.6
+_REPEAT_INTERVAL_S = 0.6
 
 
-class GlobalnySkrot:
-    """Globalny hotkey dzialajacy takze gdy okno jest schowane.
+class GlobalHotkey:
+    """Global hotkey that works also while the window is hidden.
 
-    Nie uzywamy `keyboard.GlobalHotKeys`, bo przy wcisnietym Alt Windows nie
-    tlumaczy litery na znak i pynput zglasza surowy kod (np. <82> zamiast 'r') -
-    wbudowane dopasowanie wtedy nigdy nie trafia. Sledzimy wiec modyfikatory
-    sami i porownujemy kod wirtualny klawisza.
+    We do not use `keyboard.GlobalHotKeys`: with Alt held down Windows does not
+    translate the letter into a character and pynput reports a raw code (e.g.
+    <82> instead of 'r'), so the built-in matching never fires. We track the
+    modifiers ourselves and compare the virtual key code.
     """
 
-    def __init__(self, kombinacja: str, akcja: Callable[[], None]):
-        self._kombinacja = kombinacja
-        self._akcja = akcja
-        self._sluchacz = None
-        self._wcisniete: set[str] = set()
-        self._ostatnie_wywolanie = 0.0
-        self._wymagane, self._vk = self._rozbierz(kombinacja)
+    def __init__(self, combo: str, action: Callable[[], None]):
+        self._combo = combo
+        self._action = action
+        self._listener = None
+        self._pressed: set[str] = set()
+        self._last_call = 0.0
+        self._required, self._vk = self._parse(combo)
 
     @staticmethod
-    def _rozbierz(kombinacja: str) -> tuple[set[str], int | None]:
-        wymagane: set[str] = set()
+    def _parse(combo: str) -> tuple[set[str], int | None]:
+        required: set[str] = set()
         vk: int | None = None
-        for token in kombinacja.lower().replace(" ", "").split("+"):
+        for token in combo.lower().replace(" ", "").split("+"):
             token = token.strip("<>")
             if token in ("ctrl", "alt", "shift"):
-                wymagane.add(token)
-            elif token in _VK_LITER:
-                vk = _VK_LITER[token]
-            elif token in _VK_FUNKCYJNE:
-                vk = _VK_FUNKCYJNE[token]
+                required.add(token)
+            elif token in _VK_LETTERS:
+                vk = _VK_LETTERS[token]
+            elif token in _VK_FUNCTION:
+                vk = _VK_FUNCTION[token]
             elif token.isdigit():
                 vk = int(token)
-        return wymagane, vk
+        return required, vk
 
     @staticmethod
-    def _modyfikator(key) -> str | None:
-        nazwa = getattr(key, "name", "") or ""
-        if nazwa.startswith("ctrl"):
+    def _modifier(key) -> str | None:
+        name = getattr(key, "name", "") or ""
+        if name.startswith("ctrl"):
             return "ctrl"
-        if nazwa.startswith("alt"):
+        if name.startswith("alt"):
             return "alt"
-        if nazwa.startswith("shift"):
+        if name.startswith("shift"):
             return "shift"
         return None
 
     def start(self) -> bool:
         if self._vk is None:
-            log.warning("Nie rozpoznano skrotu %s", self._kombinacja)
+            log.warning("Unrecognized shortcut %s", self._combo)
             return False
         try:
             from pynput import keyboard
         except ImportError:
-            log.warning("Brak pynput - globalny skrot wylaczony")
+            log.warning("pynput missing - global shortcut disabled")
             return False
         try:
-            self._sluchacz = keyboard.Listener(
-                on_press=self._na_wcisniecie, on_release=self._na_zwolnienie
+            self._listener = keyboard.Listener(
+                on_press=self._on_press, on_release=self._on_release
             )
-            self._sluchacz.daemon = True
-            self._sluchacz.start()
-            log.info("Skrot globalny %s aktywny (vk=%s)", self._kombinacja, self._vk)
+            self._listener.daemon = True
+            self._listener.start()
+            log.info("Global shortcut %s active (vk=%s)", self._combo, self._vk)
             return True
-        except Exception as blad:
-            log.warning("Nie udalo sie zarejestrowac skrotu %s: %s", self._kombinacja, blad)
-            self._sluchacz = None
+        except Exception as error:
+            log.warning("Could not register shortcut %s: %s", self._combo, error)
+            self._listener = None
             return False
 
-    def _na_wcisniecie(self, key) -> None:
-        mod = self._modyfikator(key)
+    def _on_press(self, key) -> None:
+        mod = self._modifier(key)
         if mod:
-            self._wcisniete.add(mod)
+            self._pressed.add(mod)
             return
         if getattr(key, "vk", None) != self._vk:
             return
-        if not self._wymagane.issubset(self._wcisniete):
+        if not self._required.issubset(self._pressed):
             return
-        # Autorepeat przy przytrzymaniu klawisza nie moze wywolac akcji wielokrotnie.
-        teraz = time.monotonic()
-        if teraz - self._ostatnie_wywolanie < _ODSTEP_POWTORZEN_S:
+        # Autorepeat while the key is held must not fire the action many times.
+        now = time.monotonic()
+        if now - self._last_call < _REPEAT_INTERVAL_S:
             return
-        self._ostatnie_wywolanie = teraz
-        self._wywolaj()
+        self._last_call = now
+        self._fire()
 
-    def _na_zwolnienie(self, key) -> None:
-        mod = self._modyfikator(key)
+    def _on_release(self, key) -> None:
+        mod = self._modifier(key)
         if mod:
-            self._wcisniete.discard(mod)
+            self._pressed.discard(mod)
 
-    def _wywolaj(self) -> None:
-        # Akcja moze podniesc okno, wiec nie blokujemy watku nasluchujacego klawiatury.
-        threading.Thread(target=self._akcja, daemon=True).start()
+    def _fire(self) -> None:
+        # The action may raise the window, so we do not block the keyboard listener thread.
+        threading.Thread(target=self._action, daemon=True).start()
 
     def stop(self) -> None:
-        if self._sluchacz is None:
+        if self._listener is None:
             return
         try:
-            self._sluchacz.stop()
+            self._listener.stop()
         except Exception:
             pass
-        self._sluchacz = None
+        self._listener = None

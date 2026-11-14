@@ -71,9 +71,9 @@ def test_rule_table(profile, rule, model, device, dictation):
 
 def test_every_model_in_rules_is_known():
     for rule in hardware.RULES.values():
-        assert rule.model in config.MODELE
-        assert rule.dictation_model in config.MODELE
-        assert rule.model in config.REWIZJE
+        assert rule.model in config.MODELS
+        assert rule.dictation_model in config.MODELS
+        assert rule.model in config.REVISIONS
         assert rule.step_down is None or rule.step_down in hardware.RULES
 
 
@@ -112,7 +112,19 @@ def test_installed_ram_wins_over_visible():
 def test_fast_enough_keeps_recommendation():
     p = make(31.6, 32, devices=(CPU, ARC_140V))
     rec = hardware.after_benchmark(hardware.recommend(p), p, 8.9)
-    assert rec.rule == "gpu_16" and "8,9" in rec.reasons[-1]
+    assert rec.rule == "gpu_16" and "8.9" in rec.reasons[-1]
+
+
+def test_numbers_use_decimal_comma_in_polish():
+    from ucho import i18n
+
+    p = make(31.6, 32, devices=(CPU, ARC_140V))
+    i18n.set_language("pl")
+    try:
+        rec = hardware.after_benchmark(hardware.recommend(p), p, 8.9)
+    finally:
+        i18n.set_language("en")
+    assert "8,9" in rec.reasons[-1]
 
 
 def test_threshold_is_inclusive():
@@ -133,7 +145,7 @@ def test_slow_steps_down_one_row(start, expected):
     lower = hardware.after_benchmark(rec, p, 1.2)
     assert lower.rule == expected
     assert lower.model == hardware.RULES[expected].model
-    assert "1,2" in lower.reasons[-1]
+    assert "1.2" in lower.reasons[-1]
 
 
 def test_gpu_step_down_stays_on_the_found_gpu():
@@ -184,16 +196,16 @@ def test_profile_reads_this_machine():
 # --- settings ----------------------------------------------------------------
 
 
-def _settings(tmp_path, **values) -> config.Ustawienia:
-    file = tmp_path / "ustawienia.json"
+def _settings(tmp_path, **values) -> config.Settings:
+    file = tmp_path / "settings.json"
     if values:
         file.write_text(json.dumps(values), encoding="utf-8")
-    return config.Ustawienia(file)
+    return config.Settings(file)
 
 
 def test_new_keys_are_in_defaults():
-    assert "dictation_model" in config.DOMYSLNE and "hardware_profile" in config.DOMYSLNE
-    assert config.DOMYSLNE["dictation_model"] in config.MODELE
+    assert "dictation_model" in config.DEFAULTS and "hardware_profile" in config.DEFAULTS
+    assert config.DEFAULTS["dictation_model"] in config.MODELS
 
 
 def test_save_writes_recommendation(tmp_path):
@@ -202,7 +214,7 @@ def test_save_writes_recommendation(tmp_path):
     settings = _settings(tmp_path)
     changed = hardware.save(settings, p, rec)
     assert set(changed) == {"model", "device", "dictation_model"}
-    saved = json.loads((tmp_path / "ustawienia.json").read_text(encoding="utf-8"))
+    saved = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
     assert (saved["model"], saved["device"], saved["dictation_model"]) == (TURBO_INT8, "CPU", TURBO_INT4)
     assert saved["hardware_profile"]["recommended"]["model"] == TURBO_INT8
     assert saved["hardware_profile"]["ram_gb"] == 16

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Okno aplikacji: nagrywanie, transkrypcja, lista nagran, ustawienia."""
+"""App window: recording, transcription, recordings list, settings."""
 
 from __future__ import annotations
 
@@ -16,1310 +16,1290 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import (audio, config, i18n, ikona as ikona_mod, podsumowanie as podsum,
+from . import (audio, config, i18n, icon as icon_mod, session, summary as summary_mod,
                transcribe, winshell)
 from .i18n import t
-from .merge import Segment, czas_hms, slug, zapisz_wyniki
-from .tray import GlobalnySkrot, Zasobnik
+from .merge import TRANSCRIPT_MD, Segment, format_hms, save_results, slug, speaker_label
+from .tray import GlobalHotkey, TrayIcon
 
 log = logging.getLogger(__name__)
 
-TLO = "#15171d"
+BG = "#15171d"
 PANEL = "#1e2129"
-PANEL_JASNY = "#272b35"
-AKCENT = "#5ea4ff"
-AKCENT_HOVER = "#7ab4ff"
-CZERWIEN = "#ef4444"
-CZERWIEN_HOVER = "#f26565"
-TEKST = "#e6e9ef"
-TEKST_PRZYGASZONY = "#8b93a5"
-ZIELEN = "#34d399"
+PANEL_LIGHT = "#272b35"
+ACCENT = "#5ea4ff"
+ACCENT_HOVER = "#7ab4ff"
+RED = "#ef4444"
+RED_HOVER = "#f26565"
+TEXT = "#e6e9ef"
+TEXT_MUTED = "#8b93a5"
+GREEN = "#34d399"
 
 
-class Aplikacja(ctk.CTk):
+class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.ustawienia = config.Ustawienia()
-        config.przygotuj_katalogi(self.ustawienia)
+        self.settings = config.Settings()
+        config.prepare_dirs(self.settings)
 
-        self.nagrywarka: audio.Nagrywarka | None = None
-        self.nagrywa = False
-        self.katalog_sesji: Path | None = None
-        self.nazwa_sesji = ""
-        self.start_nagrania = 0.0
-        self.anuluj_transkrypcje = threading.Event()
-        self.transkrybuje = False
-        self.podsumowuje = False
-        self._kolejka: "queue.Queue[tuple]" = queue.Queue()
-        self._urzadzenia = {"mikrofony": [], "system": [],
-                            "domyslny_mikrofon": None, "domyslny_system": None}
+        self.recorder: audio.Recorder | None = None
+        self.recording = False
+        self.session_dir: Path | None = None
+        self.session_name = ""
+        self.recording_start = 0.0
+        self.cancel_transcription = threading.Event()
+        self.transcribing = False
+        self.summarizing = False
+        self._queue: "queue.Queue[tuple]" = queue.Queue()
+        self._devices = {"microphones": [], "system": [],
+                         "default_microphone": None, "default_system": None}
 
-        self._zbuduj_okno()
-        self._zbuduj_naglowek()
-        self._zbuduj_widoki()
-        self._pokaz_widok("nagrywanie")
+        self._build_window()
+        self._build_header()
+        self._build_views()
+        self._show_view("record")
 
-        self._zasobnik = Zasobnik(
-            config.APLIKACJA,
-            on_przelacz=lambda: self.after(0, self.przelacz_nagrywanie),
-            on_pokaz=lambda: self.after(0, self._pokaz_okno),
-            on_zakoncz=lambda: self.after(0, self.zakoncz),
+        self._tray = TrayIcon(
+            config.APP_NAME,
+            on_toggle=lambda: self.after(0, self.toggle_recording),
+            on_show=lambda: self.after(0, self._show_window),
+            on_quit=lambda: self.after(0, self.quit_app),
         )
-        self._skrot = GlobalnySkrot(
-            self.ustawienia["hotkey"], lambda: self.after(0, self.przelacz_nagrywanie)
+        self._hotkey = GlobalHotkey(
+            self.settings["hotkey"], lambda: self.after(0, self.toggle_recording)
         )
-        if self.ustawienia["tray"]:
-            self._zasobnik.start()
-        self._skrot.start()
+        if self.settings["tray"]:
+            self._tray.start()
+        self._hotkey.start()
 
-        self.protocol("WM_DELETE_WINDOW", self._na_zamkniecie)
-        threading.Thread(target=self._wczytaj_urzadzenia, daemon=True).start()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        threading.Thread(target=self._load_devices, daemon=True).start()
         self.after(100, self._tick)
-        # Okno musi juz istniec w systemie, zanim opiszemy je dla paska zadan.
-        self.after(600, self._opisz_dla_paska)
+        # The window must already exist in the system before we describe it
+        # for the taskbar.
+        self.after(600, self._describe_for_taskbar)
 
-    # --- budowa interfejsu ----------------------------------------------
+    # --- building the UI --------------------------------------------------
 
-    def _zbuduj_okno(self) -> None:
+    def _build_window(self) -> None:
         ctk.set_appearance_mode("dark")
-        self.title(t("{app} - lokalne nagrywanie i transkrypcja", app=config.APLIKACJA))
-        # Dopasowanie do ekranu: na laptopie z wysokim DPI przestrzen robocza
-        # bywa niska, a sztywne 560x770 uciecoby dolna czesc widoku.
-        szerokosc = min(560, self.winfo_screenwidth() - 60)
-        wysokosc = min(720, self.winfo_screenheight() - 110)
-        self.geometry(f"{szerokosc}x{wysokosc}")
-        self.minsize(500, min(600, wysokosc))
-        self.configure(fg_color=TLO)
+        self.title(t("{app} - local recording and transcription", app=config.APP_NAME))
+        # Fit to the screen: on a high-DPI laptop the work area can be short,
+        # and a fixed 560x770 would cut off the bottom of the view.
+        width = min(560, self.winfo_screenwidth() - 60)
+        height = min(720, self.winfo_screenheight() - 110)
+        self.geometry(f"{width}x{height}")
+        self.minsize(500, min(600, height))
+        self.configure(fg_color=BG)
 
-        self._plik_ikony = Path(__file__).resolve().parent / "assets" / "ikona.ico"
-        if not self._plik_ikony.exists():
+        self._icon_file = Path(__file__).resolve().parent / "assets" / "icon.ico"
+        if not self._icon_file.exists():
             try:
-                ikona_mod.zapisz_ico(self._plik_ikony)
+                icon_mod.save_ico(self._icon_file)
             except Exception:
                 pass
-        self._ustaw_ikone_okna()
-        # CustomTkinter po ~200 ms chowa i pokazuje okno, zeby przemalowac pasek
-        # tytulu na ciemny - przy okazji Windows potrafi zgubic ikone. Ustawiamy
-        # ja ponownie po tej operacji.
-        self.after(400, self._ustaw_ikone_okna)
+        self._set_window_icon()
+        # After ~200 ms CustomTkinter hides and shows the window to repaint the
+        # title bar dark, and Windows can lose the icon along the way. We set
+        # it again after that.
+        self.after(400, self._set_window_icon)
 
-    def _hwnd_okna(self) -> int:
-        """Uchwyt okna widzianego przez pasek zadan.
+    def _window_hwnd(self) -> int:
+        """Handle of the window the taskbar sees.
 
-        `winfo_id()` zwraca okno potomne Tk - wlasciwosci dla paska musza trafic
-        na okno nadrzedne, ktore podaje `wm_frame()`.
+        `winfo_id()` returns the Tk child window; taskbar properties must go
+        to the parent window, which `wm_frame()` gives.
         """
         try:
             return int(self.wm_frame(), 16)
         except Exception:
             return self.winfo_id()
 
-    def _opisz_dla_paska(self) -> None:
-        """Dane dla paska zadan: czym jestesmy i czym sie uruchamiamy ponownie."""
+    def _describe_for_taskbar(self) -> None:
+        """Taskbar data: what we are and how to start us again."""
         if sys.platform != "win32":
             return
         try:
-            udalo_sie = winshell.opisz_okno(
-                self._hwnd_okna(),
-                polecenie_startowe(),
-                config.APLIKACJA,
-                f"{self._plik_ikony},0",
-                config.ID_APLIKACJI,
+            ok = winshell.describe_window(
+                self._window_hwnd(),
+                start_command(),
+                config.APP_NAME,
+                f"{self._icon_file},0",
+                config.APP_ID,
             )
-            log.info("Opis okna dla paska zadan: %s", udalo_sie)
+            log.info("Taskbar window description: %s", ok)
         except Exception:
-            log.debug("Nie udalo sie opisac okna", exc_info=True)
-        # Skroty dostaja to samo ID, wiec przypiety kafelek i dzialajace okno to
-        # jeden przycisk. Robimy to w tle - COM potrafi chwile pomyslec.
-        threading.Thread(target=_oznacz_skroty, daemon=True).start()
+            log.debug("Could not describe the window", exc_info=True)
+        # Shortcuts get the same id, so a pinned tile and the running window
+        # are one button. Done in the background: COM can take a moment.
+        threading.Thread(target=_stamp_shortcuts, daemon=True).start()
 
-    def _ustaw_ikone_okna(self) -> None:
-        if not self._plik_ikony.exists():
+    def _set_window_icon(self) -> None:
+        if not self._icon_file.exists():
             return
         try:
-            # `default` obejmuje takze okna podrzedne (dialogi).
-            self.iconbitmap(default=str(self._plik_ikony))
-            self.iconbitmap(str(self._plik_ikony))
+            # `default` also covers child windows (dialogs).
+            self.iconbitmap(default=str(self._icon_file))
+            self.iconbitmap(str(self._icon_file))
         except Exception:
             pass
 
-    def _zbuduj_naglowek(self) -> None:
-        pasek = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=56)
-        pasek.pack(fill="x", side="top")
-        pasek.pack_propagate(False)
+    def _build_header(self) -> None:
+        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=56)
+        bar.pack(fill="x", side="top")
+        bar.pack_propagate(False)
 
         ctk.CTkLabel(
-            pasek, text=f"  {config.APLIKACJA}", text_color=TEKST,
+            bar, text=f"  {config.APP_NAME}", text_color=TEXT,
             font=ctk.CTkFont(size=17, weight="bold"),
         ).pack(side="left", padx=(14, 20))
 
-        self._przyciski_nawigacji: dict[str, ctk.CTkButton] = {}
-        for klucz, etykieta in (("nagrywanie", t("Nagrywanie")),
-                                ("nagrania", t("Nagrania")),
-                                ("ustawienia", t("Ustawienia"))):
-            przycisk = ctk.CTkButton(
-                pasek, text=etykieta, width=96, height=32, corner_radius=8,
-                fg_color="transparent", hover_color=PANEL_JASNY,
-                text_color=TEKST_PRZYGASZONY,
+        self._nav_buttons: dict[str, ctk.CTkButton] = {}
+        for key, label in (("record", t("Record")),
+                           ("recordings", t("Recordings")),
+                           ("settings", t("Settings"))):
+            button = ctk.CTkButton(
+                bar, text=label, width=96, height=32, corner_radius=8,
+                fg_color="transparent", hover_color=PANEL_LIGHT,
+                text_color=TEXT_MUTED,
                 font=ctk.CTkFont(size=13),
-                command=lambda k=klucz: self._pokaz_widok(k),
+                command=lambda k=key: self._show_view(k),
             )
-            przycisk.pack(side="left", padx=2)
-            self._przyciski_nawigacji[klucz] = przycisk
+            button.pack(side="left", padx=2)
+            self._nav_buttons[key] = button
 
-    def _zbuduj_widoki(self) -> None:
-        self._kontener = ctk.CTkFrame(self, fg_color=TLO)
-        self._kontener.pack(fill="both", expand=True)
+    def _build_views(self) -> None:
+        self._container = ctk.CTkFrame(self, fg_color=BG)
+        self._container.pack(fill="both", expand=True)
 
-        self._widoki = {
-            "nagrywanie": self._widok_nagrywania(),
-            "transkrypcja": self._widok_transkrypcji(),
-            "nagrania": self._widok_nagran(),
-            "ustawienia": self._widok_ustawien(),
+        self._views = {
+            "record": self._record_view(),
+            "transcript": self._transcript_view(),
+            "recordings": self._recordings_view(),
+            "settings": self._settings_view(),
         }
 
-    def _pokaz_widok(self, nazwa: str) -> None:
-        for widok in self._widoki.values():
-            widok.pack_forget()
-        self._widoki[nazwa].pack(fill="both", expand=True, padx=16, pady=16)
+    def _show_view(self, name: str) -> None:
+        for view in self._views.values():
+            view.pack_forget()
+        self._views[name].pack(fill="both", expand=True, padx=16, pady=16)
 
-        aktywna_zakladka = "nagrywanie" if nazwa == "transkrypcja" else nazwa
-        for klucz, przycisk in self._przyciski_nawigacji.items():
-            wybrany = klucz == aktywna_zakladka
-            przycisk.configure(
-                fg_color=PANEL_JASNY if wybrany else "transparent",
-                text_color=TEKST if wybrany else TEKST_PRZYGASZONY,
+        active_tab = "record" if name == "transcript" else name
+        for key, button in self._nav_buttons.items():
+            selected = key == active_tab
+            button.configure(
+                fg_color=PANEL_LIGHT if selected else "transparent",
+                text_color=TEXT if selected else TEXT_MUTED,
             )
-        if nazwa == "nagrania":
-            self._odswiez_liste_nagran()
+        if name == "recordings":
+            self._refresh_recordings()
 
-    # --- widok: nagrywanie ----------------------------------------------
+    # --- view: record -----------------------------------------------------
 
-    def _widok_nagrywania(self) -> ctk.CTkFrame:
-        ramka = ctk.CTkFrame(self._kontener, fg_color=TLO)
+    def _record_view(self) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(self._container, fg_color=BG)
 
-        ctk.CTkLabel(ramka, text=t("Nazwa spotkania"), text_color=TEKST_PRZYGASZONY,
+        ctk.CTkLabel(frame, text=t("Meeting name"), text_color=TEXT_MUTED,
                      font=ctk.CTkFont(size=12)).pack(anchor="w")
-        self._pole_nazwy = ctk.CTkEntry(
-            ramka, height=36, corner_radius=10, fg_color=PANEL,
-            border_color=PANEL_JASNY, text_color=TEKST,
-            placeholder_text=t("np. Standup zespołu"),
+        self._name_entry = ctk.CTkEntry(
+            frame, height=36, corner_radius=10, fg_color=PANEL,
+            border_color=PANEL_LIGHT, text_color=TEXT,
+            placeholder_text=t("e.g. Team standup"),
         )
-        self._pole_nazwy.pack(fill="x", pady=(4, 12))
+        self._name_entry.pack(fill="x", pady=(4, 12))
 
-        karta = ctk.CTkFrame(ramka, fg_color=PANEL, corner_radius=16)
-        karta.pack(fill="x", pady=(0, 12))
+        card = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=16)
+        card.pack(fill="x", pady=(0, 12))
 
-        self._etykieta_czasu = ctk.CTkLabel(
-            karta, text="00:00:00", text_color=TEKST,
+        self._time_label = ctk.CTkLabel(
+            card, text="00:00:00", text_color=TEXT,
             font=ctk.CTkFont(family="Consolas", size=34, weight="bold"),
         )
-        self._etykieta_czasu.pack(pady=(16, 0))
+        self._time_label.pack(pady=(16, 0))
 
-        self._etykieta_stanu = ctk.CTkLabel(
-            karta, text=t("Gotowy do nagrywania"), text_color=TEKST_PRZYGASZONY,
+        self._status_label = ctk.CTkLabel(
+            card, text=t("Ready to record"), text_color=TEXT_MUTED,
             font=ctk.CTkFont(size=12), wraplength=460,
         )
-        self._etykieta_stanu.pack(pady=(0, 12))
+        self._status_label.pack(pady=(0, 12))
 
-        # Krotka etykieta jest tu istotna: dluzszy tekst rozpycha CTkButton na
-        # szerokosc i zamiast kola wychodzi owal.
-        self._przycisk_rec = ctk.CTkButton(
-            karta, text="REC", width=148, height=148, corner_radius=74,
-            fg_color=CZERWIEN, hover_color=CZERWIEN_HOVER, text_color="#ffffff",
+        # The short label matters: a longer text stretches CTkButton
+        # horizontally and the circle turns into an oval.
+        self._rec_button = ctk.CTkButton(
+            card, text="REC", width=148, height=148, corner_radius=74,
+            fg_color=RED, hover_color=RED_HOVER, text_color="#ffffff",
             font=ctk.CTkFont(size=22, weight="bold"),
-            command=self.przelacz_nagrywanie,
+            command=self.toggle_recording,
         )
-        self._przycisk_rec.pack(pady=(0, 6))
+        self._rec_button.pack(pady=(0, 6))
 
         ctk.CTkLabel(
-            karta, text=t("skrót globalny: {skrot}", skrot=self._opis_skrotu()),
-            text_color=TEKST_PRZYGASZONY, font=ctk.CTkFont(size=11),
+            card, text=t("global shortcut: {shortcut}", shortcut=self._shortcut_text()),
+            text_color=TEXT_MUTED, font=ctk.CTkFont(size=11),
         ).pack(pady=(0, 14))
 
-        self._poziomy_ui = {}
-        for klucz, etykieta in (("mikrofon", t("Mikrofon")), ("system", t("Dźwięk systemowy"))):
-            wiersz = ctk.CTkFrame(ramka, fg_color="transparent")
-            wiersz.pack(fill="x", pady=3)
-            ctk.CTkLabel(wiersz, text=etykieta, text_color=TEKST_PRZYGASZONY, width=130,
+        self._level_bars = {}
+        for key, label in (("microphone", t("Microphone")), ("system", t("System audio"))):
+            row = ctk.CTkFrame(frame, fg_color="transparent")
+            row.pack(fill="x", pady=3)
+            ctk.CTkLabel(row, text=label, text_color=TEXT_MUTED, width=130,
                          anchor="w", font=ctk.CTkFont(size=12)).pack(side="left")
-            pasek = ctk.CTkProgressBar(wiersz, height=10, corner_radius=5,
-                                       fg_color=PANEL, progress_color=ZIELEN)
-            pasek.pack(side="left", fill="x", expand=True)
-            pasek.set(0)
-            self._poziomy_ui[klucz] = pasek
+            bar = ctk.CTkProgressBar(row, height=10, corner_radius=5,
+                                     fg_color=PANEL, progress_color=GREEN)
+            bar.pack(side="left", fill="x", expand=True)
+            bar.set(0)
+            self._level_bars[key] = bar
 
-        wiersz_jezyka = ctk.CTkFrame(ramka, fg_color="transparent")
-        wiersz_jezyka.pack(fill="x", pady=(14, 0))
-        ctk.CTkLabel(wiersz_jezyka, text=t("Język transkrypcji"), text_color=TEKST_PRZYGASZONY,
+        language_row = ctk.CTkFrame(frame, fg_color="transparent")
+        language_row.pack(fill="x", pady=(14, 0))
+        ctk.CTkLabel(language_row, text=t("Transcription language"), text_color=TEXT_MUTED,
                      font=ctk.CTkFont(size=12)).pack(anchor="w", pady=(0, 6))
-        self._wybor_jezyka = ctk.CTkSegmentedButton(
-            wiersz_jezyka, values=list(config.ETYKIETY_JEZYKOW.values()),
-            fg_color=PANEL, selected_color=AKCENT, selected_hover_color=AKCENT_HOVER,
-            unselected_color=PANEL, unselected_hover_color=PANEL_JASNY,
-            text_color=TEKST, command=self._na_zmiane_jezyka,
+        self._language_picker = ctk.CTkSegmentedButton(
+            language_row, values=list(config.LANGUAGE_LABELS.values()),
+            fg_color=PANEL, selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            unselected_color=PANEL, unselected_hover_color=PANEL_LIGHT,
+            text_color=TEXT, command=self._on_language_change,
         )
-        self._wybor_jezyka.pack(fill="x")
-        self._wybor_jezyka.set(config.ETYKIETY_JEZYKOW[self.ustawienia["jezyk"]])
+        self._language_picker.pack(fill="x")
+        self._language_picker.set(config.LANGUAGE_LABELS[self.settings["language"]])
 
-        self._notka = ctk.CTkLabel(
-            ramka,
-            text=t("Poinformuj uczestników, że spotkanie jest nagrywane.\n"
-                   "Używaj słuchawek — na głośnikach mikrofon złapie także rozmówców."),
-            text_color=TEKST_PRZYGASZONY, font=ctk.CTkFont(size=11), justify="left",
+        self._notice = ctk.CTkLabel(
+            frame,
+            text=t("Tell participants that the meeting is being recorded.\n"
+                   "Use headphones — on speakers the microphone also picks up the other people."),
+            text_color=TEXT_MUTED, font=ctk.CTkFont(size=11), justify="left",
         )
-        self._notka.pack(anchor="w", pady=(14, 0))
-        return ramka
+        self._notice.pack(anchor="w", pady=(14, 0))
+        return frame
 
-    def _opis_skrotu(self) -> str:
-        return (self.ustawienia["hotkey"].replace("<", "").replace(">", "")
+    def _shortcut_text(self) -> str:
+        return (self.settings["hotkey"].replace("<", "").replace(">", "")
                 .replace("+", " + ").upper())
 
-    def _na_zmiane_jezyka(self, wartosc: str) -> None:
-        for kod, etykieta in config.ETYKIETY_JEZYKOW.items():
-            if etykieta == wartosc:
-                self.ustawienia["jezyk"] = kod
-                self.ustawienia.zapisz()
+    def _on_language_change(self, value: str) -> None:
+        for code, label in config.LANGUAGE_LABELS.items():
+            if label == value:
+                self.settings["language"] = code
+                self.settings.save()
                 return
 
-    # --- widok: transkrypcja --------------------------------------------
+    # --- view: transcript -------------------------------------------------
 
-    def _widok_transkrypcji(self) -> ctk.CTkFrame:
-        ramka = ctk.CTkFrame(self._kontener, fg_color=TLO)
+    def _transcript_view(self) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(self._container, fg_color=BG)
 
-        self._tytul_transkrypcji = ctk.CTkLabel(
-            ramka, text=t("Transkrypcja"), text_color=TEKST,
+        self._transcript_title = ctk.CTkLabel(
+            frame, text=t("Transcription"), text_color=TEXT,
             font=ctk.CTkFont(size=16, weight="bold"),
         )
-        self._tytul_transkrypcji.pack(anchor="w")
+        self._transcript_title.pack(anchor="w")
 
-        self._podtytul_transkrypcji = ctk.CTkLabel(
-            ramka, text="", text_color=TEKST_PRZYGASZONY, font=ctk.CTkFont(size=12)
+        self._transcript_subtitle = ctk.CTkLabel(
+            frame, text="", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12)
         )
-        self._podtytul_transkrypcji.pack(anchor="w", pady=(2, 12))
+        self._transcript_subtitle.pack(anchor="w", pady=(2, 12))
 
-        self._pasek_postepu = ctk.CTkProgressBar(
-            ramka, height=12, corner_radius=6, fg_color=PANEL, progress_color=AKCENT
+        self._progress_bar = ctk.CTkProgressBar(
+            frame, height=12, corner_radius=6, fg_color=PANEL, progress_color=ACCENT
         )
-        self._pasek_postepu.pack(fill="x")
-        self._pasek_postepu.set(0)
+        self._progress_bar.pack(fill="x")
+        self._progress_bar.set(0)
 
-        self._etykieta_postepu = ctk.CTkLabel(
-            ramka, text="0%", text_color=TEKST_PRZYGASZONY, font=ctk.CTkFont(size=12)
+        self._progress_label = ctk.CTkLabel(
+            frame, text="0%", text_color=TEXT_MUTED, font=ctk.CTkFont(size=12)
         )
-        self._etykieta_postepu.pack(anchor="w", pady=(6, 12))
+        self._progress_label.pack(anchor="w", pady=(6, 12))
 
-        # Karta podsumowania - doklejana nad transkryptem, gdy model skonczy.
-        self._karta_podsumowania = ctk.CTkFrame(ramka, fg_color=PANEL, corner_radius=12)
-        self._etykieta_uczestnikow = ctk.CTkLabel(
-            self._karta_podsumowania, text="", text_color=AKCENT, anchor="w",
+        # Summary card: inserted above the transcript once the model finishes.
+        self._summary_card = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12)
+        self._participants_label = ctk.CTkLabel(
+            self._summary_card, text="", text_color=ACCENT, anchor="w",
             justify="left", font=ctk.CTkFont(size=12, weight="bold"), wraplength=460,
         )
-        self._etykieta_uczestnikow.pack(fill="x", padx=14, pady=(10, 0))
-        self._etykieta_podsumowania = ctk.CTkLabel(
-            self._karta_podsumowania, text="", text_color=TEKST, anchor="w",
+        self._participants_label.pack(fill="x", padx=14, pady=(10, 0))
+        self._summary_label = ctk.CTkLabel(
+            self._summary_card, text="", text_color=TEXT, anchor="w",
             justify="left", font=ctk.CTkFont(size=12), wraplength=460,
         )
-        self._etykieta_podsumowania.pack(fill="x", padx=14, pady=(4, 10))
+        self._summary_label.pack(fill="x", padx=14, pady=(4, 10))
 
-        self._pole_transkrypcji = ctk.CTkTextbox(
-            ramka, fg_color=PANEL, text_color=TEKST, corner_radius=12,
+        self._transcript_box = ctk.CTkTextbox(
+            frame, fg_color=PANEL, text_color=TEXT, corner_radius=12,
             font=ctk.CTkFont(size=12), wrap="word",
         )
-        self._pole_transkrypcji.pack(fill="both", expand=True)
+        self._transcript_box.pack(fill="both", expand=True)
 
-        przyciski = ctk.CTkFrame(ramka, fg_color="transparent")
-        przyciski.pack(fill="x", pady=(12, 0))
+        buttons = ctk.CTkFrame(frame, fg_color="transparent")
+        buttons.pack(fill="x", pady=(12, 0))
 
-        self._przycisk_folder = ctk.CTkButton(
-            przyciski, text=t("Otwórz folder"), height=36, corner_radius=10,
-            fg_color=PANEL_JASNY, hover_color=PANEL, text_color=TEKST,
-            command=self._otworz_folder_sesji,
+        self._folder_button = ctk.CTkButton(
+            buttons, text=t("Open folder"), height=36, corner_radius=10,
+            fg_color=PANEL_LIGHT, hover_color=PANEL, text_color=TEXT,
+            command=self._open_session_folder,
         )
-        self._przycisk_folder.pack(side="left", expand=True, fill="x", padx=(0, 6))
+        self._folder_button.pack(side="left", expand=True, fill="x", padx=(0, 6))
 
-        self._przycisk_anuluj = ctk.CTkButton(
-            przyciski, text=t("Przerwij"), height=36, corner_radius=10,
-            fg_color=PANEL_JASNY, hover_color=CZERWIEN, text_color=TEKST,
-            command=self._przerwij_transkrypcje,
+        self._cancel_button = ctk.CTkButton(
+            buttons, text=t("Stop"), height=36, corner_radius=10,
+            fg_color=PANEL_LIGHT, hover_color=RED, text_color=TEXT,
+            command=self._cancel_transcription,
         )
-        self._przycisk_anuluj.pack(side="left", expand=True, fill="x", padx=(6, 0))
-        return ramka
+        self._cancel_button.pack(side="left", expand=True, fill="x", padx=(6, 0))
+        return frame
 
-    # --- widok: nagrania -------------------------------------------------
+    # --- view: recordings -------------------------------------------------
 
-    def _widok_nagran(self) -> ctk.CTkFrame:
-        ramka = ctk.CTkFrame(self._kontener, fg_color=TLO)
-        gora = ctk.CTkFrame(ramka, fg_color="transparent")
-        gora.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(gora, text=t("Nagrania"), text_color=TEKST,
+    def _recordings_view(self) -> ctk.CTkFrame:
+        frame = ctk.CTkFrame(self._container, fg_color=BG)
+        top = ctk.CTkFrame(frame, fg_color="transparent")
+        top.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(top, text=t("Recordings"), text_color=TEXT,
                      font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        ctk.CTkButton(gora, text=t("Odśwież"), width=88, height=30, corner_radius=8,
-                      fg_color=PANEL_JASNY, hover_color=PANEL, text_color=TEKST,
-                      command=self._odswiez_liste_nagran).pack(side="right")
+        ctk.CTkButton(top, text=t("Refresh"), width=88, height=30, corner_radius=8,
+                      fg_color=PANEL_LIGHT, hover_color=PANEL, text_color=TEXT,
+                      command=self._refresh_recordings).pack(side="right")
 
-        self._lista_nagran = ctk.CTkScrollableFrame(ramka, fg_color=TLO)
-        self._lista_nagran.pack(fill="both", expand=True)
-        return ramka
+        self._recordings_list = ctk.CTkScrollableFrame(frame, fg_color=BG)
+        self._recordings_list.pack(fill="both", expand=True)
+        return frame
 
-    def _odswiez_liste_nagran(self) -> None:
-        for dziecko in self._lista_nagran.winfo_children():
-            dziecko.destroy()
+    def _refresh_recordings(self) -> None:
+        for child in self._recordings_list.winfo_children():
+            child.destroy()
 
-        katalog = self.ustawienia.katalog_nagran
-        if not katalog.exists():
+        folder = self.settings.recordings_dir
+        if not folder.exists():
             return
-        sesje = sorted((s for s in katalog.iterdir() if s.is_dir()), reverse=True)
-        if not sesje:
-            ctk.CTkLabel(self._lista_nagran, text=t("Brak nagrań."),
-                         text_color=TEKST_PRZYGASZONY).pack(pady=20)
+        sessions = session.list_sessions(folder)
+        if not sessions:
+            ctk.CTkLabel(self._recordings_list, text=t("No recordings yet."),
+                         text_color=TEXT_MUTED).pack(pady=20)
             return
 
-        for sesja in sesje[:60]:
-            self._karta_sesji(sesja)
+        for session_dir in sessions[:60]:
+            self._session_card(session_dir)
 
     @staticmethod
-    def _opis_z_nazwy_katalogu(nazwa_katalogu: str) -> tuple[str, str]:
+    def _describe_folder_name(folder_name: str) -> tuple[str, str]:
         """'2026-09-08_09-15_Budzet-Q4_Anna-Marek' -> ('Budzet Q4 Anna Marek', ...).
 
-        Od kiedy nazwe nadaje model, po znaczniku czasu moga byc dwa czlony
-        (temat i imiona), wiec nie mozemy juz zakladac dokladnie trzech czesci.
+        Since the model names the folder, there can be two parts after the
+        timestamp (topic and names), so we can no longer assume exactly three.
         """
-        czesci = nazwa_katalogu.split("_")
-        if len(czesci) >= 3 and czesci[1].count("-") == 1:
-            data = f"{czesci[0]} {czesci[1].replace('-', ':')}"
-            return " ".join(czesci[2:]).replace("-", " "), data
-        return nazwa_katalogu, ""
+        parts = folder_name.split("_")
+        if len(parts) >= 3 and parts[1].count("-") == 1:
+            date = f"{parts[0]} {parts[1].replace('-', ':')}"
+            return " ".join(parts[2:]).replace("-", " "), date
+        return folder_name, ""
 
-    def _karta_sesji(self, sesja: Path) -> None:
-        meta = {}
-        plik_meta = sesja / "meta.json"
-        if plik_meta.exists():
-            try:
-                meta = json.loads(plik_meta.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                meta = {}
+    def _session_card(self, session_dir: Path) -> None:
+        meta = session.read_meta(session_dir)
+        name, date = self._describe_folder_name(session_dir.name)
 
-        nazwa, data = self._opis_z_nazwy_katalogu(sesja.name)
+        card = ctk.CTkFrame(self._recordings_list, fg_color=PANEL, corner_radius=12)
+        card.pack(fill="x", pady=4)
 
-        karta = ctk.CTkFrame(self._lista_nagran, fg_color=PANEL, corner_radius=12)
-        karta.pack(fill="x", pady=4)
-
-        ctk.CTkLabel(karta, text=meta.get("temat") or meta.get("nazwa") or nazwa,
-                     text_color=TEKST, anchor="w",
+        ctk.CTkLabel(card, text=meta.get("topic") or meta.get("name") or name,
+                     text_color=TEXT, anchor="w",
                      font=ctk.CTkFont(size=13, weight="bold")).pack(
             fill="x", padx=14, pady=(10, 0))
 
-        opis = meta.get("data") or data
-        if meta.get("trwanie_s"):
-            opis += f"  ·  {czas_hms(meta['trwanie_s'])}  ·  {meta.get('device', '?')}"
-        ma_transkrypt = (sesja / "transkrypt.md").exists()
-        opis += "  ·  " + (t("transkrypt gotowy") if ma_transkrypt else t("bez transkryptu"))
-        if meta.get("uczestnicy"):
-            opis += "  ·  " + ", ".join(meta["uczestnicy"])
-        ctk.CTkLabel(karta, text=opis, text_color=TEKST_PRZYGASZONY, anchor="w",
+        description = meta.get("date") or date
+        if meta.get("duration_s"):
+            description += (f"  ·  {format_hms(meta['duration_s'])}"
+                            f"  ·  {meta.get('device', '?')}")
+        transcript_file = session.find_file(session_dir, TRANSCRIPT_MD)
+        description += "  ·  " + (t("transcript ready") if transcript_file else t("no transcript"))
+        if meta.get("participants"):
+            description += "  ·  " + ", ".join(meta["participants"])
+        ctk.CTkLabel(card, text=description, text_color=TEXT_MUTED, anchor="w",
                      font=ctk.CTkFont(size=11)).pack(fill="x", padx=14, pady=(2, 4))
 
-        # Podsumowanie widoczne wprost na liscie - po to bylo je robic.
-        ma_podsumowanie = (sesja / "podsumowanie.md").exists()
+        # The summary is visible right in the list: that is what it is for.
+        summary_file = session.find_file(session_dir, session.SUMMARY_MD)
         if meta.get("tldr"):
-            ctk.CTkLabel(karta, text=meta["tldr"], text_color=TEKST, anchor="w",
+            ctk.CTkLabel(card, text=meta["tldr"], text_color=TEXT, anchor="w",
                          justify="left", wraplength=430,
                          font=ctk.CTkFont(size=11)).pack(fill="x", padx=14, pady=(0, 6))
 
-        przyciski = ctk.CTkFrame(karta, fg_color="transparent")
-        przyciski.pack(fill="x", padx=10, pady=(0, 10))
-        ctk.CTkButton(przyciski, text=t("Folder"), width=68, height=28, corner_radius=8,
-                      fg_color=PANEL_JASNY, hover_color=TLO, text_color=TEKST,
+        buttons = ctk.CTkFrame(card, fg_color="transparent")
+        buttons.pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkButton(buttons, text=t("Folder"), width=68, height=28, corner_radius=8,
+                      fg_color=PANEL_LIGHT, hover_color=BG, text_color=TEXT,
                       font=ctk.CTkFont(size=11),
-                      command=lambda s=sesja: self._otworz(s)).pack(side="left", padx=2)
-        if ma_transkrypt:
-            ctk.CTkButton(przyciski, text=t("Transkrypt"), width=84, height=28, corner_radius=8,
-                          fg_color=PANEL_JASNY, hover_color=TLO, text_color=TEKST,
+                      command=lambda s=session_dir: self._open(s)).pack(side="left", padx=2)
+        if transcript_file:
+            ctk.CTkButton(buttons, text=t("Transcript"), width=84, height=28, corner_radius=8,
+                          fg_color=PANEL_LIGHT, hover_color=BG, text_color=TEXT,
                           font=ctk.CTkFont(size=11),
-                          command=lambda s=sesja: self._otworz(s / "transkrypt.md")
+                          command=lambda f=transcript_file: self._open(f)
                           ).pack(side="left", padx=2)
-        if ma_podsumowanie:
-            ctk.CTkButton(przyciski, text=t("Podsumowanie"), width=108, height=28,
-                          corner_radius=8, fg_color=PANEL_JASNY, hover_color=TLO,
-                          text_color=TEKST, font=ctk.CTkFont(size=11),
-                          command=lambda s=sesja: self._otworz(s / "podsumowanie.md")
+        if summary_file:
+            ctk.CTkButton(buttons, text=t("Summary"), width=108, height=28,
+                          corner_radius=8, fg_color=PANEL_LIGHT, hover_color=BG,
+                          text_color=TEXT, font=ctk.CTkFont(size=11),
+                          command=lambda f=summary_file: self._open(f)
                           ).pack(side="left", padx=2)
-        elif meta.get("segmenty"):
-            ctk.CTkButton(przyciski, text=t("Podsumuj"), width=86, height=28,
-                          corner_radius=8, fg_color=PANEL_JASNY, hover_color=AKCENT,
-                          text_color=TEKST, font=ctk.CTkFont(size=11),
-                          command=lambda s=sesja: self._podsumuj_ponownie(s)
+        elif meta.get("segments"):
+            ctk.CTkButton(buttons, text=t("Summarize"), width=86, height=28,
+                          corner_radius=8, fg_color=PANEL_LIGHT, hover_color=ACCENT,
+                          text_color=TEXT, font=ctk.CTkFont(size=11),
+                          command=lambda s=session_dir: self._summarize_again(s)
                           ).pack(side="left", padx=2)
-        ctk.CTkButton(przyciski, text=t("Transkrybuj ponownie"), width=140, height=28,
-                      corner_radius=8, fg_color=PANEL_JASNY, hover_color=AKCENT,
-                      text_color=TEKST, font=ctk.CTkFont(size=11),
-                      command=lambda s=sesja: self._transkrybuj_ponownie(s)
+        ctk.CTkButton(buttons, text=t("Transcribe again"), width=140, height=28,
+                      corner_radius=8, fg_color=PANEL_LIGHT, hover_color=ACCENT,
+                      text_color=TEXT, font=ctk.CTkFont(size=11),
+                      command=lambda s=session_dir: self._transcribe_again(s)
                       ).pack(side="left", padx=2)
 
-    # --- widok: ustawienia -----------------------------------------------
+    # --- view: settings ---------------------------------------------------
 
-    def _widok_ustawien(self) -> ctk.CTkFrame:
-        ramka = ctk.CTkScrollableFrame(self._kontener, fg_color=TLO)
+    def _settings_view(self) -> ctk.CTkFrame:
+        frame = ctk.CTkScrollableFrame(self._container, fg_color=BG)
 
-        def sekcja(tytul: str) -> ctk.CTkFrame:
-            ctk.CTkLabel(ramka, text=tytul, text_color=TEKST, anchor="w",
+        def section(title: str) -> ctk.CTkFrame:
+            ctk.CTkLabel(frame, text=title, text_color=TEXT, anchor="w",
                          font=ctk.CTkFont(size=14, weight="bold")).pack(
                 fill="x", pady=(14, 6))
-            pudlo = ctk.CTkFrame(ramka, fg_color=PANEL, corner_radius=12)
-            pudlo.pack(fill="x")
-            return pudlo
+            box = ctk.CTkFrame(frame, fg_color=PANEL, corner_radius=12)
+            box.pack(fill="x")
+            return box
 
-        def pole(rodzic, etykieta: str) -> ctk.CTkFrame:
-            ctk.CTkLabel(rodzic, text=etykieta, text_color=TEKST_PRZYGASZONY, anchor="w",
+        def field(parent, label: str) -> ctk.CTkFrame:
+            ctk.CTkLabel(parent, text=label, text_color=TEXT_MUTED, anchor="w",
                          font=ctk.CTkFont(size=11)).pack(fill="x", padx=12, pady=(10, 2))
-            wiersz = ctk.CTkFrame(rodzic, fg_color="transparent")
-            wiersz.pack(fill="x", padx=12, pady=(0, 8))
-            return wiersz
+            row = ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=(0, 8))
+            return row
 
-        # Urzadzenia audio
-        pudlo = sekcja(t("Urządzenia audio"))
-        self._menu_mikrofon = ctk.CTkOptionMenu(
-            pole(pudlo, t("Mikrofon")), values=[t("(domyślny)")], fg_color=PANEL_JASNY,
-            button_color=PANEL_JASNY, button_hover_color=TLO, text_color=TEKST,
-            dynamic_resizing=False, command=lambda _: self._zapisz_urzadzenia(),
+        # Audio devices
+        box = section(t("Audio devices"))
+        self._microphone_menu = ctk.CTkOptionMenu(
+            field(box, t("Microphone")), values=[t("(default)")], fg_color=PANEL_LIGHT,
+            button_color=PANEL_LIGHT, button_hover_color=BG, text_color=TEXT,
+            dynamic_resizing=False, command=lambda _: self._save_devices(),
         )
-        self._menu_mikrofon.pack(fill="x")
-        self._menu_system = ctk.CTkOptionMenu(
-            pole(pudlo, t("Dźwięk systemowy (loopback)")), values=[t("(domyślny)")],
-            fg_color=PANEL_JASNY, button_color=PANEL_JASNY, button_hover_color=TLO,
-            text_color=TEKST, dynamic_resizing=False,
-            command=lambda _: self._zapisz_urzadzenia(),
+        self._microphone_menu.pack(fill="x")
+        self._system_menu = ctk.CTkOptionMenu(
+            field(box, t("System audio (loopback)")), values=[t("(default)")],
+            fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT, button_hover_color=BG,
+            text_color=TEXT, dynamic_resizing=False,
+            command=lambda _: self._save_devices(),
         )
-        self._menu_system.pack(fill="x")
-        self._menu_sciezki = ctk.CTkOptionMenu(
-            pole(pudlo, t("Co nagrywać")),
-            values=[t(v) for v in config.ETYKIETY_SCIEZEK.values()],
-            fg_color=PANEL_JASNY, button_color=PANEL_JASNY, button_hover_color=TLO,
-            text_color=TEKST, dynamic_resizing=False, command=self._zapisz_sciezki,
+        self._system_menu.pack(fill="x")
+        self._tracks_menu = ctk.CTkOptionMenu(
+            field(box, t("What to record")),
+            values=[t(v) for v in config.TRACK_LABELS.values()],
+            fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT, button_hover_color=BG,
+            text_color=TEXT, dynamic_resizing=False, command=self._save_tracks,
         )
-        self._menu_sciezki.set(t(config.ETYKIETY_SCIEZEK[self.ustawienia["sciezki"]]))
-        self._menu_sciezki.pack(fill="x")
+        self._tracks_menu.set(t(config.TRACK_LABELS[self.settings["tracks"]]))
+        self._tracks_menu.pack(fill="x")
 
-        # Transkrypcja
-        pudlo = sekcja(t("Transkrypcja"))
-        etykiety_modeli = [f"{k.split('/')[-1]} - {t(v['opis'])}"
-                           for k, v in config.MODELE.items()]
-        self._mapa_modeli = dict(zip(etykiety_modeli, config.MODELE.keys(), strict=True))
-        self._menu_modelu = ctk.CTkOptionMenu(
-            pole(pudlo, t("Model")), values=etykiety_modeli, fg_color=PANEL_JASNY,
-            button_color=PANEL_JASNY, button_hover_color=TLO, text_color=TEKST,
-            dynamic_resizing=False, command=self._zapisz_model,
+        # Transcription
+        box = section(t("Transcription"))
+        model_labels = [f"{k.split('/')[-1]} - {t(v['description'])}"
+                        for k, v in config.MODELS.items()]
+        self._model_map = dict(zip(model_labels, config.MODELS.keys(), strict=True))
+        self._model_menu = ctk.CTkOptionMenu(
+            field(box, t("Model")), values=model_labels, fg_color=PANEL_LIGHT,
+            button_color=PANEL_LIGHT, button_hover_color=BG, text_color=TEXT,
+            dynamic_resizing=False, command=self._save_model,
         )
-        for etykieta, repo in self._mapa_modeli.items():
-            if repo == self.ustawienia["model"]:
-                self._menu_modelu.set(etykieta)
-        self._menu_modelu.pack(fill="x")
+        for label, repo in self._model_map.items():
+            if repo == self.settings["model"]:
+                self._model_menu.set(label)
+        self._model_menu.pack(fill="x")
 
-        self._etykieta_modelu = ctk.CTkLabel(
-            pudlo, text="", text_color=TEKST_PRZYGASZONY, anchor="w",
+        self._model_label = ctk.CTkLabel(
+            box, text="", text_color=TEXT_MUTED, anchor="w",
             font=ctk.CTkFont(size=11),
         )
-        self._etykieta_modelu.pack(fill="x", padx=12, pady=(0, 6))
+        self._model_label.pack(fill="x", padx=12, pady=(0, 6))
 
-        self._przycisk_pobierz = ctk.CTkButton(
-            pudlo, text=t("Pobierz model"), height=32, corner_radius=8, fg_color=AKCENT,
-            hover_color=AKCENT_HOVER, text_color="#0b1220",
-            command=self._pobierz_model,
+        self._download_button = ctk.CTkButton(
+            box, text=t("Download model"), height=32, corner_radius=8, fg_color=ACCENT,
+            hover_color=ACCENT_HOVER, text_color="#0b1220",
+            command=self._download_model,
         )
-        self._przycisk_pobierz.pack(fill="x", padx=12, pady=(0, 10))
+        self._download_button.pack(fill="x", padx=12, pady=(0, 10))
 
-        self._menu_device = ctk.CTkOptionMenu(
-            pole(pudlo, t("Urządzenie obliczeniowe")), values=["GPU", "CPU"],
-            fg_color=PANEL_JASNY, button_color=PANEL_JASNY, button_hover_color=TLO,
-            text_color=TEKST, dynamic_resizing=False, command=self._zapisz_device,
+        self._device_menu = ctk.CTkOptionMenu(
+            field(box, t("Compute device")), values=["GPU", "CPU"],
+            fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT, button_hover_color=BG,
+            text_color=TEXT, dynamic_resizing=False, command=self._save_device,
         )
-        self._menu_device.pack(fill="x")
+        self._device_menu.pack(fill="x")
 
-        self._etykieta_device = ctk.CTkLabel(
-            pudlo, text="", text_color=TEKST_PRZYGASZONY, anchor="w",
+        self._device_label = ctk.CTkLabel(
+            box, text="", text_color=TEXT_MUTED, anchor="w",
             font=ctk.CTkFont(size=11),
         )
-        self._etykieta_device.pack(fill="x", padx=12, pady=(0, 10))
+        self._device_label.pack(fill="x", padx=12, pady=(0, 10))
 
-        self._przelacznik_auto = ctk.CTkSwitch(
-            pudlo, text=t("Transkrybuj automatycznie po zatrzymaniu"),
-            text_color=TEKST, progress_color=AKCENT, font=ctk.CTkFont(size=12),
-            command=self._zapisz_auto,
+        self._auto_switch = ctk.CTkSwitch(
+            box, text=t("Transcribe automatically after stopping"),
+            text_color=TEXT, progress_color=ACCENT, font=ctk.CTkFont(size=12),
+            command=self._save_auto,
         )
-        self._przelacznik_auto.pack(anchor="w", padx=12, pady=(0, 12))
-        if self.ustawienia["transkrybuj_po_stopie"]:
-            self._przelacznik_auto.select()
+        self._auto_switch.pack(anchor="w", padx=12, pady=(0, 12))
+        if self.settings["transcribe_after_stop"]:
+            self._auto_switch.select()
 
-        # Podsumowanie AI
-        pudlo = sekcja(t("Podsumowanie AI (opcjonalne)"))
-        self._przelacznik_podsumowania = ctk.CTkSwitch(
-            pudlo, text=t("Podsumowuj po transkrypcji"), text_color=TEKST,
-            progress_color=AKCENT, font=ctk.CTkFont(size=12),
-            command=self._zapisz_podsumowanie,
+        # AI summary
+        box = section(t("AI summary (optional)"))
+        self._summary_switch = ctk.CTkSwitch(
+            box, text=t("Summarize after transcription"), text_color=TEXT,
+            progress_color=ACCENT, font=ctk.CTkFont(size=12),
+            command=self._save_summary_enabled,
         )
-        self._przelacznik_podsumowania.pack(anchor="w", padx=12, pady=(12, 4))
-        if self.ustawienia["podsumowanie"]:
-            self._przelacznik_podsumowania.select()
+        self._summary_switch.pack(anchor="w", padx=12, pady=(12, 4))
+        if self.settings["summary_enabled"]:
+            self._summary_switch.select()
 
-        self._przelacznik_nazwy = ctk.CTkSwitch(
-            pudlo, text=t("Nazywaj folder tematem i imionami"), text_color=TEKST,
-            progress_color=AKCENT, font=ctk.CTkFont(size=12),
-            command=self._zapisz_zmiane_nazwy,
+        self._rename_switch = ctk.CTkSwitch(
+            box, text=t("Name the folder after the topic and names"), text_color=TEXT,
+            progress_color=ACCENT, font=ctk.CTkFont(size=12),
+            command=self._save_rename_folder,
         )
-        self._przelacznik_nazwy.pack(anchor="w", padx=12, pady=(0, 8))
-        if self.ustawienia["zmiana_nazwy"]:
-            self._przelacznik_nazwy.select()
+        self._rename_switch.pack(anchor="w", padx=12, pady=(0, 8))
+        if self.settings["rename_folder"]:
+            self._rename_switch.select()
 
-        etykiety_llm = [f"{k.split('/')[-1]} - {t(v['opis'])}"
-                        for k, v in config.MODELE_LLM.items()]
-        self._mapa_llm = dict(zip(etykiety_llm, config.MODELE_LLM.keys(), strict=True))
-        self._menu_llm = ctk.CTkOptionMenu(
-            pole(pudlo, t("Model językowy")), values=etykiety_llm, fg_color=PANEL_JASNY,
-            button_color=PANEL_JASNY, button_hover_color=TLO, text_color=TEKST,
-            dynamic_resizing=False, command=self._zapisz_model_llm,
+        llm_labels = [f"{k.split('/')[-1]} - {t(v['description'])}"
+                      for k, v in config.LLM_MODELS.items()]
+        self._llm_map = dict(zip(llm_labels, config.LLM_MODELS.keys(), strict=True))
+        self._llm_menu = ctk.CTkOptionMenu(
+            field(box, t("Language model")), values=llm_labels, fg_color=PANEL_LIGHT,
+            button_color=PANEL_LIGHT, button_hover_color=BG, text_color=TEXT,
+            dynamic_resizing=False, command=self._save_llm_model,
         )
-        for etykieta, repo in self._mapa_llm.items():
-            if repo == self.ustawienia["model_llm"]:
-                self._menu_llm.set(etykieta)
-        self._menu_llm.pack(fill="x")
+        for label, repo in self._llm_map.items():
+            if repo == self.settings["summary_model"]:
+                self._llm_menu.set(label)
+        self._llm_menu.pack(fill="x")
 
-        self._etykieta_llm = ctk.CTkLabel(
-            pudlo, text="", text_color=TEKST_PRZYGASZONY, anchor="w",
+        self._llm_label = ctk.CTkLabel(
+            box, text="", text_color=TEXT_MUTED, anchor="w",
             font=ctk.CTkFont(size=11),
         )
-        self._etykieta_llm.pack(fill="x", padx=12, pady=(0, 6))
+        self._llm_label.pack(fill="x", padx=12, pady=(0, 6))
 
-        self._przycisk_pobierz_llm = ctk.CTkButton(
-            pudlo, text=t("Pobierz model"), height=32, corner_radius=8, fg_color=AKCENT,
-            hover_color=AKCENT_HOVER, text_color="#0b1220",
-            command=self._pobierz_model_llm,
+        self._download_llm_button = ctk.CTkButton(
+            box, text=t("Download model"), height=32, corner_radius=8, fg_color=ACCENT,
+            hover_color=ACCENT_HOVER, text_color="#0b1220",
+            command=self._download_llm_model,
         )
-        self._przycisk_pobierz_llm.pack(fill="x", padx=12, pady=(0, 8))
+        self._download_llm_button.pack(fill="x", padx=12, pady=(0, 8))
 
         ctk.CTkLabel(
-            pudlo,
-            text=t("Model rusza dopiero po transkrypcji i jest zwalniany zaraz po niej —\n"
-                   "nie zostaje w pamięci ani w tle. Działa lokalnie, bez sieci."),
-            text_color=TEKST_PRZYGASZONY, anchor="w", justify="left",
+            box,
+            text=t("The model starts only after transcription and is released right after it —\n"
+                   "it does not stay in memory or in the background. Runs locally, offline."),
+            text_color=TEXT_MUTED, anchor="w", justify="left",
             font=ctk.CTkFont(size=11),
         ).pack(fill="x", padx=12, pady=(0, 12))
 
-        # Pozostale
-        pudlo = sekcja(t("Pozostałe"))
-        wiersz = pole(pudlo, t("Katalog nagrań"))
-        self._pole_katalogu = ctk.CTkEntry(
-            wiersz, height=32, fg_color=PANEL_JASNY, border_color=PANEL_JASNY,
-            text_color=TEKST,
+        # Other
+        box = section(t("Other"))
+        row = field(box, t("Recordings folder"))
+        self._folder_entry = ctk.CTkEntry(
+            row, height=32, fg_color=PANEL_LIGHT, border_color=PANEL_LIGHT,
+            text_color=TEXT,
         )
-        self._pole_katalogu.insert(0, str(self.ustawienia.katalog_nagran))
-        self._pole_katalogu.pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(wiersz, text=t("Zapisz"), width=72, height=32, corner_radius=8,
-                      fg_color=PANEL_JASNY, hover_color=AKCENT, text_color=TEKST,
-                      command=self._zapisz_katalog).pack(side="left", padx=(6, 0))
+        self._folder_entry.insert(0, str(self.settings.recordings_dir))
+        self._folder_entry.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(row, text=t("Save"), width=72, height=32, corner_radius=8,
+                      fg_color=PANEL_LIGHT, hover_color=ACCENT, text_color=TEXT,
+                      command=self._save_folder).pack(side="left", padx=(6, 0))
 
-        etykiety_ui = [t(v) for v in config.ETYKIETY_INTERFEJSU.values()]
-        self._mapa_ui = dict(zip(etykiety_ui, config.ETYKIETY_INTERFEJSU.keys(), strict=True))
-        self._menu_ui = ctk.CTkOptionMenu(
-            pole(pudlo, t("Język interfejsu (po ponownym uruchomieniu)")),
-            values=etykiety_ui, fg_color=PANEL_JASNY, button_color=PANEL_JASNY,
-            button_hover_color=TLO, text_color=TEKST, dynamic_resizing=False,
-            command=self._zapisz_jezyk_interfejsu,
+        ui_labels = [t(v) for v in config.UI_LANGUAGE_LABELS.values()]
+        self._ui_map = dict(zip(ui_labels, config.UI_LANGUAGE_LABELS.keys(), strict=True))
+        self._ui_menu = ctk.CTkOptionMenu(
+            field(box, t("Interface language (after restart)")),
+            values=ui_labels, fg_color=PANEL_LIGHT, button_color=PANEL_LIGHT,
+            button_hover_color=BG, text_color=TEXT, dynamic_resizing=False,
+            command=self._save_ui_language,
         )
-        self._menu_ui.set(t(config.ETYKIETY_INTERFEJSU.get(
-            self.ustawienia["jezyk_interfejsu"], config.ETYKIETY_INTERFEJSU["auto"])))
-        self._menu_ui.pack(fill="x")
+        self._ui_menu.set(t(config.UI_LANGUAGE_LABELS.get(
+            self.settings["ui_language"], config.UI_LANGUAGE_LABELS["auto"])))
+        self._ui_menu.pack(fill="x")
 
         ctk.CTkLabel(
-            pudlo,
-            text=t("Skrót globalny: {skrot}", skrot=self._opis_skrotu()) + "\n"
-                 f"OpenVINO GenAI: {transcribe.wersja_genai()}  ·  {config.APLIKACJA} {config.WERSJA}",
-            text_color=TEKST_PRZYGASZONY, anchor="w", justify="left",
+            box,
+            text=t("Global shortcut: {shortcut}", shortcut=self._shortcut_text()) + "\n"
+                 f"OpenVINO GenAI: {transcribe.genai_version()}  ·  {config.APP_NAME} {config.VERSION}",
+            text_color=TEXT_MUTED, anchor="w", justify="left",
             font=ctk.CTkFont(size=11),
         ).pack(fill="x", padx=12, pady=(4, 12))
 
-        self.after(300, self._odswiez_status_modelu)
-        self.after(300, self._odswiez_status_llm)
-        return ramka
+        self.after(300, self._refresh_model_status)
+        self.after(300, self._refresh_llm_status)
+        return frame
 
-    # --- ustawienia: obsluga ---------------------------------------------
+    # --- settings: handlers -----------------------------------------------
 
-    def _wczytaj_urzadzenia(self) -> None:
+    def _load_devices(self) -> None:
         try:
-            urzadzenia = audio.lista_urzadzen()
-        except Exception as blad:
-            log.exception("Nie udalo sie wyliczyc urzadzen audio")
-            self._kolejka.put(("blad", t("Błąd urządzeń audio: {blad}", blad=blad)))
+            devices = audio.list_devices()
+        except Exception as error:
+            log.exception("Could not enumerate audio devices")
+            self._queue.put(("error", t("Audio device error: {error}", error=error)))
             return
-        self._kolejka.put(("urzadzenia", urzadzenia))
+        self._queue.put(("devices", devices))
 
-    def _zastosuj_urzadzenia(self, urzadzenia: dict) -> None:
-        self._urzadzenia = urzadzenia
+    def _apply_devices(self, devices: dict) -> None:
+        self._devices = devices
 
-        def wypelnij(menu, lista, wybrany_index):
-            etykiety = [t("(domyślny)")] + [u.etykieta for u in lista]
-            menu.configure(values=etykiety)
-            wybrana = t("(domyślny)")
-            for urz in lista:
-                if urz.index == wybrany_index:
-                    wybrana = urz.etykieta
-            menu.set(wybrana)
+        def fill(menu, device_list, selected_index):
+            labels = [t("(default)")] + [d.label for d in device_list]
+            menu.configure(values=labels)
+            selected = t("(default)")
+            for device in device_list:
+                if device.index == selected_index:
+                    selected = device.label
+            menu.set(selected)
 
-        wypelnij(self._menu_mikrofon, urzadzenia["mikrofony"],
-                 self.ustawienia["mikrofon_index"])
-        wypelnij(self._menu_system, urzadzenia["system"],
-                 self.ustawienia["system_index"])
+        fill(self._microphone_menu, devices["microphones"],
+             self.settings["microphone_index"])
+        fill(self._system_menu, devices["system"],
+             self.settings["system_index"])
 
-        if not urzadzenia["system"]:
-            self._etykieta_stanu.configure(
-                text=t("Uwaga: brak urządzenia loopback — dźwięk systemowy niedostępny"),
-                text_color=CZERWIEN,
+        if not devices["system"]:
+            self._status_label.configure(
+                text=t("Warning: no loopback device — system audio unavailable"),
+                text_color=RED,
             )
 
-    def _zapisz_urzadzenia(self) -> None:
-        def index_dla(menu, lista):
-            wybrana = menu.get()
-            if wybrana == t("(domyślny)"):
+    def _save_devices(self) -> None:
+        def index_for(menu, device_list):
+            selected = menu.get()
+            if selected == t("(default)"):
                 return None
-            for urz in lista:
-                if urz.etykieta == wybrana:
-                    return urz.index
+            for device in device_list:
+                if device.label == selected:
+                    return device.index
             return None
 
-        self.ustawienia["mikrofon_index"] = index_dla(
-            self._menu_mikrofon, self._urzadzenia["mikrofony"])
-        self.ustawienia["system_index"] = index_dla(
-            self._menu_system, self._urzadzenia["system"])
-        self.ustawienia.zapisz()
+        self.settings["microphone_index"] = index_for(
+            self._microphone_menu, self._devices["microphones"])
+        self.settings["system_index"] = index_for(
+            self._system_menu, self._devices["system"])
+        self.settings.save()
 
-    def _zapisz_sciezki(self, wartosc: str) -> None:
-        for kod, etykieta in config.ETYKIETY_SCIEZEK.items():
-            if t(etykieta) == wartosc:
-                self.ustawienia["sciezki"] = kod
-        self.ustawienia.zapisz()
+    def _save_tracks(self, value: str) -> None:
+        for code, label in config.TRACK_LABELS.items():
+            if t(label) == value:
+                self.settings["tracks"] = code
+        self.settings.save()
 
-    def _zapisz_model(self, wartosc: str) -> None:
-        self.ustawienia["model"] = self._mapa_modeli.get(wartosc, config.MODEL_DOMYSLNY)
-        self.ustawienia.zapisz()
-        self._odswiez_status_modelu()
+    def _save_model(self, value: str) -> None:
+        self.settings["model"] = self._model_map.get(value, config.DEFAULT_MODEL)
+        self.settings.save()
+        self._refresh_model_status()
 
-    def _zapisz_device(self, wartosc: str) -> None:
-        self.ustawienia["device"] = wartosc
-        self.ustawienia.zapisz()
+    def _save_device(self, value: str) -> None:
+        self.settings["device"] = value
+        self.settings.save()
 
-    def _zapisz_auto(self) -> None:
-        self.ustawienia["transkrybuj_po_stopie"] = bool(self._przelacznik_auto.get())
-        self.ustawienia.zapisz()
+    def _save_auto(self) -> None:
+        self.settings["transcribe_after_stop"] = bool(self._auto_switch.get())
+        self.settings.save()
 
-    def _zapisz_podsumowanie(self) -> None:
-        self.ustawienia["podsumowanie"] = bool(self._przelacznik_podsumowania.get())
-        self.ustawienia.zapisz()
+    def _save_summary_enabled(self) -> None:
+        self.settings["summary_enabled"] = bool(self._summary_switch.get())
+        self.settings.save()
 
-    def _zapisz_zmiane_nazwy(self) -> None:
-        self.ustawienia["zmiana_nazwy"] = bool(self._przelacznik_nazwy.get())
-        self.ustawienia.zapisz()
+    def _save_rename_folder(self) -> None:
+        self.settings["rename_folder"] = bool(self._rename_switch.get())
+        self.settings.save()
 
-    def _zapisz_model_llm(self, wartosc: str) -> None:
-        self.ustawienia["model_llm"] = self._mapa_llm.get(
-            wartosc, config.MODEL_LLM_DOMYSLNY)
-        self.ustawienia.zapisz()
-        self._odswiez_status_llm()
+    def _save_llm_model(self, value: str) -> None:
+        self.settings["summary_model"] = self._llm_map.get(
+            value, config.DEFAULT_LLM_MODEL)
+        self.settings.save()
+        self._refresh_llm_status()
 
-    def _zapisz_jezyk_interfejsu(self, wartosc: str) -> None:
-        self.ustawienia["jezyk_interfejsu"] = self._mapa_ui.get(wartosc, "auto")
-        self.ustawienia.zapisz()
+    def _save_ui_language(self, value: str) -> None:
+        self.settings["ui_language"] = self._ui_map.get(value, "auto")
+        self.settings.save()
 
-    def _zapisz_katalog(self) -> None:
-        sciezka = Path(self._pole_katalogu.get().strip())
+    def _save_folder(self) -> None:
+        path = Path(self._folder_entry.get().strip())
         try:
-            sciezka.mkdir(parents=True, exist_ok=True)
-        except OSError as blad:
-            self._etykieta_stanu.configure(text=t("Zły katalog: {blad}", blad=blad), text_color=CZERWIEN)
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self._status_label.configure(text=t("Invalid folder: {error}", error=error),
+                                         text_color=RED)
             return
-        self.ustawienia["katalog_nagran"] = str(sciezka)
-        self.ustawienia.zapisz()
+        self.settings["recordings_dir"] = str(path)
+        self.settings.save()
 
-    def _odswiez_status_modelu(self) -> None:
-        model = self.ustawienia["model"]
-        info = config.MODELE.get(model, {})
-        if transcribe.model_pobrany(model):
-            self._etykieta_modelu.configure(
-                text=t("Model pobrany ({rozmiar})", rozmiar=info.get('rozmiar', '')), text_color=ZIELEN)
-            # Wyszarzony, zeby nie wygladal na przycisk czekajacy na klikniecie.
-            self._przycisk_pobierz.configure(
-                state="disabled", text=t("Model gotowy"),
-                fg_color=PANEL_JASNY, text_color_disabled=TEKST_PRZYGASZONY)
+    def _refresh_model_status(self) -> None:
+        model = self.settings["model"]
+        info = config.MODELS.get(model, {})
+        if transcribe.model_downloaded(model):
+            self._model_label.configure(
+                text=t("Model downloaded ({size})", size=info.get('size', '')), text_color=GREEN)
+            # Greyed out, so it does not look like a button waiting for a click.
+            self._download_button.configure(
+                state="disabled", text=t("Model ready"),
+                fg_color=PANEL_LIGHT, text_color_disabled=TEXT_MUTED)
         else:
-            self._etykieta_modelu.configure(
-                text=t("Model niepobrany ({rozmiar})", rozmiar=info.get('rozmiar', '')),
-                text_color=CZERWIEN)
-            self._przycisk_pobierz.configure(
-                state="normal", text=t("Pobierz model ({rozmiar})", rozmiar=info.get('rozmiar', '')),
-                fg_color=AKCENT, text_color="#0b1220")
+            self._model_label.configure(
+                text=t("Model not downloaded ({size})", size=info.get('size', '')),
+                text_color=RED)
+            self._download_button.configure(
+                state="normal", text=t("Download model ({size})", size=info.get('size', '')),
+                fg_color=ACCENT, text_color="#0b1220")
 
-        # Import openvino trwa kilka sekund - nie blokujemy nim interfejsu.
-        self._etykieta_device.configure(text=t("Sprawdzam dostępne urządzenia..."))
+        # Importing openvino takes a few seconds; we do not block the UI with it.
+        self._device_label.configure(text=t("Checking available devices..."))
         threading.Thread(
-            target=lambda: self._kolejka.put(
-                ("urzadzenia_ov", transcribe.dostepne_urzadzenia())),
+            target=lambda: self._queue.put(
+                ("ov_devices", transcribe.available_devices())),
             daemon=True,
         ).start()
 
-    def _odswiez_status_llm(self) -> None:
-        model = self.ustawienia["model_llm"]
-        info = config.MODELE_LLM.get(model, {})
-        if transcribe.model_pobrany(model):
-            self._etykieta_llm.configure(
-                text=t("Model pobrany ({rozmiar})", rozmiar=info.get('rozmiar', '')), text_color=ZIELEN)
-            self._przycisk_pobierz_llm.configure(
-                state="disabled", text=t("Model gotowy"),
-                fg_color=PANEL_JASNY, text_color_disabled=TEKST_PRZYGASZONY)
+    def _refresh_llm_status(self) -> None:
+        model = self.settings["summary_model"]
+        info = config.LLM_MODELS.get(model, {})
+        if transcribe.model_downloaded(model):
+            self._llm_label.configure(
+                text=t("Model downloaded ({size})", size=info.get('size', '')), text_color=GREEN)
+            self._download_llm_button.configure(
+                state="disabled", text=t("Model ready"),
+                fg_color=PANEL_LIGHT, text_color_disabled=TEXT_MUTED)
         else:
-            self._etykieta_llm.configure(
-                text=t("Model niepobrany ({rozmiar}) — bez niego transkrypcja działa, "
-                       "tylko bez podsumowania", rozmiar=info.get('rozmiar', '')),
-                text_color=CZERWIEN)
-            self._przycisk_pobierz_llm.configure(
-                state="normal", text=t("Pobierz model ({rozmiar})", rozmiar=info.get('rozmiar', '')),
-                fg_color=AKCENT, text_color="#0b1220")
+            self._llm_label.configure(
+                text=t("Model not downloaded ({size}) — transcription works without it, "
+                       "just with no summary", size=info.get('size', '')),
+                text_color=RED)
+            self._download_llm_button.configure(
+                state="normal", text=t("Download model ({size})", size=info.get('size', '')),
+                fg_color=ACCENT, text_color="#0b1220")
 
-    def _pobierz_model(self) -> None:
-        model = self.ustawienia["model"]
-        self._przycisk_pobierz.configure(state="disabled", text=t("Pobieram..."))
+    def _download_model(self) -> None:
+        model = self.settings["model"]
+        self._download_button.configure(state="disabled", text=t("Downloading..."))
 
-        def zadanie():
+        def job():
             try:
-                transcribe.sciezka_modelu(model, pobierz=True)
-                self._kolejka.put(("model_pobrany", model))
-            except Exception as blad:
-                self._kolejka.put(("blad", t("Pobieranie modelu nie powiodło się: {blad}", blad=blad)))
-                self._kolejka.put(("model_pobrany", model))
+                transcribe.model_path(model, download=True)
+                self._queue.put(("model_downloaded", model))
+            except Exception as error:
+                self._queue.put(("error", t("Model download failed: {error}", error=error)))
+                self._queue.put(("model_downloaded", model))
 
-        threading.Thread(target=zadanie, daemon=True).start()
+        threading.Thread(target=job, daemon=True).start()
 
-    def _pobierz_model_llm(self) -> None:
-        model = self.ustawienia["model_llm"]
-        self._przycisk_pobierz_llm.configure(state="disabled", text=t("Pobieram..."))
+    def _download_llm_model(self) -> None:
+        model = self.settings["summary_model"]
+        self._download_llm_button.configure(state="disabled", text=t("Downloading..."))
 
-        def zadanie():
+        def job():
             try:
-                transcribe.sciezka_modelu(model, pobierz=True)
-            except Exception as blad:
-                self._kolejka.put(
-                    ("blad", t("Pobieranie modelu językowego nie powiodło się: {blad}", blad=blad)))
-            self._kolejka.put(("model_llm_pobrany", model))
+                transcribe.model_path(model, download=True)
+            except Exception as error:
+                self._queue.put(
+                    ("error", t("Language model download failed: {error}", error=error)))
+            self._queue.put(("llm_downloaded", model))
 
-        threading.Thread(target=zadanie, daemon=True).start()
+        threading.Thread(target=job, daemon=True).start()
 
-    # --- nagrywanie -------------------------------------------------------
+    # --- recording --------------------------------------------------------
 
-    def przelacz_nagrywanie(self) -> None:
-        if self.nagrywa:
-            self.zatrzymaj_nagrywanie()
+    def toggle_recording(self) -> None:
+        if self.recording:
+            self.stop_recording()
         else:
-            self.rozpocznij_nagrywanie()
+            self.start_recording()
 
-    def rozpocznij_nagrywanie(self) -> None:
-        if self.nagrywa or self.transkrybuje:
+    def start_recording(self) -> None:
+        if self.recording or self.transcribing:
             return
 
-        nazwa = self._pole_nazwy.get().strip() or t("Spotkanie")
-        znacznik = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        katalog = self.ustawienia.katalog_nagran / f"{znacznik}_{slug(nazwa) or 'Spotkanie'}"
+        name = self._name_entry.get().strip() or t("Meeting")
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        folder = self.settings.recordings_dir / f"{stamp}_{slug(name) or 'Meeting'}"
 
-        self.nagrywarka = audio.Nagrywarka(
-            tryb=self.ustawienia["sciezki"],
-            mikrofon_index=self.ustawienia["mikrofon_index"],
-            system_index=self.ustawienia["system_index"],
+        self.recorder = audio.Recorder(
+            tracks=self.settings["tracks"],
+            microphone_index=self.settings["microphone_index"],
+            system_index=self.settings["system_index"],
         )
         try:
-            self.nagrywarka.start(katalog)
-        except Exception as blad:
-            log.exception("Nie udalo sie rozpoczac nagrywania")
-            self._etykieta_stanu.configure(text=str(blad), text_color=CZERWIEN)
-            self.nagrywarka = None
+            self.recorder.start(folder)
+        except Exception as error:
+            log.exception("Could not start recording")
+            self._status_label.configure(text=str(error), text_color=RED)
+            self.recorder = None
             return
 
-        self.nagrywa = True
-        self.nazwa_sesji = nazwa
-        self.katalog_sesji = katalog
-        self.start_nagrania = time.time()
+        self.recording = True
+        self.session_name = name
+        self.session_dir = folder
+        self.recording_start = time.time()
 
-        self._przycisk_rec.configure(text="STOP", fg_color=PANEL_JASNY,
-                                     hover_color=CZERWIEN)
-        stan = t("Nagrywanie...")
-        if self.nagrywarka.ostrzezenia:
-            stan += "  (" + "; ".join(self.nagrywarka.ostrzezenia) + ")"
-        self._etykieta_stanu.configure(text=stan, text_color=CZERWIEN)
-        self._pole_nazwy.configure(state="disabled")
-        self._zasobnik.ustaw_stan(True, t("{app} - nagrywanie", app=config.APLIKACJA))
-        self._pokaz_widok("nagrywanie")
+        self._rec_button.configure(text="STOP", fg_color=PANEL_LIGHT, hover_color=RED)
+        status = t("Recording...")
+        if self.recorder.warnings:
+            status += "  (" + "; ".join(self.recorder.warnings) + ")"
+        self._status_label.configure(text=status, text_color=RED)
+        self._name_entry.configure(state="disabled")
+        self._tray.set_state(True, t("{app} - recording", app=config.APP_NAME))
+        self._show_view("record")
 
-    def zatrzymaj_nagrywanie(self) -> None:
-        if not self.nagrywa or self.nagrywarka is None:
+    def stop_recording(self) -> None:
+        if not self.recording or self.recorder is None:
             return
 
-        self.nagrywa = False
-        wynik = self.nagrywarka.stop()
-        self.nagrywarka = None
+        self.recording = False
+        result = self.recorder.stop()
+        self.recorder = None
 
-        self._przycisk_rec.configure(text="REC", fg_color=CZERWIEN,
-                                     hover_color=CZERWIEN_HOVER)
-        self._etykieta_stanu.configure(text=t("Zatrzymano"), text_color=TEKST_PRZYGASZONY)
-        self._pole_nazwy.configure(state="normal")
-        self._zasobnik.ustaw_stan(False)
-        for pasek in self._poziomy_ui.values():
-            pasek.set(0)
+        self._rec_button.configure(text="REC", fg_color=RED, hover_color=RED_HOVER)
+        self._status_label.configure(text=t("Stopped"), text_color=TEXT_MUTED)
+        self._name_entry.configure(state="normal")
+        self._tray.set_state(False)
+        for bar in self._level_bars.values():
+            bar.set(0)
 
-        pliki = {n: d["plik"] for n, d in wynik["sciezki"].items()}
-        if not pliki:
-            self._etykieta_stanu.configure(text=t("Nic nie nagrano."), text_color=CZERWIEN)
+        files = {n: d["file"] for n, d in result["tracks"].items()}
+        if not files:
+            self._status_label.configure(text=t("Nothing was recorded."), text_color=RED)
             return
 
         meta = {
-            "nazwa": self.nazwa_sesji,
-            "data": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "trwanie_s": wynik["trwanie_s"],
-            "model": self.ustawienia["model"],
-            "jezyk": self.ustawienia["jezyk"],
-            "urzadzenie_mikrofon": wynik["sciezki"].get("mikrofon", {}).get("urzadzenie"),
-            "urzadzenie_system": wynik["sciezki"].get("system", {}).get("urzadzenie"),
-            "genai": transcribe.wersja_genai(),
+            "name": self.session_name,
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "duration_s": result["duration_s"],
+            "model": self.settings["model"],
+            "language": self.settings["language"],
+            "microphone_device": result["tracks"].get("microphone", {}).get("device"),
+            "system_device": result["tracks"].get("system", {}).get("device"),
+            "genai": transcribe.genai_version(),
         }
-        (wynik["katalog"] / "meta.json").write_text(
+        (result["folder"] / "meta.json").write_text(
             json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        if self.ustawienia["transkrybuj_po_stopie"]:
-            self._uruchom_transkrypcje(wynik["katalog"], pliki, meta)
+        if self.settings["transcribe_after_stop"]:
+            self._start_transcription(result["folder"], files, meta)
         else:
-            self._pokaz_widok("nagrania")
+            self._show_view("recordings")
 
-    # --- transkrypcja -----------------------------------------------------
+    # --- transcription ----------------------------------------------------
 
-    def _transkrybuj_ponownie(self, sesja: Path) -> None:
-        pliki = {}
-        for nazwa, plik in (("mikrofon", "mikrofon.flac"), ("system", "spotkanie.flac")):
-            if (sesja / plik).exists():
-                pliki[nazwa] = sesja / plik
-        if not pliki:
-            self._etykieta_stanu.configure(text=t("Brak plików audio w tej sesji."),
-                                           text_color=CZERWIEN)
+    def _transcribe_again(self, session_dir: Path) -> None:
+        files = session.audio_tracks(session_dir)
+        if not files:
+            self._status_label.configure(text=t("No audio files in this session."),
+                                         text_color=RED)
             return
 
-        meta = {}
-        if (sesja / "meta.json").exists():
-            try:
-                meta = json.loads((sesja / "meta.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                meta = {}
-        meta.pop("segmenty", None)
-        meta.setdefault("nazwa", sesja.name)
-        meta["model"] = self.ustawienia["model"]
-        meta["jezyk"] = self.ustawienia["jezyk"]
-        self._uruchom_transkrypcje(sesja, pliki, meta)
+        meta = session.read_meta(session_dir)
+        meta.pop("segments", None)
+        meta.setdefault("name", session_dir.name)
+        meta["model"] = self.settings["model"]
+        meta["language"] = self.settings["language"]
+        self._start_transcription(session_dir, files, meta)
 
-    def _uruchom_transkrypcje(self, katalog: Path, pliki: dict, meta: dict) -> None:
-        if self.transkrybuje:
+    def _start_transcription(self, folder: Path, files: dict, meta: dict) -> None:
+        if self.transcribing:
             return
 
-        # Ustawienia wczytujemy raz, przy starcie, a aplikacja potrafi chodzic
-        # w zasobniku tygodniami. Jesli plik zmienil sie w miedzyczasie (recznie
-        # albo z drugiej instancji), po nagraniu siegnelibysmy po nieaktualny
-        # model - lacznie z takim, ktorego juz nie ma na dysku. Kazda zmiana
-        # z UI ladunie na dysk od razu, wiec plik jest zawsze co najmniej tak
-        # swiezy jak pamiec.
-        self.ustawienia.wczytaj()
+        # Settings are read once, at start, and the app can sit in the tray for
+        # weeks. If the file changed in the meantime (by hand or from a second
+        # instance), after a recording we would reach for a stale model,
+        # including one no longer on disk. Every UI change goes to disk at
+        # once, so the file is always at least as fresh as memory.
+        self.settings.load()
 
-        if not transcribe.model_pobrany(self.ustawienia["model"]):
-            # Bez tego wpisu w logu nie ma sladu, ze transkrypcja w ogole miala
-            # ruszyc - a komunikat w oknie przepada, gdy aplikacja siedzi w tacce.
-            log.warning("Transkrypcja pominieta: model %r nie jest pobrany",
-                        self.ustawienia["model"])
-            self._etykieta_stanu.configure(
-                text=t("Model nie jest pobrany — wejdź w Ustawienia."), text_color=CZERWIEN)
-            self._pokaz_widok("ustawienia")
+        if not transcribe.model_downloaded(self.settings["model"]):
+            # Without this log line there is no trace that transcription was
+            # supposed to start at all, and the window message is lost while
+            # the app sits in the tray.
+            log.warning("Transcription skipped: model %r is not downloaded",
+                        self.settings["model"])
+            self._status_label.configure(
+                text=t("The model is not downloaded — open Settings."), text_color=RED)
+            self._show_view("settings")
             return
 
-        self.transkrybuje = True
-        self.katalog_sesji = katalog
-        self.anuluj_transkrypcje.clear()
+        self.transcribing = True
+        self.session_dir = folder
+        self.cancel_transcription.clear()
 
-        self._tytul_transkrypcji.configure(text=meta.get("nazwa", katalog.name))
-        self._podtytul_transkrypcji.configure(
-            text=f"{self.ustawienia['device']}  ·  {self.ustawienia['model'].split('/')[-1]}")
-        self._pole_transkrypcji.delete("1.0", "end")
-        self._karta_podsumowania.pack_forget()
-        self._pasek_postepu.set(0)
-        self._etykieta_postepu.configure(text=t("Ładuję model..."))
-        self._przycisk_anuluj.configure(state="normal", text=t("Przerwij"))
-        self._pokaz_widok("transkrypcja")
+        self._transcript_title.configure(text=meta.get("name", folder.name))
+        self._transcript_subtitle.configure(
+            text=f"{self.settings['device']}  ·  {self.settings['model'].split('/')[-1]}")
+        self._transcript_box.delete("1.0", "end")
+        self._summary_card.pack_forget()
+        self._progress_bar.set(0)
+        self._progress_label.configure(text=t("Loading model..."))
+        self._cancel_button.configure(state="normal", text=t("Stop"))
+        self._show_view("transcript")
 
-        model = self.ustawienia["model"]
-        device = self.ustawienia["device"]
-        jezyk = self.ustawienia["jezyk"]
+        model = self.settings["model"]
+        device = self.settings["device"]
+        language = self.settings["language"]
 
-        def zadanie():
+        def job():
             start = time.monotonic()
             try:
-                segmenty, uzyty_device = transcribe.transkrybuj_sesje(
-                    pliki, model, device, jezyk,
-                    postep=lambda frakcja, tekst: self._kolejka.put(
-                        ("postep", frakcja, tekst)),
-                    anuluj=self.anuluj_transkrypcje,
-                    status=lambda tekst: self._kolejka.put(("status_transkrypcji", tekst)),
+                segments, used_device = transcribe.transcribe_session(
+                    files, model, device, language,
+                    progress=lambda fraction, text: self._queue.put(
+                        ("progress", fraction, text)),
+                    cancel=self.cancel_transcription,
+                    status=lambda text: self._queue.put(("transcription_status", text)),
                 )
-            except Exception as blad:
-                log.exception("Transkrypcja nie powiodla sie")
-                self._kolejka.put(("transkrypcja_blad", str(blad)))
+            except Exception as error:
+                log.exception("Transcription failed")
+                self._queue.put(("transcription_error", str(error)))
                 return
 
-            pelne = dict(meta)
-            pelne["device"] = uzyty_device
-            pelne["czas_transkrypcji_s"] = round(time.monotonic() - start, 1)
+            full = dict(meta)
+            full["device"] = used_device
+            full["transcription_time_s"] = round(time.monotonic() - start, 1)
             try:
-                zapisz_wyniki(katalog, segmenty, pelne)
-            except Exception as blad:
-                self._kolejka.put(("transkrypcja_blad", t("Zapis nie powiódł się: {blad}", blad=blad)))
+                save_results(folder, segments, full)
+            except Exception as error:
+                self._queue.put(("transcription_error", t("Saving failed: {error}", error=error)))
                 return
-            # Transkrypt pokazujemy od razu; podsumowanie dochodzi osobnym
-            # komunikatem, bo model jezykowy potrzebuje jeszcze pol minuty.
-            # Flaga mowi widokowi, czy zostawic czynny przycisk "Przerwij".
-            self._kolejka.put(
-                ("transkrypcja_koniec", segmenty, pelne, self._bedzie_podsumowanie(segmenty)))
-            self._podsumuj(katalog, segmenty, pelne)
+            # The transcript is shown right away; the summary arrives in a
+            # separate message, because the language model needs another half
+            # minute. The flag tells the view whether to keep "Stop" active.
+            self._queue.put(
+                ("transcription_done", segments, full, self._summary_expected(segments)))
+            self._summarize(folder, segments, full)
 
-        threading.Thread(target=zadanie, daemon=True).start()
+        threading.Thread(target=job, daemon=True).start()
 
-    # --- podsumowanie -----------------------------------------------------
+    # --- summary ----------------------------------------------------------
 
-    def _bedzie_podsumowanie(self, segmenty: list[Segment]) -> bool:
+    def _summary_expected(self, segments: list[Segment]) -> bool:
         return bool(
-            segmenty
-            and self.ustawienia["podsumowanie"]
-            and transcribe.model_pobrany(self.ustawienia["model_llm"])
+            segments
+            and self.settings["summary_enabled"]
+            and transcribe.model_downloaded(self.settings["summary_model"])
         )
 
-    def _podsumuj(self, katalog: Path, segmenty: list[Segment], meta: dict,
-                  wymus: bool = False) -> None:
-        """Uruchamia lokalny model jezykowy i porzadkuje sesje. Wolac z watku!
+    def _summarize(self, folder: Path, segments: list[Segment], meta: dict,
+                   force: bool = False) -> None:
+        """Runs the local language model and tidies the session. Call from a thread!
 
-        Zaden blad tego kroku nie moze przekreslic gotowego transkryptu -
-        w najgorszym razie sesja zostaje bez podsumowania i ze stara nazwa.
+        No error in this step may spoil a finished transcript: at worst the
+        session stays without a summary and with its old name.
         """
-        if not segmenty or not (wymus or self.ustawienia["podsumowanie"]):
+        if not segments or not (force or self.settings["summary_enabled"]):
             return
-        self.podsumowuje = True
+        self.summarizing = True
         try:
-            self._podsumuj_teraz(katalog, segmenty, meta)
+            self._summarize_now(folder, segments, meta)
         finally:
-            self.podsumowuje = False
+            self.summarizing = False
 
-    def _podsumuj_teraz(self, katalog: Path, segmenty: list[Segment], meta: dict) -> None:
-        model = self.ustawienia["model_llm"]
-        if not transcribe.model_pobrany(model):
-            self._kolejka.put(
-                ("podsumowanie_blad", t("Model podsumowania nie jest pobrany — Ustawienia.")))
+    def _summarize_now(self, folder: Path, segments: list[Segment], meta: dict) -> None:
+        model = self.settings["summary_model"]
+        if not transcribe.model_downloaded(model):
+            self._queue.put(
+                ("summary_error", t("The summary model is not downloaded — see Settings.")))
             return
 
         try:
-            wynik = podsum.podsumuj(
-                segmenty, model, self.ustawienia["device"],
-                status=lambda tekst: self._kolejka.put(("status_transkrypcji", tekst)),
-                anuluj=self.anuluj_transkrypcje,
+            result = summary_mod.summarize(
+                segments, model, self.settings["device"],
+                status=lambda text: self._queue.put(("transcription_status", text)),
+                cancel=self.cancel_transcription,
             )
-        except Exception as blad:
-            log.exception("Podsumowanie nie powiodlo sie")
-            self._kolejka.put(("podsumowanie_blad", str(blad)))
+        except Exception as error:
+            log.exception("Summary failed")
+            self._queue.put(("summary_error", str(error)))
             return
 
-        if self.anuluj_transkrypcje.is_set():
-            self._kolejka.put(("podsumowanie_blad", t("przerwane")))
+        if self.cancel_transcription.is_set():
+            self._queue.put(("summary_error", t("stopped")))
             return
-        if not wynik:
-            self._kolejka.put(("podsumowanie_blad", t("Model nie zwrócił podsumowania.")))
+        if not result:
+            self._queue.put(("summary_error", t("The model returned no summary.")))
             return
 
         try:
-            (katalog / "podsumowanie.md").write_text(
-                podsum.jako_markdown(wynik, meta), encoding="utf-8")
-            meta.update(wynik)
-            # Drugi przebieg zapisu - transkrypt.md dostaje blok podsumowania,
-            # meta.json nowe pola. zapisz_wyniki jest idempotentne.
-            zapisz_wyniki(katalog, segmenty, meta)
-        except OSError as blad:
-            log.exception("Nie udalo sie zapisac podsumowania")
-            self._kolejka.put(("podsumowanie_blad", t("Zapis podsumowania: {blad}", blad=blad)))
+            (folder / session.SUMMARY_MD).write_text(
+                summary_mod.as_markdown(result, meta), encoding="utf-8")
+            meta.update(result)
+            # Second save pass: transcript.md gets the summary block, meta.json
+            # the new fields. save_results is idempotent.
+            save_results(folder, segments, meta)
+        except OSError as error:
+            log.exception("Could not save the summary")
+            self._queue.put(("summary_error", t("Saving the summary: {error}", error=error)))
             return
 
-        if self.ustawienia["zmiana_nazwy"]:
-            katalog = self._zmien_nazwe_sesji(katalog, wynik)
+        if self.settings["rename_folder"]:
+            folder = self._rename_session(folder, result)
 
-        self._kolejka.put(("podsumowanie", katalog, wynik))
+        self._queue.put(("summary", folder, result))
 
     @staticmethod
-    def _zmien_nazwe_sesji(katalog: Path, wynik: dict) -> Path:
-        """Podmienia czlon nazwy na temat i imiona. Zwraca aktualna sciezke."""
-        nowa_nazwa = podsum.nazwa_katalogu(katalog.name, wynik)
-        if not nowa_nazwa:
-            return katalog
+    def _rename_session(folder: Path, result: dict) -> Path:
+        """Replaces the name part with the topic and names. Returns the current path."""
+        new_name = summary_mod.folder_name(folder.name, result)
+        if not new_name:
+            return folder
 
-        cel = katalog.parent / nowa_nazwa
-        licznik = 2
-        while cel.exists():
-            cel = katalog.parent / f"{nowa_nazwa}-{licznik}"
-            licznik += 1
+        target = folder.parent / new_name
+        counter = 2
+        while target.exists():
+            target = folder.parent / f"{new_name}-{counter}"
+            counter += 1
 
         try:
-            katalog.rename(cel)
-        except OSError as blad:
-            # Najczestszy powod: folder jest otwarty w Eksploratorze. Nie jest to
-            # blad transkrypcji - pliki sa na miejscu, tylko nazwa zostaje stara.
-            log.warning("Nie udalo sie zmienic nazwy %s -> %s: %s",
-                        katalog.name, nowa_nazwa, blad)
-            return katalog
+            folder.rename(target)
+        except OSError as error:
+            # Most common reason: the folder is open in Explorer. That is not a
+            # transcription error: the files are in place, only the name stays.
+            log.warning("Could not rename %s -> %s: %s",
+                        folder.name, new_name, error)
+            return folder
 
-        log.info("Sesja przemianowana: %s -> %s", katalog.name, cel.name)
-        return cel
+        log.info("Session renamed: %s -> %s", folder.name, target.name)
+        return target
 
-    def _podsumuj_ponownie(self, sesja: Path) -> None:
-        """Podsumowanie samo w sobie - bez ponownego mielenia audio Whisperem."""
-        if self.transkrybuje or self.podsumowuje:
+    def _summarize_again(self, session_dir: Path) -> None:
+        """Summary on its own, without running the audio through Whisper again."""
+        if self.transcribing or self.summarizing:
             return
-        try:
-            meta = json.loads((sesja / "meta.json").read_text(encoding="utf-8"))
-            segmenty = [Segment(**s) for s in meta.get("segmenty", [])]
-        except (OSError, ValueError, TypeError):
-            log.exception("Nie udalo sie wczytac segmentow z %s", sesja)
-            segmenty, meta = [], {}
-        if not segmenty:
-            self._etykieta_stanu.configure(
-                text=t("Brak segmentów w meta.json — użyj „Transkrybuj ponownie”."),
-                text_color=CZERWIEN)
-            self._pokaz_widok("nagrania")
+        meta = session.read_meta(session_dir)
+        segments = session.segments(meta)
+        if not segments:
+            self._status_label.configure(
+                text=t("No segments in meta.json — use “Transcribe again”."),
+                text_color=RED)
+            self._show_view("recordings")
             return
 
-        self.podsumowuje = True
-        self.katalog_sesji = sesja
-        self.anuluj_transkrypcje.clear()
-        self._tytul_transkrypcji.configure(text=meta.get("nazwa", sesja.name))
-        self._podtytul_transkrypcji.configure(
-            text=self.ustawienia["model_llm"].split("/")[-1])
-        self._pasek_postepu.set(1.0)
-        self._etykieta_postepu.configure(text=t("Podsumowuję..."))
-        self._karta_podsumowania.pack_forget()
-        self._przycisk_anuluj.configure(state="normal", text=t("Przerwij"))
-        self._pokaz_transkrypt(segmenty)
-        self._pokaz_widok("transkrypcja")
+        self.summarizing = True
+        self.session_dir = session_dir
+        self.cancel_transcription.clear()
+        self._transcript_title.configure(text=meta.get("name", session_dir.name))
+        self._transcript_subtitle.configure(
+            text=self.settings["summary_model"].split("/")[-1])
+        self._progress_bar.set(1.0)
+        self._progress_label.configure(text=t("Summarizing..."))
+        self._summary_card.pack_forget()
+        self._cancel_button.configure(state="normal", text=t("Stop"))
+        self._show_transcript(segments)
+        self._show_view("transcript")
 
         threading.Thread(
-            target=lambda: self._podsumuj(sesja, segmenty, meta, wymus=True),
+            target=lambda: self._summarize(session_dir, segments, meta, force=True),
             daemon=True,
         ).start()
 
-    def _przerwij_transkrypcje(self) -> None:
-        if self.transkrybuje or self.podsumowuje:
-            self.anuluj_transkrypcje.set()
-            self._etykieta_postepu.configure(text=t("Przerywam..."))
-            self._przycisk_anuluj.configure(state="disabled")
+    def _cancel_transcription(self) -> None:
+        if self.transcribing or self.summarizing:
+            self.cancel_transcription.set()
+            self._progress_label.configure(text=t("Stopping..."))
+            self._cancel_button.configure(state="disabled")
 
-    # --- petla UI ---------------------------------------------------------
+    # --- UI loop ----------------------------------------------------------
 
     def _tick(self) -> None:
-        if self.nagrywa and self.nagrywarka is not None:
-            self._etykieta_czasu.configure(
-                text=czas_hms(time.time() - self.start_nagrania))
-            poziomy = self.nagrywarka.poziomy
-            for klucz, pasek in self._poziomy_ui.items():
-                pasek.set(poziomy.get(klucz, 0.0))
+        if self.recording and self.recorder is not None:
+            self._time_label.configure(
+                text=format_hms(time.time() - self.recording_start))
+            levels = self.recorder.levels
+            for key, bar in self._level_bars.items():
+                bar.set(levels.get(key, 0.0))
 
         while True:
             try:
-                komunikat = self._kolejka.get_nowait()
+                message = self._queue.get_nowait()
             except queue.Empty:
                 break
-            self._obsluz_komunikat(komunikat)
+            self._handle_message(message)
 
         self.after(100, self._tick)
 
-    def _obsluz_komunikat(self, komunikat: tuple) -> None:
-        rodzaj = komunikat[0]
+    def _handle_message(self, message: tuple) -> None:
+        kind = message[0]
 
-        if rodzaj == "urzadzenia":
-            self._zastosuj_urzadzenia(komunikat[1])
+        if kind == "devices":
+            self._apply_devices(message[1])
 
-        elif rodzaj == "status_transkrypcji":
-            self._etykieta_postepu.configure(text=komunikat[1])
+        elif kind == "transcription_status":
+            self._progress_label.configure(text=message[1])
 
-        elif rodzaj == "urzadzenia_ov":
-            urzadzenia = komunikat[1]
-            self._menu_device.configure(values=urzadzenia)
-            wybrane = self.ustawienia["device"]
-            self._menu_device.set(wybrane if wybrane in urzadzenia else urzadzenia[0])
-            self._etykieta_device.configure(
-                text=t("Wykryte przez OpenVINO: {lista}", lista=", ".join(urzadzenia)))
+        elif kind == "ov_devices":
+            devices = message[1]
+            self._device_menu.configure(values=devices)
+            chosen = self.settings["device"]
+            self._device_menu.set(chosen if chosen in devices else devices[0])
+            self._device_label.configure(
+                text=t("Detected by OpenVINO: {list}", list=", ".join(devices)))
 
-        elif rodzaj == "postep":
-            _, frakcja, tekst = komunikat
-            self._pasek_postepu.set(max(0.0, min(1.0, frakcja)))
-            self._etykieta_postepu.configure(text=f"{int(frakcja * 100)}%")
-            if tekst:
-                self._pole_transkrypcji.insert("end", tekst.strip() + "\n\n")
-                self._pole_transkrypcji.see("end")
+        elif kind == "progress":
+            _, fraction, text = message
+            self._progress_bar.set(max(0.0, min(1.0, fraction)))
+            self._progress_label.configure(text=f"{int(fraction * 100)}%")
+            if text:
+                self._transcript_box.insert("end", text.strip() + "\n\n")
+                self._transcript_box.see("end")
 
-        elif rodzaj == "transkrypcja_koniec":
-            _, segmenty, meta, bedzie_podsumowanie = komunikat
-            self.transkrybuje = False
-            self._pasek_postepu.set(1.0)
-            czas = meta.get("czas_transkrypcji_s", 0)
-            self._etykieta_postepu.configure(
-                text=t("Gotowe w {czas} s  ·  {device}  ·  {n} wypowiedzi",
-                       czas=f"{czas:.0f}", device=meta.get('device', '?'),
-                       n=len(segmenty)))
-            self._pokaz_transkrypt(segmenty)
-            # Przy podsumowaniu przycisk zostaje czynny - inaczej nie dalo by sie
-            # przerwac modelu jezykowego, ktory dopiero rusza.
-            if not bedzie_podsumowanie:
-                self._przycisk_anuluj.configure(state="disabled", text=t("Zakończono"))
+        elif kind == "transcription_done":
+            _, segments, meta, summary_expected = message
+            self.transcribing = False
+            self._progress_bar.set(1.0)
+            elapsed = meta.get("transcription_time_s", 0)
+            self._progress_label.configure(
+                text=t("Done in {time} s  ·  {device}  ·  {n} utterances",
+                       time=f"{elapsed:.0f}", device=meta.get('device', '?'),
+                       n=len(segments)))
+            self._show_transcript(segments)
+            # With a summary coming, the button stays active; otherwise there
+            # would be no way to stop the language model that is just starting.
+            if not summary_expected:
+                self._cancel_button.configure(state="disabled", text=t("Finished"))
 
-        elif rodzaj == "transkrypcja_blad":
-            self.transkrybuje = False
-            self._etykieta_postepu.configure(text=t("Błąd: {blad}", blad=komunikat[1]))
-            self._przycisk_anuluj.configure(state="disabled", text=t("Błąd"))
+        elif kind == "transcription_error":
+            self.transcribing = False
+            self._progress_label.configure(text=t("Error: {error}", error=message[1]))
+            self._cancel_button.configure(state="disabled", text=t("Error"))
 
-        elif rodzaj == "podsumowanie":
-            _, katalog, wynik = komunikat
-            # Katalog mogl zmienic nazwe - inaczej "Otworz folder" wskazywalby
-            # na sciezke, ktora juz nie istnieje.
-            self.katalog_sesji = katalog
-            self._pokaz_podsumowanie(wynik)
-            self._przycisk_anuluj.configure(state="disabled", text=t("Zakończono"))
+        elif kind == "summary":
+            _, folder, result = message
+            # The folder may have been renamed; otherwise "Open folder" would
+            # point to a path that no longer exists.
+            self.session_dir = folder
+            self._show_summary(result)
+            self._cancel_button.configure(state="disabled", text=t("Finished"))
 
-        elif rodzaj == "podsumowanie_blad":
-            log.warning("Podsumowanie pominiete: %s", komunikat[1])
-            self._etykieta_postepu.configure(
-                text=t("{tekst}  ·  bez podsumowania ({powod})",
-                       tekst=self._etykieta_postepu.cget('text'), powod=komunikat[1]))
-            self._przycisk_anuluj.configure(state="disabled", text=t("Zakończono"))
+        elif kind == "summary_error":
+            log.warning("Summary skipped: %s", message[1])
+            self._progress_label.configure(
+                text=t("{text}  ·  no summary ({reason})",
+                       text=self._progress_label.cget('text'), reason=message[1]))
+            self._cancel_button.configure(state="disabled", text=t("Finished"))
 
-        elif rodzaj == "model_pobrany":
-            self._odswiez_status_modelu()
+        elif kind == "model_downloaded":
+            self._refresh_model_status()
 
-        elif rodzaj == "model_llm_pobrany":
-            self._odswiez_status_llm()
+        elif kind == "llm_downloaded":
+            self._refresh_llm_status()
 
-        elif rodzaj == "blad":
-            self._etykieta_stanu.configure(text=komunikat[1], text_color=CZERWIEN)
+        elif kind == "error":
+            self._status_label.configure(text=message[1], text_color=RED)
 
-    def _pokaz_podsumowanie(self, wynik: dict) -> None:
-        if wynik.get("temat"):
-            self._tytul_transkrypcji.configure(text=wynik["temat"])
+    def _show_summary(self, result: dict) -> None:
+        if result.get("topic"):
+            self._transcript_title.configure(text=result["topic"])
 
-        naglowek = t("Uczestnicy: {lista}", lista=(", ".join(wynik["uczestnicy"])
-                                                if wynik.get("uczestnicy")
-                                                else t("nie rozpoznano imion")))
-        self._etykieta_uczestnikow.configure(text=naglowek)
+        header = t("Participants: {list}", list=(", ".join(result["participants"])
+                                                 if result.get("participants")
+                                                 else t("no names recognized")))
+        self._participants_label.configure(text=header)
 
-        linie = [wynik.get("tldr", "")]
-        if wynik.get("punkty"):
-            linie += [""] + [f"•  {punkt}" for punkt in wynik["punkty"]]
-        if wynik.get("ustalenia"):
-            linie += ["", t("Ustalenia:")] + [f"→  {u}" for u in wynik["ustalenia"]]
-        self._etykieta_podsumowania.configure(text="\n".join(linie).strip())
+        lines = [result.get("tldr", "")]
+        if result.get("key_points"):
+            lines += [""] + [f"•  {point}" for point in result["key_points"]]
+        if result.get("decisions"):
+            lines += ["", t("Decisions:")] + [f"→  {d}" for d in result["decisions"]]
+        self._summary_label.configure(text="\n".join(lines).strip())
 
-        self._karta_podsumowania.pack(fill="x", pady=(0, 10), before=self._pole_transkrypcji)
+        self._summary_card.pack(fill="x", pady=(0, 10), before=self._transcript_box)
 
-    def _pokaz_transkrypt(self, segmenty: list[Segment]) -> None:
-        self._pole_transkrypcji.delete("1.0", "end")
-        if not segmenty:
-            self._pole_transkrypcji.insert("end", t("Nie rozpoznano żadnej mowy.") + "\n")
+    def _show_transcript(self, segments: list[Segment]) -> None:
+        self._transcript_box.delete("1.0", "end")
+        if not segments:
+            self._transcript_box.insert("end", t("No speech was recognized.") + "\n")
             return
-        for seg in segmenty:
-            self._pole_transkrypcji.insert(
-                "end", f"[{czas_hms(seg.start)}] {seg.mowca}: {seg.tekst}\n\n")
-        self._pole_transkrypcji.see("1.0")
+        for seg in segments:
+            self._transcript_box.insert(
+                "end", f"[{format_hms(seg.start)}] {speaker_label(seg.speaker)}: {seg.text}\n\n")
+        self._transcript_box.see("1.0")
 
-    # --- pomocnicze -------------------------------------------------------
+    # --- helpers ----------------------------------------------------------
 
-    def _otworz(self, sciezka: Path) -> None:
+    def _open(self, path: Path) -> None:
         try:
-            os.startfile(str(sciezka))
-        except Exception as blad:
-            log.warning("Nie udalo sie otworzyc %s: %s", sciezka, blad)
+            os.startfile(str(path))
+        except Exception as error:
+            log.warning("Could not open %s: %s", path, error)
 
-    def _otworz_folder_sesji(self) -> None:
-        if self.katalog_sesji is not None:
-            self._otworz(self.katalog_sesji)
+    def _open_session_folder(self) -> None:
+        if self.session_dir is not None:
+            self._open(self.session_dir)
 
-    def _pokaz_okno(self) -> None:
+    def _show_window(self) -> None:
         self.deiconify()
         self.lift()
         self.focus_force()
 
-    def _na_zamkniecie(self) -> None:
-        if self.ustawienia["tray"]:
+    def _on_close(self) -> None:
+        if self.settings["tray"]:
             self.withdraw()
         else:
-            self.zakoncz()
+            self.quit_app()
 
-    def zakoncz(self) -> None:
-        if self.nagrywa:
-            # Nie gubimy trwajacego nagrania - domykamy pliki poprawnie.
-            self.zatrzymaj_nagrywanie()
-        self.anuluj_transkrypcje.set()
-        self._skrot.stop()
-        self._zasobnik.stop()
-        self.ustawienia.zapisz()
+    def quit_app(self) -> None:
+        if self.recording:
+            # Do not lose a recording in progress: close the files properly.
+            self.stop_recording()
+        self.cancel_transcription.set()
+        self._hotkey.stop()
+        self._tray.stop()
+        self.settings.save()
         self.destroy()
 
 
-def polecenie_startowe() -> str:
-    """Polecenie, ktorym pasek zadan ma wskrzesic aplikacje z przypietego kafelka.
+def start_command() -> str:
+    """Command the taskbar uses to bring the app back from a pinned tile.
 
-    Celowo `uruchom.pyw`, a nie `-m ucho`: kafelek startuje bez katalogu
-    roboczego projektu, a skrypt sam dokłada go do `sys.path`.
+    Deliberately `ucho.pyw`, not `-m ucho`: the tile starts without the project
+    working directory, and the script adds it to `sys.path` itself.
     """
     interpreter = Path(sys.executable)
-    bez_konsoli = interpreter.with_name("pythonw.exe")
-    if bez_konsoli.exists():
-        interpreter = bez_konsoli
-    starter = config.KATALOG_PROJEKTU / "uruchom.pyw"
+    windowless = interpreter.with_name("pythonw.exe")
+    if windowless.exists():
+        interpreter = windowless
+    starter = config.PROJECT_DIR / "ucho.pyw"
     return f'"{interpreter}" "{starter}"'
 
 
-def _oznacz_skroty() -> None:
-    for skrot in winshell.sciezki_skrotow():
-        if skrot.exists():
-            log.info("ID w skrocie %s: %s", skrot.name,
-                     winshell.ustaw_id_skrotu(skrot, config.ID_APLIKACJI))
+def _stamp_shortcuts() -> None:
+    for shortcut in winshell.shortcut_paths():
+        if shortcut.exists():
+            log.info("Shortcut %s id: %s", shortcut.name,
+                     winshell.set_shortcut_app_id(shortcut, config.APP_ID))
 
 
-def _ustaw_id_aplikacji() -> None:
-    """Wlasny AppUserModelID - inaczej pasek zadan pokazuje ikone pythonw.exe.
+def _set_app_id() -> None:
+    """Our own AppUserModelID; otherwise the taskbar shows the pythonw.exe icon.
 
-    Musi byc wywolane zanim powstanie pierwsze okno.
+    Must be called before the first window is created.
     """
     if sys.platform != "win32":
         return
     try:
         import ctypes
 
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            config.ID_APLIKACJI
-        )
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(config.APP_ID)
     except Exception:
-        log.debug("Nie udalo sie ustawic AppUserModelID", exc_info=True)
+        log.debug("Could not set AppUserModelID", exc_info=True)
 
 
-def uruchom() -> None:
+def run() -> None:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        filename=str(config.PLIK_LOGU),
+        filename=str(config.LOG_FILE),
         filemode="a",
         encoding="utf-8",
     )
-    uzyty = i18n.ustaw_jezyk(config.Ustawienia()["jezyk_interfejsu"])
-    log.info("Start %s %s (interfejs: %s)", config.APLIKACJA, config.WERSJA, uzyty)
-    _ustaw_id_aplikacji()
-    Aplikacja().mainloop()
+    used = i18n.set_language(config.Settings()["ui_language"])
+    log.info("Start %s %s (UI: %s)", config.APP_NAME, config.VERSION, used)
+    _set_app_id()
+    App().mainloop()

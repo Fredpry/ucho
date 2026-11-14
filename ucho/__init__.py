@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Ucho - lokalne nagrywanie i transkrypcja spotkan oraz dyktowanie, w calosci offline."""
+"""Ucho - local meeting recording and transcription plus dictation, fully offline."""
 
-from .config import APLIKACJA, WERSJA
+from .config import APP_NAME, VERSION
 
-__all__ = ["APLIKACJA", "WERSJA"]
+__all__ = ["APP_NAME", "VERSION"]

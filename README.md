@@ -21,7 +21,7 @@ Ucho (pronounced *oo-ho*, Polish for "ear") records your Teams, Zoom or Meet cal
 ## What it does
 
 - **Meetings.** Records two separate tracks: your microphone ("Me") and system audio ("Meeting"). You get a transcript split by speaker without any diarization model, because the sources are already separate.
-- **Dictation.** *Ucho Dyktuj* (Dictate): press Ctrl+Shift+Space, speak, press again, and the text is pasted where your cursor is (terminal, browser, Teams).
+- **Dictation.** *Ucho Dictate*: press Ctrl+Shift+Space, speak, press again, and the text is pasted where your cursor is (terminal, browser, Teams).
 - **Archive for AI agents.** A small read-only MCP server lets Claude Code, Claude Desktop, Cursor, Codex or any MCP client list, search and read your transcripts. Ucho does not ship its own chatbot; your agent does the summarizing.
 - **Optional local summaries.** Off by default. If you turn them on, a local Qwen model writes a short summary and checks it mechanically against the transcript, so it cannot invent names or dates that were never said.
 
@@ -33,7 +33,7 @@ Ucho (pronounced *oo-ho*, Polish for "ear") records your Teams, Zoom or Meet cal
 | Ordinary laptops | Tuned for Intel Core Ultra with Arc graphics (OpenVINO on the integrated GPU), falls back to the CPU anywhere else. |
 | Polish and English | Language detection runs on ~12 s chunks and is restricted to the languages you use, so you don't get random Korean or Icelandic in a Polish meeting. |
 | Whisper hallucinations | Silence is cut before it reaches the model, and known subtitle-style phantoms ("Subtitles by…", "Thanks for watching") are filtered out. |
-| Your files | Plain `transkrypt.md`, `.srt`, `.txt` and `meta.json` in a folder per meeting. |
+| Your files | Plain `transcript.md`, `.srt`, `.txt` and `meta.json` in a folder per meeting. |
 
 ## Performance (Core Ultra 7 258V, Arc 140V)
 
@@ -55,16 +55,18 @@ A one-hour meeting transcribes in about 4 minutes on the Arc GPU.
 ## Install
 
 1. Download `Ucho-Windows.zip` from [Releases](../../releases) and unpack it, for example to `C:\Users\<you>\Ucho\app`. **Do not unpack into OneDrive** (Desktop and Documents are often synced): models and logs would be uploaded.
-2. Right-click `instaluj.ps1` → *Run with PowerShell*, or:
+2. Right-click `install.ps1` → *Run with PowerShell*, or:
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\instaluj.ps1
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
    ```
    No admin rights needed. It installs Python 3.12 (via winget if missing), a virtual environment with pinned dependencies, downloads the Whisper model (~1.6 GB, pinned revision) and creates shortcuts.
-3. Start **Ucho** or **Ucho Dyktuj** from the Start menu.
+3. Start **Ucho** or **Ucho Dictate** from the Start menu.
 
-Optional: `-ZPodsumowaniem` also downloads the summary model (~5 GB) and turns summaries on.
+Optional: `-WithSummary` also downloads the summary model (~5 GB) and turns summaries on.
 
-Recordings are saved in `C:\Users\<you>\Ucho\nagrania`, outside OneDrive on purpose. You can change it in Settings.
+Recordings are saved in `C:\Users\<you>\Ucho\recordings`, outside OneDrive on purpose. You can change it in Settings.
+
+Updating from v0.1: unpack over the old folder and run `install.ps1` again. Your `ustawienia.json` is migrated to `settings.json` (your recordings folder stays where it was), `modele\` is renamed to `models\`, and old recordings with Polish file names keep working in the app and the MCP server.
 
 ## Use
 
@@ -82,7 +84,7 @@ The MCP server is read-only, uses only the Python standard library, talks over s
 Claude Code:
 
 ```powershell
-claude mcp add ucho -- "C:\Users\<you>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<you>\Ucho\app\mcp_serwer.py"
+claude mcp add ucho -- "C:\Users\<you>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<you>\Ucho\app\mcp_server.py"
 ```
 
 Claude Desktop, Cursor and others: add a stdio server with the same command and argument. Then ask, for example: *"What did we agree with the steel supplier last week?"*

@@ -51,7 +51,7 @@ On the GPU we keep the device and take a lighter model, because the next row of 
 
 ## How the measurement works
 
-`benchmark(model, device, seconds=10)` loads the model through the same `transcribe.Silnik` as a real transcription (so the GPU to CPU fallback and the restricted PL/EN language detection apply), makes one warm-up call, and times one call on 10 seconds of a synthetic, deterministic speech-like signal built from vowel formants. No recording of yours is used.
+`benchmark(model, device, seconds=10)` loads the model through the same `transcribe.Engine` as a real transcription (so the GPU to CPU fallback and the restricted PL/EN language detection apply), makes one warm-up call, and times one call on 10 seconds of a synthetic, deterministic speech-like signal built from vowel formants. No recording of yours is used.
 
 Whisper emits only one or two tokens on such a signal and stops, which would leave out the decoder, the most expensive part on real speech. The measurement therefore suppresses the end-of-text token and lets the decoder run a fixed 5 tokens per second of audio. That number comes from the Whisper tokenizer: a Polish business paragraph needs 2.56 tokens per word, an English one 1.23, so dense Polish speech at 130 words per minute is about 5.5 tokens per second and English about 3. Real meetings have pauses, which Ucho cuts before the model, so 5 is on the safe side.
 
@@ -79,7 +79,7 @@ When you report a bug or a slow transcription, attach the output of:
 
 The output contains only hardware names, driver versions and the recommendation: no serial numbers, user names or paths. Other options:
 
-- `--save` writes `model`, `device`, `dictation_model` and a short `hardware_profile` summary to `ustawienia.json`.
+- `--save` writes `model`, `device`, `dictation_model` and a short `hardware_profile` summary to `settings.json`.
 - `--save --keep-choice` (used when you run the installer again) overwrites only values that still hold the previous automatic recommendation. A model or device you changed by hand stays; a device that was CPU only because of an old GPU driver moves to the GPU after the driver update. Settings from v0.1, which have no recorded recommendation, are left as they are.
 - `--seconds N` changes the length of the measured signal.
 

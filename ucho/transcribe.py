@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Lokalna transkrypcja Whisper przez OpenVINO GenAI (iGPU Arc / CPU / NPU).
+"""Local Whisper transcription through OpenVINO GenAI (Arc iGPU / CPU / NPU).
 
-Uzywamy gotowych, prekonwertowanych modeli z repozytorium OpenVINO na
-Hugging Face, dzieki czemu nie potrzeba PyTorcha ani `optimum-intel`.
+We use ready-made, pre-converted models from the OpenVINO repository on
+Hugging Face, so neither PyTorch nor `optimum-intel` is needed.
 
-Dlugie nagrania tniemy sami na kilkuminutowe segmenty (w miejscu ciszy),
-mimo ze pipeline radzi sobie z long-form samodzielnie. Powod: OpenVINO nie
-raportuje postepu, a bez tego uzytkownik przez kilkanascie minut patrzy
-na zamrozony pasek. Przy okazji blad w jednym segmencie nie przekresla calosci.
+We cut long recordings ourselves into chunks of a few minutes (at silences),
+even though the pipeline handles long-form audio on its own. Reason: OpenVINO
+does not report progress, and without it the user stares at a frozen bar for
+many minutes. As a bonus, an error in one chunk does not ruin the whole file.
 """
 
 from __future__ import annotations
@@ -25,110 +25,112 @@ import soundfile as sf
 
 from . import config
 from .i18n import t
-from .merge import MOWCA_JA, MOWCA_SPOTKANIE, Segment, scal
+from .merge import SPEAKER_ME, SPEAKER_MEETING, Segment, merge_tracks
 
 log = logging.getLogger(__name__)
 
-CZESTOTLIWOSC = 16_000
-RAMKA_ANALIZY_S = 0.1
+SAMPLE_RATE = 16_000
+ANALYSIS_FRAME_S = 0.1
 
-# Jezyk wymuszony: dlugie segmenty, bo pelny kontekst poprawia jakosc.
-DLUGOSC_SEGMENTU_S = 300.0
-OKNO_SZUKANIA_CISZY_S = 15.0
+# Forced language: long chunks, because full context improves quality.
+CHUNK_S = 300.0
+SILENCE_SEARCH_WINDOW_S = 15.0
 
-# Autodetekcja: krotkie okna, bo Whisper wykrywa jezyk RAZ na wywolanie generate.
-# Przy dlugim oknie mieszane spotkanie PL/EN konczy sie tym, ze drugi jezyk jest
-# tlumaczony na pierwszy albo gubiony calkowicie. Zmierzone na naprzemiennym
-# nagraniu PL/EN: caly plik naraz - 0 z 3 fragmentow EN, okna 30 s - 2 z 3 ale
-# przetlumaczone na polski, okna 12 s - 3 z 3 poprawnie po angielsku.
-DLUGOSC_SEGMENTU_AUTO_S = 12.0
+# Auto-detection: short windows, because Whisper detects the language ONCE per
+# generate call. With a long window a mixed PL/EN meeting ends with the second
+# language translated into the first or dropped entirely. Measured on an
+# alternating PL/EN recording: whole file at once - 0 of 3 EN parts, 30 s
+# windows - 2 of 3 but translated into Polish, 12 s windows - 3 of 3 correctly
+# in English.
+CHUNK_AUTO_S = 12.0
 
-# Cena krotkich okien: na "mhm", kaszlnieciu czy szumie detektor nie ma czego
-# sluchac i wybiera losowo z calej setki jezykow Whispera - w polskim spotkaniu
-# lada chwila wyskakuje islandzki, koreanski albo portugalski. Zawezamy wiec
-# pule wyboru do jezykow z config.JEZYKI, przekazujac okrojone `lang_to_id`.
+# The price of short windows: on "mhm", a cough or noise the detector has
+# nothing to listen to and picks at random from all ~100 Whisper languages -
+# in a Polish meeting Icelandic, Korean or Portuguese pops up any moment. So we
+# narrow the choice to the languages in config.LANGUAGES by passing a reduced
+# `lang_to_id`.
 #
-# `suppress_tokens` tu NIE pomaga (sprawdzone): detekcja jezyka to osobny
-# przebieg po `lang_to_id`, wykonywany zanim ruszy generacja, wiec tlumienie
-# tokenow jej nie dotyka. Zmierzone na 8 feralnych fragmentach ostatniego
-# spotkania: suppress_tokens - 1 z 8 poprawionych, okrojone lang_to_id - 8 z 8.
-JEZYKI_AUTO = tuple(token for token in config.JEZYKI.values() if token)
-RAMKA_VAD_S = 0.05
-PROG_CISZY_WZGLEDNY = 0.06
-MIN_CISZA_S = 0.35
+# `suppress_tokens` does NOT help here (checked): language detection is a
+# separate pass over `lang_to_id` that runs before generation starts, so token
+# suppression does not touch it. Measured on 8 bad chunks of the last meeting:
+# suppress_tokens - 1 of 8 fixed, reduced lang_to_id - 8 of 8.
+AUTO_LANGUAGES = tuple(token for token in config.LANGUAGES.values() if token)
+VAD_FRAME_S = 0.05
+RELATIVE_SILENCE_THRESHOLD = 0.06
+MIN_SILENCE_S = 0.35
 
-# Ponizej tego szczytowego RMS fragment uznajemy za cisze i w ogole nie wysylamy
-# go do modelu. Whisper na ciszy halucynuje - potrafi wyprodukowac zdanie po
-# islandzku albo rosyjsku w polskim nagraniu. Sciezka mikrofonu, gdy tylko
-# sluchasz, jest cisza przez wieksza czesc spotkania, wiec to takze duza
-# oszczednosc czasu. Cisza mierzy sie ponizej 0.001, mowa od okolo 0.01 wzwyz.
-PROG_MOWY_RMS = 0.003
+# Below this peak RMS a chunk counts as silence and is not sent to the model at
+# all. Whisper hallucinates on silence - it can produce a sentence in Icelandic
+# or Russian in a Polish recording. The microphone track is silent for most of
+# the meeting when you only listen, so this also saves a lot of time. Silence
+# measures below 0.001, speech from about 0.01 up.
+SPEECH_RMS_THRESHOLD = 0.003
 
-PostepFn = Callable[[float, str], None]
+ProgressFn = Callable[[float, str], None]
 
 
 # --- model ---------------------------------------------------------------
 
 
-def sciezka_modelu(repo_id: str, pobierz: bool = False) -> Path:
-    """Zwraca lokalny katalog modelu. Bez `pobierz` nie dotyka sieci.
+def model_path(repo_id: str, download: bool = False) -> Path:
+    """Returns the local model folder. Without `download` it never touches the network.
 
-    Pobieramy zawsze przypieta rewizje z `config.REWIZJE`. Przy sprawdzaniu
-    lokalnym akceptujemy tez starsza, wczesniej pobrana kopie (np. sprzed
-    przypiecia), zeby nikt nie musial pobierac kilku GB od nowa.
+    We always download the pinned revision from `config.REVISIONS`. A local
+    check also accepts an older copy downloaded earlier (e.g. before pinning),
+    so nobody has to download several GB again.
     """
     from huggingface_hub import snapshot_download
 
-    rewizja = config.REWIZJE.get(repo_id)
-    if pobierz:
-        return Path(snapshot_download(repo_id, revision=rewizja))
+    revision = config.REVISIONS.get(repo_id)
+    if download:
+        return Path(snapshot_download(repo_id, revision=revision))
     try:
-        return Path(snapshot_download(repo_id, revision=rewizja, local_files_only=True))
+        return Path(snapshot_download(repo_id, revision=revision, local_files_only=True))
     except Exception:
-        if rewizja is None:
+        if revision is None:
             raise
         return Path(snapshot_download(repo_id, local_files_only=True))
 
 
-def model_pobrany(repo_id: str) -> bool:
+def model_downloaded(repo_id: str) -> bool:
     try:
-        sciezka_modelu(repo_id, pobierz=False)
+        model_path(repo_id, download=False)
         return True
-    except Exception as blad:
-        # Brak modelu to LocalEntryNotFoundError. Kazdy inny wyjatek (np. uszkodzony
-        # .pyc w bibliotece standardowej przy imporcie huggingface_hub) tez konczy
-        # sie "model nie jest pobrany", wiec bez tego wpisu przyczyna przepada.
-        if type(blad).__name__ != "LocalEntryNotFoundError":
-            log.warning("Sprawdzenie modelu %r nie powiodlo sie: %r", repo_id, blad)
+    except Exception as error:
+        # A missing model is LocalEntryNotFoundError. Any other exception (e.g. a
+        # broken .pyc in the standard library when importing huggingface_hub)
+        # also ends as "model not downloaded", so without this entry the cause is lost.
+        if type(error).__name__ != "LocalEntryNotFoundError":
+            log.warning("Checking model %r failed: %r", repo_id, error)
         return False
 
 
-def dostepne_urzadzenia() -> list[str]:
-    """Lista urzadzen OpenVINO, np. ['CPU', 'GPU', 'NPU']."""
+def available_devices() -> list[str]:
+    """OpenVINO devices, e.g. ['CPU', 'GPU', 'NPU']."""
     try:
         import openvino as ov
 
         return list(ov.Core().available_devices)
-    except Exception as blad:
-        log.warning("Nie udalo sie odpytac OpenVINO o urzadzenia: %s", blad)
+    except Exception as error:
+        log.warning("Could not query OpenVINO for devices: %s", error)
         return ["CPU"]
 
 
-def _klasa_pipeline():
+def _pipeline_class():
     import openvino_genai as ov_genai
 
-    # Nazwa klasy zmieniala sie miedzy wydaniami OpenVINO GenAI.
-    klasa = getattr(ov_genai, "WhisperPipeline", None)
-    if klasa is None:
-        klasa = getattr(ov_genai, "ASRPipeline", None)
-    if klasa is None:
+    # The class name changed between OpenVINO GenAI releases.
+    cls = getattr(ov_genai, "WhisperPipeline", None)
+    if cls is None:
+        cls = getattr(ov_genai, "ASRPipeline", None)
+    if cls is None:
         raise RuntimeError(
-            "Ta wersja openvino-genai nie udostepnia ani WhisperPipeline, ani ASRPipeline."
+            "This openvino-genai version provides neither WhisperPipeline nor ASRPipeline."
         )
-    return klasa
+    return cls
 
 
-def wersja_genai() -> str:
+def genai_version() -> str:
     try:
         import openvino_genai
 
@@ -137,432 +139,432 @@ def wersja_genai() -> str:
         return "?"
 
 
-class Silnik:
-    """Leniwie budowany pipeline z automatycznym zejsciem na CPU."""
+class Engine:
+    """Lazily built pipeline with automatic fallback to the CPU."""
 
     def __init__(self, repo_id: str, device: str = "GPU"):
         self.repo_id = repo_id
-        self.zadany_device = device
+        self.requested_device = device
         self.device = device
         self._pipe = None
         self._lang_to_id: dict[str, int] | None = None
 
-    def zaladuj(self) -> None:
+    def load(self) -> None:
         if self._pipe is not None:
             return
 
-        katalog = str(sciezka_modelu(self.repo_id, pobierz=False))
-        klasa = _klasa_pipeline()
-        cache = str(config.KATALOG_CACHE_OV)
-        config.KATALOG_CACHE_OV.mkdir(parents=True, exist_ok=True)
+        folder = str(model_path(self.repo_id, download=False))
+        cls = _pipeline_class()
+        cache = str(config.OV_CACHE_DIR)
+        config.OV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-        kandydaci = [self.zadany_device]
-        if self.zadany_device != "CPU":
-            kandydaci.append("CPU")
+        candidates = [self.requested_device]
+        if self.requested_device != "CPU":
+            candidates.append("CPU")
 
-        ostatni_blad: Exception | None = None
-        for device in kandydaci:
+        last_error: Exception | None = None
+        for device in candidates:
             for kwargs in ({"CACHE_DIR": cache}, {}):
                 try:
                     start = time.monotonic()
-                    self._pipe = klasa(katalog, device, **kwargs)
+                    self._pipe = cls(folder, device, **kwargs)
                     self.device = device
-                    self._lang_to_id = self._zawezone_jezyki()
+                    self._lang_to_id = self._narrowed_languages()
                     log.info(
-                        "Pipeline gotowy na %s w %.1fs (cache=%s)",
+                        "Pipeline ready on %s in %.1fs (cache=%s)",
                         device, time.monotonic() - start, bool(kwargs),
                     )
                     return
-                except Exception as blad:
-                    ostatni_blad = blad
-                    log.warning("Nie udalo sie zbudowac pipeline na %s: %s", device, blad)
+                except Exception as error:
+                    last_error = error
+                    log.warning("Could not build the pipeline on %s: %s", device, error)
 
         raise RuntimeError(
-            f"Nie udalo sie zaladowac modelu na zadnym urzadzeniu: {ostatni_blad}"
+            f"Could not load the model on any device: {last_error}"
         )
 
-    def _zawezone_jezyki(self) -> dict[str, int] | None:
-        """`lang_to_id` modelu ograniczone do JEZYKI_AUTO.
+    def _narrowed_languages(self) -> dict[str, int] | None:
+        """The model's `lang_to_id` limited to AUTO_LANGUAGES.
 
-        None, gdy nie da sie tego odczytac - wtedy zostaje autodetekcja po
-        wszystkich jezykach, czyli zachowanie sprzed tej zmiany.
+        None when it cannot be read - then auto-detection runs over all
+        languages, i.e. the behavior from before this change.
         """
         try:
-            pelne = dict(self._pipe.get_generation_config().lang_to_id)
-        except Exception as blad:
-            log.warning("Nie udalo sie odczytac lang_to_id: %s", blad)
+            full = dict(self._pipe.get_generation_config().lang_to_id)
+        except Exception as error:
+            log.warning("Could not read lang_to_id: %s", error)
             return None
 
-        zawezone = {token: pelne[token] for token in JEZYKI_AUTO if token in pelne}
-        if len(zawezone) < 2:
+        narrowed = {token: full[token] for token in AUTO_LANGUAGES if token in full}
+        if len(narrowed) < 2:
             log.warning(
-                "Model zna tylko %d z %d jezykow autodetekcji - nie zawezam.",
-                len(zawezone), len(JEZYKI_AUTO),
+                "The model knows only %d of %d auto-detection languages - not narrowing.",
+                len(narrowed), len(AUTO_LANGUAGES),
             )
             return None
 
-        log.info("Autodetekcja jezyka zawezona do: %s", ", ".join(zawezone))
-        return zawezone
+        log.info("Language auto-detection narrowed to: %s", ", ".join(narrowed))
+        return narrowed
 
-    def zwolnij(self) -> None:
-        """Oddaje pamiec GPU zajeta przez model.
+    def release(self) -> None:
+        """Frees the GPU memory held by the model.
 
-        Po transkrypcji ruszaja podsumowania na modelu jezykowym - nie ma sensu
-        trzymac wtedy jeszcze Whispera na tej samej zintegrowanej karcie.
+        After transcription the language-model summary may start - there is no
+        point keeping Whisper on the same integrated GPU at that time.
         """
         if self._pipe is None:
             return
         self._pipe = None
         gc.collect()
-        log.info("Pipeline Whisper zwolniony")
+        log.info("Whisper pipeline released")
 
-    def generuj(self, audio: np.ndarray, jezyk: str | None):
+    def generate(self, audio: np.ndarray, language: str | None):
         kwargs = {"task": "transcribe", "return_timestamps": True}
-        if jezyk:
-            kwargs["language"] = jezyk
+        if language:
+            kwargs["language"] = language
         elif self._lang_to_id:
             kwargs["lang_to_id"] = self._lang_to_id
 
         try:
-            return self._wywolaj(audio, kwargs)
+            return self._call(audio, kwargs)
         except TypeError:
             if "lang_to_id" not in kwargs:
                 raise
-            # Starsze wydanie GenAI nie zna tego parametru - lecimy dalej bez
-            # zawezenia, zamiast wywracac cala transkrypcje.
-            log.warning("openvino-genai nie przyjmuje lang_to_id - autodetekcja bez zawezenia")
+            # An older GenAI release does not know this parameter - carry on
+            # without narrowing instead of failing the whole transcription.
+            log.warning("openvino-genai does not accept lang_to_id - auto-detection without narrowing")
             self._lang_to_id = None
             del kwargs["lang_to_id"]
-            return self._wywolaj(audio, kwargs)
+            return self._call(audio, kwargs)
 
-    def _wywolaj(self, audio: np.ndarray, kwargs: dict):
-        # Nowsze wydania przyjmuja ndarray, starsze wymagaja listy floatow.
+    def _call(self, audio: np.ndarray, kwargs: dict):
+        # Newer releases accept an ndarray, older ones need a list of floats.
         try:
             return self._pipe.generate(audio, **kwargs)
         except TypeError:
             return self._pipe.generate(audio.tolist(), **kwargs)
 
 
-# --- ciecie audio ---------------------------------------------------------
+# --- cutting audio --------------------------------------------------------
 
 
-def _najcichszy_punkt(audio: np.ndarray, od: int, do: int) -> int:
-    """Indeks najcichszego miejsca w zadanym zakresie - tam tniemy."""
-    od = max(0, od)
-    do = min(len(audio), do)
-    if do - od < CZESTOTLIWOSC:
-        return do
+def _quietest_point(audio: np.ndarray, start: int, stop: int) -> int:
+    """Index of the quietest spot in the given range - we cut there."""
+    start = max(0, start)
+    stop = min(len(audio), stop)
+    if stop - start < SAMPLE_RATE:
+        return stop
 
-    ramka = int(RAMKA_ANALIZY_S * CZESTOTLIWOSC)
-    fragment = audio[od:do]
-    liczba = len(fragment) // ramka
-    if liczba < 5:
-        return (od + do) // 2
+    frame = int(ANALYSIS_FRAME_S * SAMPLE_RATE)
+    chunk = audio[start:stop]
+    count = len(chunk) // frame
+    if count < 5:
+        return (start + stop) // 2
 
-    energia = np.square(fragment[: liczba * ramka].reshape(liczba, ramka)).mean(axis=1)
-    # Wygladzenie oknem 0,5 s - szukamy realnej pauzy, nie pojedynczej ramki.
-    jadro = np.ones(5, dtype=np.float32) / 5.0
-    gladka = np.convolve(energia, jadro, mode="same")
-    return od + int(np.argmin(gladka)) * ramka + ramka // 2
+    energy = np.square(chunk[: count * frame].reshape(count, frame)).mean(axis=1)
+    # Smoothing with a 0.5 s window - we look for a real pause, not a single frame.
+    kernel = np.ones(5, dtype=np.float32) / 5.0
+    smooth = np.convolve(energy, kernel, mode="same")
+    return start + int(np.argmin(smooth)) * frame + frame // 2
 
 
-def szczytowe_rms(fragment: np.ndarray) -> float:
-    """Najglosniejsze okno 100 ms we fragmencie.
+def peak_rms(chunk: np.ndarray) -> float:
+    """The loudest 100 ms window in the chunk.
 
-    Szczyt, a nie srednia - inaczej jedno krotkie zdanie w dlugim, cichym
-    fragmencie zostaloby uznane za cisze i pominiete.
+    Peak, not mean - otherwise one short sentence in a long, quiet chunk
+    would count as silence and be skipped.
     """
-    if fragment.size == 0:
+    if chunk.size == 0:
         return 0.0
-    ramka = int(RAMKA_ANALIZY_S * CZESTOTLIWOSC)
-    liczba = fragment.size // ramka
-    if liczba < 1:
-        return float(np.sqrt(np.mean(np.square(fragment))))
-    okna = np.sqrt(
-        np.square(fragment[: liczba * ramka].reshape(liczba, ramka)).mean(axis=1)
+    frame = int(ANALYSIS_FRAME_S * SAMPLE_RATE)
+    count = chunk.size // frame
+    if count < 1:
+        return float(np.sqrt(np.mean(np.square(chunk))))
+    windows = np.sqrt(
+        np.square(chunk[: count * frame].reshape(count, frame)).mean(axis=1)
     )
-    return float(okna.max())
+    return float(windows.max())
 
 
-def _granice_ciszy(audio: np.ndarray) -> list[int]:
-    """Indeksy srodkow dostatecznie dlugich pauz - kandydaci na ciecie."""
-    ramka = int(RAMKA_VAD_S * CZESTOTLIWOSC)
-    liczba = len(audio) // ramka
-    if liczba < 2:
+def _silence_boundaries(audio: np.ndarray) -> list[int]:
+    """Indices of the middles of long enough pauses - candidates for a cut."""
+    frame = int(VAD_FRAME_S * SAMPLE_RATE)
+    count = len(audio) // frame
+    if count < 2:
         return []
 
-    energia = np.sqrt(
-        np.square(audio[: liczba * ramka].reshape(liczba, ramka)).mean(axis=1)
+    energy = np.sqrt(
+        np.square(audio[: count * frame].reshape(count, frame)).mean(axis=1)
     )
-    prog = max(float(energia.max()) * PROG_CISZY_WZGLEDNY, 1e-4)
-    cicha = energia < prog
-    min_ramek = max(1, int(MIN_CISZA_S / RAMKA_VAD_S))
+    threshold = max(float(energy.max()) * RELATIVE_SILENCE_THRESHOLD, 1e-4)
+    quiet = energy < threshold
+    min_frames = max(1, int(MIN_SILENCE_S / VAD_FRAME_S))
 
-    granice: list[int] = []
+    boundaries: list[int] = []
     i = 0
-    while i < liczba:
-        if not cicha[i]:
+    while i < count:
+        if not quiet[i]:
             i += 1
             continue
         j = i
-        while j < liczba and cicha[j]:
+        while j < count and quiet[j]:
             j += 1
-        if j - i >= min_ramek:
-            granice.append((i + j) // 2 * ramka)
+        if j - i >= min_frames:
+            boundaries.append((i + j) // 2 * frame)
         i = j
-    return granice
+    return boundaries
 
 
-def skroc_pauzy(audio: np.ndarray, maks_pauza_s: float = 0.6,
-                min_pauza_s: float = 1.0) -> np.ndarray:
-    """Wycina cisze z poczatku i konca, a pauzy dluzsze niz `min_pauza_s` skraca.
+def shorten_pauses(audio: np.ndarray, max_pause_s: float = 0.6,
+                   min_pause_s: float = 1.0) -> np.ndarray:
+    """Cuts silence at the start and end and shortens pauses longer than `min_pause_s`.
 
-    Do dyktowania, gdzie cale nagranie idzie do modelu jednym wywolaniem.
-    Whisper na dluzszej ciszy zmysla tekst (w polskim zwykle "Dziekuje." albo
-    "Dziekuje za uwage." na koncu), a po pauzie potrafi zgubic albo przekrecic
-    poczatek kolejnej wypowiedzi. Zmierzone na mowie z 10-sekundowymi pauzami:
-    bez skracania na koncu wyskakiwalo "Dziekuje.", a "Jasne" i "time-line"
-    znikaly; po skroceniu tekst byl kompletny i bez dopiskow.
+    For dictation, where the whole recording goes to the model in one call.
+    On longer silence Whisper invents text (in Polish usually "Dziekuje." or
+    "Dziekuje za uwage." at the end), and after a pause it can drop or garble
+    the start of the next utterance. Measured on speech with 10-second pauses:
+    without shortening "Dziekuje." appeared at the end and "Jasne" and
+    "time-line" vanished; after shortening the text was complete with no additions.
     """
-    ramka = int(RAMKA_VAD_S * CZESTOTLIWOSC)
-    liczba = len(audio) // ramka
-    if liczba < 4:
+    frame = int(VAD_FRAME_S * SAMPLE_RATE)
+    count = len(audio) // frame
+    if count < 4:
         return audio
 
-    energia = np.sqrt(
-        np.square(audio[: liczba * ramka].reshape(liczba, ramka)).mean(axis=1)
+    energy = np.sqrt(
+        np.square(audio[: count * frame].reshape(count, frame)).mean(axis=1)
     )
-    # Prog wzgledem glosnej mowy (95. percentyl), a nie maksimum - pojedyncze
-    # kaszlniecie albo stukniecie nie podnosi go wtedy ponad cicha mowe.
-    prog = max(float(np.percentile(energia, 95)) * PROG_CISZY_WZGLEDNY, 1e-4)
-    cicha = energia < prog
-    min_ramek = int(min_pauza_s / RAMKA_VAD_S)
-    zostaw_ramek = int(maks_pauza_s / RAMKA_VAD_S)
+    # Threshold relative to loud speech (95th percentile), not the maximum - a
+    # single cough or knock then does not lift it above quiet speech.
+    threshold = max(float(np.percentile(energy, 95)) * RELATIVE_SILENCE_THRESHOLD, 1e-4)
+    quiet = energy < threshold
+    min_frames = int(min_pause_s / VAD_FRAME_S)
+    keep_frames = int(max_pause_s / VAD_FRAME_S)
 
-    zostaw = np.ones(liczba, dtype=bool)
+    keep = np.ones(count, dtype=bool)
     i = 0
-    while i < liczba:
-        if not cicha[i]:
+    while i < count:
+        if not quiet[i]:
             i += 1
             continue
         j = i
-        while j < liczba and cicha[j]:
+        while j < count and quiet[j]:
             j += 1
-        brzeg = i == 0 or j == liczba
-        if brzeg or j - i >= min_ramek:
-            zachowaj = 0 if brzeg else zostaw_ramek
-            polowa = zachowaj // 2
-            zostaw[i + polowa: j - (zachowaj - polowa)] = False
+        edge = i == 0 or j == count
+        if edge or j - i >= min_frames:
+            kept = 0 if edge else keep_frames
+            half = kept // 2
+            keep[i + half: j - (kept - half)] = False
         i = j
 
-    if zostaw.all():
+    if keep.all():
         return audio
-    mowa = audio[: liczba * ramka][np.repeat(zostaw, ramka)]
-    if mowa.size == 0:
-        return mowa
-    # Krotki margines, zeby nie uciac pierwszej ani ostatniej gloski.
-    margines = np.zeros(int(0.2 * CZESTOTLIWOSC), dtype=np.float32)
-    return np.ascontiguousarray(np.concatenate([margines, mowa, margines]),
+    speech = audio[: count * frame][np.repeat(keep, frame)]
+    if speech.size == 0:
+        return speech
+    # A short margin so the first and last sound are not cut off.
+    margin = np.zeros(int(0.2 * SAMPLE_RATE), dtype=np.float32)
+    return np.ascontiguousarray(np.concatenate([margin, speech, margin]),
                                 dtype=np.float32)
 
 
-def podziel_po_ciszy(audio: np.ndarray, maks_s: float) -> list[tuple[int, int]]:
-    """Tnie na fragmenty nie dluzsze niz `maks_s`, trzymajac sie granic w ciszy."""
-    maks = int(maks_s * CZESTOTLIWOSC)
-    zakresy: list[tuple[int, int]] = []
+def split_at_silence(audio: np.ndarray, max_s: float) -> list[tuple[int, int]]:
+    """Cuts into chunks no longer than `max_s`, sticking to boundaries in silence."""
+    max_len = int(max_s * SAMPLE_RATE)
+    ranges: list[tuple[int, int]] = []
     start = 0
 
-    for granica in _granice_ciszy(audio) + [len(audio)]:
-        if granica <= start:
+    for boundary in _silence_boundaries(audio) + [len(audio)]:
+        if boundary <= start:
             continue
-        # Zbyt krotki kawalek doklejamy do nastepnego - inaczej rozdrobnilibysmy
-        # wypowiedzi na strzepy i model stracilby kontekst zdania.
-        if granica - start < maks * 0.4 and granica != len(audio):
+        # A too short piece is joined to the next one - otherwise we would chop
+        # utterances to shreds and the model would lose the sentence context.
+        if boundary - start < max_len * 0.4 and boundary != len(audio):
             continue
-        while granica - start > maks:
-            zakresy.append((start, start + maks))
-            start += maks
-        if granica > start:
-            zakresy.append((start, granica))
-        start = granica
+        while boundary - start > max_len:
+            ranges.append((start, start + max_len))
+            start += max_len
+        if boundary > start:
+            ranges.append((start, boundary))
+        start = boundary
 
-    return [(a, b) for a, b in zakresy if b - a > CZESTOTLIWOSC // 4]
+    return [(a, b) for a, b in ranges if b - a > SAMPLE_RATE // 4]
 
 
-def podziel_na_segmenty(audio: np.ndarray, autodetekcja: bool = False
-                        ) -> list[tuple[int, int]]:
-    """Dobiera strategie ciecia do trybu jezykowego."""
-    if autodetekcja:
-        zakresy = podziel_po_ciszy(audio, DLUGOSC_SEGMENTU_AUTO_S)
-        return zakresy or [(0, len(audio))]
+def split_into_chunks(audio: np.ndarray, auto_detect: bool = False
+                      ) -> list[tuple[int, int]]:
+    """Picks the cutting strategy for the language mode."""
+    if auto_detect:
+        ranges = split_at_silence(audio, CHUNK_AUTO_S)
+        return ranges or [(0, len(audio))]
 
-    dlugosc_docelowa = int(DLUGOSC_SEGMENTU_S * CZESTOTLIWOSC)
-    okno = int(OKNO_SZUKANIA_CISZY_S * CZESTOTLIWOSC)
+    target_len = int(CHUNK_S * SAMPLE_RATE)
+    window = int(SILENCE_SEARCH_WINDOW_S * SAMPLE_RATE)
 
-    zakresy = []
-    poczatek = 0
-    while poczatek < len(audio):
-        cel = poczatek + dlugosc_docelowa
-        if cel >= len(audio) - okno:
-            zakresy.append((poczatek, len(audio)))
+    ranges = []
+    begin = 0
+    while begin < len(audio):
+        target = begin + target_len
+        if target >= len(audio) - window:
+            ranges.append((begin, len(audio)))
             break
-        koniec = _najcichszy_punkt(audio, cel - okno, cel + okno)
-        if koniec <= poczatek:
-            koniec = min(len(audio), cel)
-        zakresy.append((poczatek, koniec))
-        poczatek = koniec
-    return zakresy
+        end = _quietest_point(audio, target - window, target + window)
+        if end <= begin:
+            end = min(len(audio), target)
+        ranges.append((begin, end))
+        begin = end
+    return ranges
 
 
-def _chunki(wynik) -> list:
-    """Normalizuje wynik pipeline - `chunks` bywa lista albo lista list."""
-    chunki = getattr(wynik, "chunks", None)
-    if not chunki:
+def _chunks(result) -> list:
+    """Normalizes the pipeline result - `chunks` is a list or a list of lists."""
+    chunks = getattr(result, "chunks", None)
+    if not chunks:
         return []
-    pierwszy = chunki[0]
-    if isinstance(pierwszy, (list, tuple)):
-        return list(pierwszy)
-    return list(chunki)
+    first = chunks[0]
+    if isinstance(first, (list, tuple)):
+        return list(first)
+    return list(chunks)
 
 
-# --- glowna funkcja -------------------------------------------------------
+# --- main function --------------------------------------------------------
 
 
-def transkrybuj_plik(
-    plik: Path,
-    silnik: Silnik,
-    mowca: str,
-    jezyk: str | None = None,
-    postep: PostepFn | None = None,
-    anuluj: threading.Event | None = None,
-    waga: tuple[float, float] = (0.0, 1.0),
+def transcribe_file(
+    file: Path,
+    engine: Engine,
+    speaker: str,
+    language: str | None = None,
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+    weight: tuple[float, float] = (0.0, 1.0),
 ) -> list[Segment]:
-    """Transkrybuje jeden plik WAV/FLAC 16 kHz mono.
+    """Transcribes one 16 kHz mono WAV/FLAC file.
 
-    `waga` to zakres (od, do) globalnego paska postepu, jaki zajmuje ten plik -
-    dzieki temu dwie sciezki moga raportowac wspolny postep 0..1.
+    `weight` is the (from, to) range of the global progress bar this file
+    takes - so two tracks can report one shared 0..1 progress.
     """
-    audio, sr = sf.read(str(plik), dtype="float32", always_2d=False)
+    audio, sr = sf.read(str(file), dtype="float32", always_2d=False)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
-    if sr != CZESTOTLIWOSC:
+    if sr != SAMPLE_RATE:
         import soxr
 
-        audio = soxr.resample(audio, sr, CZESTOTLIWOSC, quality="HQ")
+        audio = soxr.resample(audio, sr, SAMPLE_RATE, quality="HQ")
     audio = np.ascontiguousarray(audio, dtype=np.float32)
 
-    if audio.size < CZESTOTLIWOSC // 2:
+    if audio.size < SAMPLE_RATE // 2:
         return []
 
-    # Cala sciezka to cisza (np. mikrofon, gdy tylko sluchales) - nie ma czego
-    # transkrybowac, a model na ciszy tylko halucynuje.
-    if szczytowe_rms(audio) < PROG_MOWY_RMS:
-        log.info("Sciezka %s pominieta - sama cisza", plik.name)
-        if postep:
-            postep(waga[1], "")
+    # The whole track is silence (e.g. the microphone when you only listened) -
+    # there is nothing to transcribe, and on silence the model only hallucinates.
+    if peak_rms(audio) < SPEECH_RMS_THRESHOLD:
+        log.info("Track %s skipped - silence only", file.name)
+        if progress:
+            progress(weight[1], "")
         return []
 
-    silnik.zaladuj()
-    zakresy = podziel_na_segmenty(audio, autodetekcja=jezyk is None)
-    od_wagi, do_wagi = waga
-    rozpietosc = max(0.0, do_wagi - od_wagi)
+    engine.load()
+    ranges = split_into_chunks(audio, auto_detect=language is None)
+    weight_from, weight_to = weight
+    span = max(0.0, weight_to - weight_from)
 
-    segmenty: list[Segment] = []
-    for i, (poczatek, koniec) in enumerate(zakresy):
-        if anuluj is not None and anuluj.is_set():
+    segments: list[Segment] = []
+    for i, (begin, end) in enumerate(ranges):
+        if cancel is not None and cancel.is_set():
             break
 
-        offset = poczatek / CZESTOTLIWOSC
-        fragment = audio[poczatek:koniec]
+        offset = begin / SAMPLE_RATE
+        chunk = audio[begin:end]
 
-        if szczytowe_rms(fragment) < PROG_MOWY_RMS:
-            if postep:
-                postep(od_wagi + rozpietosc * (i + 1) / len(zakresy), "")
+        if peak_rms(chunk) < SPEECH_RMS_THRESHOLD:
+            if progress:
+                progress(weight_from + span * (i + 1) / len(ranges), "")
             continue
 
         try:
-            wynik = silnik.generuj(fragment, jezyk)
-        except Exception as blad:
-            log.exception("Blad transkrypcji segmentu %d pliku %s", i, plik.name)
-            if postep:
-                postep(od_wagi + rozpietosc * (i + 1) / len(zakresy),
-                       f"[blad segmentu {i + 1}: {blad}]")
+            result = engine.generate(chunk, language)
+        except Exception as error:
+            log.exception("Transcription error in chunk %d of file %s", i, file.name)
+            if progress:
+                progress(weight_from + span * (i + 1) / len(ranges),
+                         f"[segment {i + 1} error: {error}]")
             continue
 
-        koniec_s = koniec / CZESTOTLIWOSC
-        chunki = _chunki(wynik)
-        if chunki:
-            ostatni_koniec = offset
-            for chunk in chunki:
-                start = float(getattr(chunk, "start_ts", -1.0))
-                kon = float(getattr(chunk, "end_ts", -1.0))
-                tekst = str(getattr(chunk, "text", "")).strip()
-                if not tekst:
+        end_s = end / SAMPLE_RATE
+        chunks = _chunks(result)
+        if chunks:
+            last_end = offset
+            for item in chunks:
+                start = float(getattr(item, "start_ts", -1.0))
+                stop = float(getattr(item, "end_ts", -1.0))
+                text = str(getattr(item, "text", "")).strip()
+                if not text:
                     continue
-                # Whisper bywa zwraca -1, gdy nie zna znacznika czasu.
-                start = ostatni_koniec if start < 0 else offset + start
-                kon = start + 2.0 if kon < 0 else offset + kon
-                # Na ciszy model potrafi zwrocic znacznik wykraczajacy poza
-                # przetwarzany fragment - przycinamy do jego granic.
-                start = min(max(start, offset), koniec_s)
-                kon = min(max(kon, start), koniec_s)
-                ostatni_koniec = kon
-                segmenty.append(Segment(start, kon, tekst, mowca))
+                # Whisper sometimes returns -1 when it does not know the timestamp.
+                start = last_end if start < 0 else offset + start
+                stop = start + 2.0 if stop < 0 else offset + stop
+                # On silence the model can return a timestamp outside the
+                # processed chunk - clamp it to the chunk boundaries.
+                start = min(max(start, offset), end_s)
+                stop = min(max(stop, start), end_s)
+                last_end = stop
+                segments.append(Segment(start, stop, text, speaker))
         else:
-            tekst = str(wynik).strip()
-            if tekst:
-                segmenty.append(
-                    Segment(offset, koniec / CZESTOTLIWOSC, tekst, mowca)
+            text = str(result).strip()
+            if text:
+                segments.append(
+                    Segment(offset, end / SAMPLE_RATE, text, speaker)
                 )
 
-        if postep:
-            ostatni_tekst = segmenty[-1].tekst if segmenty else ""
-            postep(od_wagi + rozpietosc * (i + 1) / len(zakresy), ostatni_tekst)
+        if progress:
+            last_text = segments[-1].text if segments else ""
+            progress(weight_from + span * (i + 1) / len(ranges), last_text)
 
-    return segmenty
+    return segments
 
 
-def transkrybuj_sesje(
-    pliki: dict[str, Path],
+def transcribe_session(
+    files: dict[str, Path],
     model: str,
     device: str,
-    jezyk_kod: str = "auto",
-    postep: PostepFn | None = None,
-    anuluj: threading.Event | None = None,
+    language_code: str = "auto",
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
     status: Callable[[str], None] | None = None,
 ) -> tuple[list[Segment], str]:
-    """Transkrybuje wszystkie sciezki sesji. Zwraca (segmenty, uzyty_device)."""
-    jezyk = config.JEZYKI.get(jezyk_kod)
-    silnik = Silnik(model, device)
+    """Transcribes all tracks of a session. Returns (segments, used_device)."""
+    language = config.LANGUAGES.get(language_code)
+    engine = Engine(model, device)
 
-    etykiety = {"mikrofon": t(MOWCA_JA), "system": t(MOWCA_SPOTKANIE)}
-    do_zrobienia = [(n, p) for n, p in pliki.items() if p and Path(p).exists()]
-    if not do_zrobienia:
+    speakers = {"microphone": SPEAKER_ME, "system": SPEAKER_MEETING}
+    to_do = [(n, p) for n, p in files.items() if p and Path(p).exists()]
+    if not to_do:
         return [], device
 
-    # Pierwsze zaladowanie na GPU potrafi trwac kilkadziesiat sekund (kompilacja
-    # modelu), wiec informujemy o tym zanim ruszy pierwszy segment.
+    # The first load on the GPU can take tens of seconds (model compilation),
+    # so we say so before the first chunk starts.
     if status:
-        status(t("Ładuję model na {device}...", device=device))
-    silnik.zaladuj()
+        status(t("Loading model on {device}...", device=device))
+    engine.load()
     if status:
-        status(t("Transkrybuję na {device}...", device=silnik.device))
+        status(t("Transcribing on {device}...", device=engine.device))
 
-    krok = 1.0 / len(do_zrobienia)
-    wyniki: list[list[Segment]] = []
+    step = 1.0 / len(to_do)
+    results: list[list[Segment]] = []
     try:
-        for i, (nazwa, plik) in enumerate(do_zrobienia):
-            if anuluj is not None and anuluj.is_set():
+        for i, (name, file) in enumerate(to_do):
+            if cancel is not None and cancel.is_set():
                 break
-            wyniki.append(
-                transkrybuj_plik(
-                    Path(plik), silnik, etykiety.get(nazwa, nazwa), jezyk,
-                    postep=postep, anuluj=anuluj,
-                    waga=(i * krok, (i + 1) * krok),
+            results.append(
+                transcribe_file(
+                    Path(file), engine, speakers.get(name, name), language,
+                    progress=progress, cancel=cancel,
+                    weight=(i * step, (i + 1) * step),
                 )
             )
     finally:
-        uzyty_device = silnik.device
-        silnik.zwolnij()
+        used_device = engine.device
+        engine.release()
 
-    return scal(*wyniki), uzyty_device
+    return merge_tracks(*results), used_device
