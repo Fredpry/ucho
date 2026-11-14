@@ -21,6 +21,49 @@ A one-hour meeting transcribes in about 4 minutes on the Arc GPU. Auto-detect is
 
 Everything below fills in the other rows.
 
+## Dictation during a transcription (v0.2)
+
+Plan v0.2, W3: one process and one Whisper engine for meetings and dictation; a 10 s dictation must be answered in under 3 s while a meeting is being transcribed. Measured with `tools/benchmark_engine.py` on synthetic Polish speech from the offline Windows voice *Microsoft Paulina* (no recording of anyone): a 6-minute "meeting" transcribed on the GPU with large-v3 INT8 in Auto mode, and six 10 s dictations submitted 3 s apart while it ran. Core Ultra 7 258V, Arc 140V, 32 GB, OpenVINO GenAI 2026.3.1, 14.11.2026.
+
+| Dictation model | Models in memory (private bytes) | Dictation alone | Dictation during transcription | 6 min meeting transcribed in |
+|---|---|---|---|---|
+| shared large-v3 INT8 | 2.1 GB | 1.0-1.5 s | 1.2-1.7 s (median 1.3 s) | 50 s |
+| separate large-v3 FP16 | 5.2 GB | 1.4-2.3 s | 1.3-1.7 s (median 1.5 s) | 54 s |
+
+The first value of "alone" includes the warm-up of the first call. The meeting gets slower by the time the dictations take, nothing more.
+
+With a forced language (`--meeting-language pl`) the meeting is cut into chunks of up to 5 minutes, and a dictation waits for the chunk that is running: 24.0 s and 5.8 s measured for two dictations. OpenVINO cannot interrupt a running chunk. Keeping the 5-minute chunks was a quality decision (`transcribe.py`, section 3 of [architecture.md](architecture.md)); shorter chunks for forced languages need a WER check on real meetings first.
+
+For comparison, v0.1 ran Dictate as a second process that kept FP16 loaded (about 3 GB) next to the meeting app.
+
+```powershell
+$env:HF_HOME = "C:\path\to\models"   # where the models are downloaded
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --only shared
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --only separate
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --only shared --meeting-language pl
+```
+
+Run each scenario in its own process (`--only`), otherwise the memory numbers of the second include the first.
+
+## INT8 vs FP16 for dictation (v0.2)
+
+Plan v0.2, W3: "measure the quality difference on 20 dictations before deciding". 20 short Polish dictation sentences (made up: e-mails, tasks, terminal requests) spoken by *Microsoft Paulina*, `tools/benchmark_engine.py --make-wer-set`, then `tools/benchmark_wer.py --language pl --device GPU`:
+
+| Model | WER | CER | Processing (95.5 s of audio) | Load (cached) |
+|---|---|---|---|---|
+| large-v3 INT8 | 3.2 % | 3.3 % | 11.4 s (8.4x) | 2.0 s |
+| large-v3 FP16 | 3.2 % | 3.3 % | 15.7 s (6.1x) | 4.3 s |
+
+Both models wrote exactly the same text for all 20 sentences. Every error is a number written as digits ("dwadzieścia trzy" became "23", "o dziesiątej" became "o 10.00"), which the WER normalization counts as wrong (see "Reading the numbers" below).
+
+Limits: a synthetic voice is clean, steady and has no accent, background noise or hesitations, so this shows only that INT8 is not worse on clear speech. Real dictations (a laptop microphone, an office) may separate the models; the founder decides after a check on a few real dictations.
+
+```powershell
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --make-wer-set C:\bench\tts-pl
+.\.venv\Scripts\python.exe tools\benchmark_wer.py C:\bench\tts-pl --language pl --model OpenVINO/whisper-large-v3-int8-ov
+.\.venv\Scripts\python.exe tools\benchmark_wer.py C:\bench\tts-pl --language pl --model OpenVINO/whisper-large-v3-fp16-ov
+```
+
 ## 1. Hardware matrix
 
 ### Laptops

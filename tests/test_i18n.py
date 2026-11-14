@@ -28,6 +28,9 @@ def _keys_from_config() -> set[str]:
     keys = set(merge.SPEAKER_LABELS.values())
     keys |= set(config.TRACK_LABELS.values())
     keys |= {config.UI_LANGUAGE_LABELS["auto"]}
+    keys |= set(config.THEME_LABELS.values())
+    keys |= set(config.LAYOUT_LABELS.values())
+    keys |= set(config.DICTATION_MODE_LABELS.values())
     keys |= {m["description"] for m in config.MODELS.values()}
     keys |= {m["description"] for m in config.LLM_MODELS.values()}
     return keys

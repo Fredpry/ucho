@@ -41,6 +41,18 @@ Meetings up to ~40 minutes are summarized in one pass. Longer ones are split, bu
 
 Ucho deliberately has no chatbot. The agent you already use (Claude Code, Cursor, Codex) reads the transcripts and summarizes them. That keeps the app small and leaves the choice of model, and of whether text may leave the machine, to the user.
 
+## 7. One app, one Whisper engine
+
+Up to v0.1 meetings and dictation were two processes with two tray icons and two models in memory (Dictate kept large-v3 FP16, about 3 GB, loaded all day). Since v0.2 they are one process (`ucho/app.py`) with one engine (`ucho/engine.py`):
+
+- **One worker thread with a priority queue.** An OpenVINO pipeline must not be called from two threads, so every model call runs on the engine thread. Jobs are ordered: dictation, then meeting transcription, summary and benchmark, then background preloading.
+- **Transcription in steps.** A meeting transcription is a generator that yields after every chunk (`transcribe.iter_transcribe_session`). After each chunk the worker picks the most urgent job again, so a dictation waits for at most one chunk. In the default Auto mode a chunk is ~12 s of audio, about 1 s of work on an Arc GPU. With a forced language chunks are up to 5 minutes long (section 3), and a dictation can wait up to one of them; OpenVINO cannot interrupt a running chunk (its streamer works only for short audio without timestamps).
+- **Models cached by (model, device).** When dictation uses the transcription model ("shared", the default with less than 16 GB RAM) both use one loaded pipeline. A separate FP16 dictation model is a setting. Before a summary every Whisper pipeline is released (`engine.exclusive`), because the language model runs on the same integrated GPU; the dictation model is loaded again afterwards.
+- **One identity on the taskbar.** One AppUserModelID for the window, the shortcuts ("Ucho" and "Ucho Dictate") and the Jump List (*Record a meeting*, *Dictate*). A named mutex keeps one instance per Windows session; a second start sets a named event and exits, and the running app shows its window, opens dictation or starts recording.
+- **Hotkeys through `RegisterHotKey`.** Ctrl+Alt+R and Ctrl+Shift+Space are owned by the app while it runs, Esc only while a dictation records. A combination held by another program is shown in the window instead of failing.
+
+Measured on a Core Ultra 7 258V (Arc 140V, 32 GB), 6 minutes of synthetic Polish speech transcribed on the GPU while six 10 s dictations were submitted (`tools/benchmark_engine.py`): a dictation was answered in 1.2 to 1.7 s (median 1.3 s) with the shared INT8 model and 1.3 to 1.7 s (median 1.5 s) with a separate FP16 model; alone, 1.0 to 1.4 s. Details in [benchmarks.md](benchmarks.md#dictation-during-a-transcription-v02).
+
 ## Files per meeting
 
 ```
