@@ -25,3 +25,4 @@ dist/
 
 # Lokalne materialy robocze
 .ref/
+.venv-test/
