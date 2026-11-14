@@ -306,5 +306,6 @@
   "{shortcut} finishes, Esc cancels": "{shortcut} kończy, Esc anuluje",
   "{shortcut} is taken by another program (code {code}).": "{shortcut} jest zajęty przez inny program (kod {code}).",
   "{shortcut} starts and ends a dictation, Esc cancels it. The text goes where the cursor is.": "{shortcut} zaczyna i kończy dyktowanie, Esc je anuluje. Tekst trafia tam, gdzie jest kursor.",
-  "{shortcut} — speak, press again — insert text": "{shortcut} — mów, drugi raz — wstaw tekst"
+  "{shortcut} — speak, press again — insert text": "{shortcut}: mów, naciśnij drugi raz, żeby wstawić tekst",
+  "Space": "Spacja"
 }

@@ -67,7 +67,7 @@ def parse(combo: str) -> tuple[int, int] | None:
 def label(combo: str) -> str:
     """'<ctrl>+<shift>+space' -> 'Ctrl + Shift + Space' for the UI."""
     names = {"ctrl": "Ctrl", "control": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win",
-             "space": "Space", "esc": "Esc", "enter": "Enter"}
+             "space": t("Space"), "esc": "Esc", "enter": "Enter"}
     parts = []
     for token in (combo or "").lower().replace(" ", "").split("+"):
         token = token.strip("<>")

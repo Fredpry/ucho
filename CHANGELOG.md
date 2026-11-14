@@ -8,6 +8,9 @@ v0.1 was an internal build. To upgrade it, extract `Ucho-Windows.zip` over the o
 
 ### Added
 
+- **Delete recording**: on the transcript screen (or the Delete key on a recording in the list), after a confirmation that names the meeting, the whole session folder is deleted permanently. Refused while the session is being recorded, transcribed or summarized; a session waiting in the queue is taken out of it.
+- **Delete audio after** (Settings → Storing recordings): Never (default), 7, 30 or 90 days. Removes only the audio of recordings that already have a transcript, at start and then once a day; transcripts and summaries stay, and the list shows "audio deleted".
+- **Transcription queue**: a recording stopped while another one is still being transcribed or summarized waits in a queue ("Queued (2)") and starts on its own, instead of failing with "Another transcription is running". *Transcribe again* uses the same queue.
 - **Double-click install**: `install.cmd` runs `install.ps1` without changing the execution policy and keeps the window open at the end and after an error (`install.ps1 -Pause`). Started from inside the zip, it asks you to extract the zip first.
 - The installer logs every run to `install.log` in the app folder (pip output included) and says where the log is when something fails.
 - The installer ends with a summary: how to start Ucho, and the exact `claude mcp add -s user ucho -- ...` command with the paths of this installation.
@@ -31,6 +34,9 @@ v0.1 was an internal build. To upgrade it, extract `Ucho-Windows.zip` over the o
 
 ### Changed
 
+- **Dictation and the clipboard**: text that Ucho puts on the clipboard is kept out of Windows clipboard history and cloud clipboard sync; the previous clipboard text comes back after the paste. Dictated text is pasted only into the window that was active when the dictation started; if that window is gone, the text stays on the clipboard with a note.
+- **Search without Polish characters**: "zlotych" finds "złotych" and "lodz" finds "Łódź" (also "ł", which the search index did not fold), in the app and in the MCP server.
+- Key names follow the interface language ("Spacja" in Polish).
 - `Ucho-Windows.zip` holds `Ucho\app\` instead of `Ucho\`: extracted to `C:\Users\<you>` it lands in `C:\Users\<you>\Ucho\app`, the path the README uses everywhere. `CHANGELOG.md` and the uninstaller are included.
 - Installing inside a OneDrive folder now stops with a clear warning and asks before continuing (default: stop). `-Force` or a non-interactive run continues with a warning.
 - The README suggests `claude mcp add -s user` (every project, not just the current folder) and has JSON and TOML snippets for Cursor, Claude Desktop and Codex. The speed claim is now 1 h in 4 to 7 min on Intel Arc (15x with a forced language, 8.9x with automatic language detection, `docs/benchmarks.md`).
