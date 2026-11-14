@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ucho design system</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--color-bg); color: var(--color-text); font: var(--text-base)/var(--leading-normal) var(--font-sans); }
+  main { max-width: var(--content-width); margin: 0 auto; padding: var(--space-7) var(--space-4); }
+  h1 { font: 600 var(--text-3xl)/var(--leading-tight) var(--font-display); margin: 0 0 var(--space-2); }
+  h2 { font: 600 var(--text-xl)/var(--leading-tight) var(--font-display); margin: var(--space-7) 0 var(--space-4); }
+  p.lead { color: var(--color-text-muted); margin: 0 0 var(--space-5); }
+  .row { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+  .sw { width: 92px; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--color-border); background: var(--color-surface); font-size: var(--text-xs); }
+  .sw div { height: 56px; }
+  .sw span { display: block; padding: 6px 8px; font-family: var(--font-mono); color: var(--color-text-muted); }
+  .card { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: var(--space-5); box-shadow: var(--shadow-sm); }
+  .btn { font: 600 var(--text-sm) var(--font-sans); border-radius: var(--radius-md); min-height: 40px; padding: 0 var(--space-5); border: 1px solid transparent; cursor: pointer; transition: background var(--duration-fast) var(--ease-out); }
+  .btn-primary { background: var(--color-action); color: var(--color-on-action); }
+  .btn-primary:hover { background: var(--color-action-hover); }
+  .btn-secondary { background: var(--color-surface); color: var(--color-text); border-color: var(--color-border); }
+  .btn:focus-visible { outline: 2px solid var(--color-focus); outline-offset: 2px; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--radius-full); padding: 4px 12px; font-size: var(--text-sm); font-weight: 600; background: var(--color-surface-muted); }
+  .pill::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+  .ok { color: var(--color-success); } .work { color: var(--color-info); } .rec { color: var(--color-recording); }
+  .rec-btn { width: 132px; height: 132px; border-radius: 50%; border: none; color: #fff; font: 700 var(--text-xl) var(--font-sans); background: var(--color-recording); position: relative; cursor: pointer; }
+  .rec-btn::after { content: ""; position: absolute; inset: -8px; border-radius: 50%; border: 3px solid var(--color-recording); opacity: .5; animation: puls var(--duration-slow) var(--ease-out) infinite; }
+  @keyframes puls { from { transform: scale(.92); opacity: .6; } to { transform: scale(1.12); opacity: 0; } }
+  .idle-btn { background: var(--color-action); color: var(--color-on-action); }
+  .idle-btn::after { display: none; }
+  .line { font-size: var(--text-sm); margin: 6px 0; }
+  .ts { font-family: var(--font-mono); color: var(--color-text-muted); margin-right: 8px; }
+  .me { color: var(--color-action); font-weight: 600; } .them { color: var(--color-text-muted); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }
+  .theme { position: fixed; top: 16px; right: 16px; }
+</style>
+</head>
+<body>
+<button class="btn btn-secondary theme" onclick="var r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark'">Light / dark</button>
+<main>
+  <div class="row" style="gap:var(--space-5)">
+    <img src="assets/ucho-mark.svg" width="96" height="96" alt="">
+    <div><h1>Ucho design system</h1><p class="lead">Blush on warm neutrals. Calm for long calls, unmistakable when recording.</p></div>
+  </div>
+
+  <h2>Blush</h2>
+  <div class="row" id="blush"></div>
+  <h2>Stone</h2>
+  <div class="row" id="stone"></div>
+
+  <h2>Components</h2>
+  <div class="grid">
+    <div class="card">
+      <p class="lead" style="margin-bottom:var(--space-3)">Buttons</p>
+      <div class="row"><button class="btn btn-primary">Download Ucho</button><button class="btn btn-secondary">Open folder</button></div>
+      <p class="lead" style="margin:var(--space-5) 0 var(--space-3)">Status</p>
+      <div class="row"><span class="pill ok">Ready</span><span class="pill work">Transcribing 42%</span><span class="pill rec">Recording</span></div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div class="row" style="justify-content:center;gap:var(--space-6)">
+        <div><button class="rec-btn idle-btn">REC</button><p class="lead">Ctrl + Alt + R</p></div>
+        <div><button class="rec-btn">STOP</button><p class="lead">00:12:31</p></div>
+      </div>
+    </div>
+    <div class="card">
+      <p class="lead" style="margin-bottom:var(--space-3)">Transcript</p>
+      <p class="line"><span class="ts">[00:00:05]</span><span class="me">Me:</span> Zaczynamy od budżetu na czwarty kwartał.</p>
+      <p class="line"><span class="ts">[00:02:10]</span><span class="them">Meeting:</span> Dostawca podniósł cenę o dziesięć procent.</p>
+      <p class="line"><span class="ts">[00:02:31]</span><span class="me">Me:</span> Then we need a second quote by Friday.</p>
+    </div>
+  </div>
+</main>
+<script>
+  const css = getComputedStyle(document.documentElement);
+  for (const [scale, steps] of [["blush", [50,100,200,300,400,500,600,700,800,900]], ["stone", [50,100,200,300,400,500,600,700,800,900,950]]]) {
+    const row = document.getElementById(scale);
+    for (const s of steps) {
+      const v = css.getPropertyValue(`--${scale}-${s}`).trim();
+      row.insertAdjacentHTML("beforeend", `<div class="sw"><div style="background:${v}"></div><span>${s} ${v}</span></div>`);
+    }
+  }
+</script>
+</body>
+</html>

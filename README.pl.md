@@ -1,6 +1,16 @@
-# Ucho
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="design/assets/ucho-hero-dark.svg">
+    <img src="design/assets/ucho-hero-light.svg" alt="Ucho: prywatna transkrypcja spotkań i dyktowania, offline" width="880">
+  </picture>
+</p>
 
-**Dokładna transkrypcja spotkań i dyktowania po polsku. Na Twoim laptopie, nic z niego nie wychodzi.**
+<p align="center"><b>Dokładna transkrypcja spotkań i dyktowania po polsku. Na Twoim laptopie, nic z niego nie wychodzi.</b></p>
+
+<p align="center">
+  <a href="https://ucho.app">ucho.app</a> · <a href="README.md">English</a> · <a href="PRIVACY.md">Prywatność</a> · <a href="design/README.md">Design system</a> · <a href="LICENSE">Apache-2.0</a>
+</p>
+
 
 Ucho nagrywa rozmowy w Teams, Zoomie czy Meet oraz dyktowanie na laptopie z Windowsem i zamienia je w tekst na miejscu, modelem Whisper large-v3 uruchomionym przez OpenVINO. Żaden bot nie dołącza do spotkania, nie trzeba zakładać konta, nic nie trafia do chmury. Powstało z myślą o polskim, radzi sobie też z angielskim i ze spotkaniami, w których oba języki się mieszają.
 

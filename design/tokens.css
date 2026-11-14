@@ -1,0 +1,168 @@
+/* SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
+   SPDX-License-Identifier: Apache-2.0
+
+   Ucho design tokens. Source of truth: design/tokens.json.
+   Light theme by default, dark theme via prefers-color-scheme or [data-theme="dark"]. */
+
+:root {
+  /* Blush: warm, skin-toned pink. 400 is the brand color (decoration only),
+     700 is the accessible action color (6.0:1 on the page background). */
+  --blush-50: #FDF7F4;
+  --blush-100: #FAEBE5;
+  --blush-200: #F4D6CB;
+  --blush-300: #EBBBAA;
+  --blush-400: #DF9C86;
+  --blush-500: #CC7F68;
+  --blush-600: #B0644E;
+  --blush-700: #8E4E3D;
+  --blush-800: #6B3B2F;
+  --blush-900: #47271F;
+
+  /* Stone: warm neutrals that sit well next to blush. */
+  --stone-50: #FAF8F6;
+  --stone-100: #F2EEEB;
+  --stone-200: #E4DDD8;
+  --stone-300: #CDC3BC;
+  --stone-400: #A99C93;
+  --stone-500: #857870;
+  --stone-600: #675C55;
+  --stone-700: #4D4540;
+  --stone-800: #332D2A;
+  --stone-900: #1F1B19;
+  --stone-950: #151211;
+
+  /* Status (all >= 4.5:1 on the light background). */
+  --sage-600: #4F7A5E;
+  --amber-600: #8A5F10;
+  --clay-600: #B4452F;
+  --dusk-600: #4E6E8E;
+  --sage-300: #8CC0A0;
+  --amber-300: #E3B45A;
+  --clay-300: #EE8A72;
+  --dusk-300: #93B3D3;
+
+  /* Semantic: light theme. */
+  --color-bg: var(--blush-50);
+  --color-surface: #FFFFFF;
+  --color-surface-muted: var(--stone-100);
+  --color-border: var(--stone-200);
+  --color-text: #2A211E;
+  --color-text-muted: var(--stone-600);
+  --color-brand: var(--blush-400);
+  --color-brand-soft: var(--blush-100);
+  --color-action: var(--blush-700);
+  --color-action-hover: var(--blush-800);
+  --color-on-action: #FFFFFF;
+  --color-link: var(--blush-700);
+  --color-recording: var(--clay-600);
+  --color-success: var(--sage-600);
+  --color-warning: var(--amber-600);
+  --color-danger: var(--clay-600);
+  --color-info: var(--dusk-600);
+  --color-focus: var(--blush-600);
+
+  /* Typography. System fonts only: no web-font downloads, no third parties. */
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Iowan Old Style", "Charter", "Sitka Heading", Georgia, "Times New Roman", serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, "SF Mono", ui-monospace, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.25rem;
+  --text-4xl: clamp(2.5rem, 5vw + 1rem, 4rem);
+  --leading-tight: 1.15;
+  --leading-normal: 1.55;
+
+  /* Space: 4 px grid. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+  --space-9: 6rem;
+
+  /* Shape and depth: soft, rounded, low shadows. */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 2px rgb(71 39 31 / 0.06);
+  --shadow-md: 0 6px 20px rgb(71 39 31 / 0.08);
+  --shadow-lg: 0 18px 50px rgb(71 39 31 / 0.12);
+
+  /* Motion: calm. Everything respects prefers-reduced-motion. */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-fast: 140ms;
+  --duration-base: 240ms;
+  --duration-slow: 2400ms;
+
+  --content-width: 72rem;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg: #171312;
+    --color-surface: #221C1A;
+    --color-surface-muted: #2B2422;
+    --color-border: #3A322F;
+    --color-text: #F4EAE6;
+    --color-text-muted: var(--stone-400);
+    --color-brand: var(--blush-300);
+    --color-brand-soft: #3A2A25;
+    --color-action: var(--blush-300);
+    --color-action-hover: var(--blush-200);
+    --color-on-action: #171312;
+    --color-link: var(--blush-300);
+    --color-recording: var(--clay-300);
+    --color-success: var(--sage-300);
+    --color-warning: var(--amber-300);
+    --color-danger: var(--clay-300);
+    --color-info: var(--dusk-300);
+    --color-focus: var(--blush-300);
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+    --shadow-md: 0 6px 20px rgb(0 0 0 / 0.35);
+    --shadow-lg: 0 18px 50px rgb(0 0 0 / 0.45);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --color-bg: #171312;
+  --color-surface: #221C1A;
+  --color-surface-muted: #2B2422;
+  --color-border: #3A322F;
+  --color-text: #F4EAE6;
+  --color-text-muted: var(--stone-400);
+  --color-brand: var(--blush-300);
+  --color-brand-soft: #3A2A25;
+  --color-action: var(--blush-300);
+  --color-action-hover: var(--blush-200);
+  --color-on-action: #171312;
+  --color-link: var(--blush-300);
+  --color-recording: var(--clay-300);
+  --color-success: var(--sage-300);
+  --color-warning: var(--amber-300);
+  --color-danger: var(--clay-300);
+  --color-info: var(--dusk-300);
+  --color-focus: var(--blush-300);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.3);
+  --shadow-md: 0 6px 20px rgb(0 0 0 / 0.35);
+  --shadow-lg: 0 18px 50px rgb(0 0 0 / 0.45);
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}
