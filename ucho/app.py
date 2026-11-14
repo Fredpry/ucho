@@ -483,7 +483,8 @@ class App(ctk.CTk):
             return t("Recording"), "recording"
         if d.recording:
             return t("Dictating"), "recording"
-        queued = f"  ·  {t('Queued ({n})', n=m.queued)}" if m.queued else ""
+        # The number waiting; cards and the transcript screen show a position instead.
+        queued = f"  ·  {t('{n} waiting', n=m.queued)}" if m.queued else ""
         if m.transcribing:
             return t("Transcribing {percent}%", percent=int(m.progress * 100)) + queued, "working"
         if m.summarizing:
@@ -532,20 +533,25 @@ class App(ctk.CTk):
         self.after(RETENTION_CHECK_MS, self._retention_tick)
 
     def run_retention(self) -> None:
-        """Removes expired audio (Settings: "Delete audio after"); a no-op when set to never.
+        """Removes expired audio (Settings: "Delete audio after") and leftovers of failed deletions.
 
         The folders are selected on a worker thread (it reads every meta.json);
         the files are deleted on the UI thread, where each session is checked
         again against the meeting controller, so a transcription started in the
-        meantime is never touched.
+        meantime is never touched. Leftovers (tombstone folders, see
+        retention.delete_session) are not sessions any more and go on the worker.
         """
         self._retention_last = time.monotonic()
         days = retention.retention_days(self.settings["audio_retention_days"])
-        if not days:
-            return
         folder = self.settings.recordings_dir
 
         def work():
+            try:
+                retention.remove_leftovers(folder)
+            except Exception as error:
+                log.error("Removing leftovers of deleted recordings failed (%s)", type(error).__name__)
+            if not days:
+                return
             try:
                 selected = retention.select_expired(folder, days)
             except Exception as error:

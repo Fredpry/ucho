@@ -485,6 +485,16 @@ def transcribe_file(
     return drain(iter_transcribe_file(file, engine, speaker, language, progress, cancel, weight))
 
 
+def new_report() -> dict:
+    """How a transcription run ended, filled in by the step functions below.
+
+    `cancelled`: stopped before every chunk was processed; `errors`: chunks
+    the model failed on (they are skipped, so the transcript has gaps). Only
+    a run with neither is complete (see meeting.py and retention.py).
+    """
+    return {"cancelled": False, "errors": 0}
+
+
 def iter_transcribe_file(
     file: Path,
     engine: Engine,
@@ -493,8 +503,12 @@ def iter_transcribe_file(
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
     weight: tuple[float, float] = (0.0, 1.0),
+    report: dict | None = None,
 ) -> Steps:
-    """`transcribe_file` as steps: yields after every chunk sent to the model."""
+    """`transcribe_file` as steps: yields after every chunk sent to the model.
+
+    `report` (see `new_report`) records a cancel and failed chunks.
+    """
     audio, sr = sf.read(str(file), dtype="float32", always_2d=False)
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -523,6 +537,8 @@ def iter_transcribe_file(
     segments: list[Segment] = []
     for i, (begin, end) in enumerate(ranges):
         if cancel is not None and cancel.is_set():
+            if report is not None:
+                report["cancelled"] = True
             break
 
         offset = begin / SAMPLE_RATE
@@ -537,6 +553,8 @@ def iter_transcribe_file(
             result = engine.generate(chunk, language)
         except Exception as error:
             log.exception("Transcription error in chunk %d of file %s", i, file.name)
+            if report is not None:
+                report["errors"] = report.get("errors", 0) + 1
             if progress:
                 progress(weight_from + span * (i + 1) / len(ranges),
                          f"[segment {i + 1} error: {error}]")
@@ -609,8 +627,12 @@ def iter_transcribe_session(
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
     status: Callable[[str], None] | None = None,
+    report: dict | None = None,
 ) -> Steps:
     """All tracks of a session as steps (one per chunk). Returns the merged segments.
+
+    `report` (see `new_report`) says whether the run was cancelled or had
+    failed chunks: the segments alone do not tell a partial transcript apart.
 
     `engine` is loaded here if needed and NOT released: the caller owns it
     (the shared engine keeps it when dictation uses the same model).
@@ -634,10 +656,12 @@ def iter_transcribe_session(
     results: list[list[Segment]] = []
     for i, (name, file) in enumerate(to_do):
         if cancel is not None and cancel.is_set():
+            if report is not None:
+                report["cancelled"] = True
             break
         segments = yield from iter_transcribe_file(
             Path(file), engine, speakers.get(name, name), language,
-            progress=progress, cancel=cancel, weight=(i * step, (i + 1) * step),
+            progress=progress, cancel=cancel, weight=(i * step, (i + 1) * step), report=report,
         )
         results.append(segments)
     return merge_tracks(*results)

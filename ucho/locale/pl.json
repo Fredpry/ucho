@@ -161,7 +161,8 @@
   "About": "O programie",
   "After stopping": "Po zatrzymaniu",
   "All recordings": "Wszystkie nagrania",
-  "Queued ({n})": "W kolejce ({n})",
+  "Queued, #{n}": "Nr {n} w kolejce",
+  "{n} waiting": "Czeka: {n}",
   "Waiting in the queue: the transcription starts when the one before it finishes.": "Czeka w kolejce: transkrypcja ruszy, gdy skończy się poprzednia.",
   "Appearance and windows": "Wygląd i okna",
   "Audio, transcripts and settings stay on this computer. Ucho sends nothing anywhere.": "Nagrania, transkrypty i ustawienia zostają na tym komputerze. Ucho nigdzie niczego nie wysyła.",
@@ -244,9 +245,9 @@
   "Delete audio after": "Usuwaj nagrania audio po",
   "Never": "Nigdy",
   "{n} days": "{n} dniach",
-  "Only the audio files of recordings that already have a transcript. Transcripts and summaries stay. Ucho checks this at start and once a day.": "Dotyczy tylko plików audio nagrań, które mają już transkrypt. Transkrypty i podsumowania zostają. Ucho sprawdza to przy starcie i raz dziennie.",
+  "Only the audio files of recordings with a complete transcript (not stopped halfway). Transcripts and summaries stay. Ucho checks this at start and once a day.": "Dotyczy tylko plików audio nagrań z pełnym transkryptem (niezatrzymanym w połowie). Transkrypty i podsumowania zostają. Ucho sprawdza to przy starcie i raz dziennie.",
   "Delete old audio?": "Usunąć stare pliki audio?",
-  "Recordings with a transcript whose audio is older than {days} days: {n}. Their audio files will be deleted now. Transcripts and summaries stay. This cannot be undone.": "Nagrania z transkryptem, których pliki audio są starsze niż {days} dni: {n}. Ich pliki audio zostaną usunięte od razu, a transkrypty i podsumowania pozostaną. Tego nie da się cofnąć.",
+  "Recordings with a complete transcript whose audio is older than {days} days: {n}. Their audio files will be deleted now. Transcripts and summaries stay. This cannot be undone.": "Nagrania z pełnym transkryptem, których pliki audio są starsze niż {days} dni: {n}. Ich pliki audio zostaną usunięte od razu, a transkrypty i podsumowania pozostaną. Tego nie da się cofnąć.",
   "Delete audio": "Usuń pliki audio",
   "Run the first-start setup again": "Uruchom ponownie konfigurację początkową",
   "Same as Windows": "Jak w Windows",
@@ -307,5 +308,7 @@
   "{shortcut} is taken by another program (code {code}).": "{shortcut} jest zajęty przez inny program (kod {code}).",
   "{shortcut} starts and ends a dictation, Esc cancels it. The text goes where the cursor is.": "{shortcut} zaczyna i kończy dyktowanie, Esc je anuluje. Tekst trafia tam, gdzie jest kursor.",
   "{shortcut} — speak, press again — insert text": "{shortcut}: mów, naciśnij drugi raz, żeby wstawić tekst",
-  "Space": "Spacja"
+  "Space": "Spacja",
+  "The recording was only partly deleted. The rest is in the folder {folder}. Ucho deletes it at the next start; you can also close the programs that use it and delete the folder yourself.": "Nagranie usunięto tylko częściowo. Reszta jest w folderze {folder}. Ucho usunie go przy następnym uruchomieniu. Możesz też zamknąć programy, które go używają, i usunąć folder samodzielnie.",
+  "The recordings folder could not be read. The setting was not changed.": "Nie udało się odczytać folderu z nagraniami. Ustawienie się nie zmieniło."
 }

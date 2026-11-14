@@ -27,8 +27,8 @@ class FakeEngine:
         return job
 
     def transcribe(self, files, model, device, language, progress=None, status=None,
-                   on_done=None, on_error=None):
-        return self._job("transcribe", files=files, on_done=on_done, on_error=on_error)
+                   on_done=None, on_error=None, report=None):
+        return self._job("transcribe", files=files, on_done=on_done, on_error=on_error, report=report)
 
     def exclusive(self, fn, name, on_done=None, on_error=None, reload=True):
         return self._job(name, on_done=on_done, on_error=on_error)
@@ -58,10 +58,12 @@ class FakeApp:
 @pytest.fixture
 def make(monkeypatch, tmp_path):
     monkeypatch.setattr(meeting_mod.transcribe, "model_downloaded", lambda _m: True)
-    monkeypatch.setattr(meeting_mod, "save_results", lambda *_a, **_k: None)
+    saved: list = []
+    monkeypatch.setattr(meeting_mod, "save_results", lambda folder, segments, meta: saved.append(meta))
 
     def factory(summary: bool = False):
         app = FakeApp(summary)
+        app.saved = saved
         controller = meeting_mod.MeetingController(app)
         events: list = []
         controller.listen(lambda event, data: events.append((event, data)))
@@ -198,3 +200,69 @@ def test_in_use_covers_recording_running_and_queued(make, tmp_path):
     assert m.dequeue(b) and not m.in_use(b)
     m.recording, m.recording_dir = False, None
     assert not m.in_use(c)
+
+
+def test_queue_lookups_compare_resolved_paths(make, tmp_path):
+    app, m, _events = make()
+    a, b = _folder(tmp_path, "a"), _folder(tmp_path, "b")
+    _start(m, a)
+    _start(m, b)
+    other_spelling = tmp_path / "x" / ".." / "b"
+    assert m.queue_position(other_spelling) == 1
+    assert _start(m, other_spelling) and m.queued == 1  # not queued twice
+    assert m.is_active(tmp_path / "." / "a")
+    assert m.dequeue(other_spelling) and m.queued == 0
+
+
+def _report_run(make, tmp_path, **report):
+    app, m, _events = make()
+    a = _folder(tmp_path, "a")
+    _start(m, a)
+    job = app.engine.jobs[-1]
+    job.report.update(report)
+    _transcribed(job)
+    return app.saved[-1]
+
+
+def test_complete_run_is_marked_complete(make, tmp_path):
+    meta = _report_run(make, tmp_path)
+    assert meta["transcript_complete"] is True
+    assert "transcription_cancelled" not in meta and "transcription_errors" not in meta
+
+
+def test_cancelled_run_is_marked(make, tmp_path):
+    meta = _report_run(make, tmp_path, cancelled=True)
+    assert meta["transcript_complete"] is False and meta["transcription_cancelled"] is True
+
+
+def test_run_with_failed_chunks_is_not_complete(make, tmp_path):
+    meta = _report_run(make, tmp_path, errors=2)
+    assert meta["transcript_complete"] is False and meta["transcription_errors"] == 2
+
+
+def test_transcribe_again_replaces_old_completion_keys(make, tmp_path):
+    app, m, _events = make()
+    a = _folder(tmp_path, "a")
+    m.transcribe(a, {"microphone": a / "microphone.flac"},
+                 {"name": "a", "transcript_complete": False, "transcription_cancelled": True})
+    _transcribed(app.engine.jobs[-1])
+    assert app.saved[-1]["transcript_complete"] is True
+    assert "transcription_cancelled" not in app.saved[-1]
+
+
+def test_error_before_the_summary_job_does_not_block_the_queue(make, tmp_path, monkeypatch, caplog):
+    app, m, events = make(summary=True)
+    a, b = _folder(tmp_path, "a"), _folder(tmp_path, "b")
+    _start(m, a)
+    _start(m, b)
+
+    def broken(*_args):
+        raise RuntimeError("summary module broken")
+
+    monkeypatch.setattr(m, "summarize", broken)
+    with caplog.at_level("ERROR", logger="ucho.meeting"):
+        _transcribed(app.engine.jobs[-1])
+    assert not m.summarizing and not m.transcribing
+    assert "Finishing the transcription failed" in caplog.text
+    app.pump()
+    assert _files(app) == ["a", "b"] and m.is_active(b)

@@ -134,11 +134,22 @@ def audio_tracks(session: Path) -> dict[str, Path]:
     return tracks
 
 
+# A session being deleted is first renamed to this prefix plus a random part
+# (retention.delete_session); what is left after a failed deletion is not a
+# recording any more and must not show up anywhere.
+TOMBSTONE_PREFIX = ".ucho-deleted-"
+
+
+def is_tombstone(name: str) -> bool:
+    return name.startswith(TOMBSTONE_PREFIX)
+
+
 def list_sessions(recordings_dir: Path) -> list[Path]:
     """Session folders, newest first (names start with the timestamp)."""
     if not recordings_dir.is_dir():
         return []
-    return sorted((s for s in recordings_dir.iterdir() if s.is_dir()), reverse=True)
+    return sorted((s for s in recordings_dir.iterdir() if s.is_dir() and not is_tombstone(s.name)),
+                  reverse=True)
 
 
 def date_from_name(folder_name: str) -> str:

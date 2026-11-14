@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from ucho import retention, session
-from ucho.archive import Archive
+from ucho import merge, retention, session
+from ucho.archive import Archive, ArchiveError
 
 NOW = datetime(2026, 11, 14, 12, 0)
 
@@ -163,16 +163,136 @@ def test_deleted_session_disappears_from_search(tmp_path):
     assert [m.session.name for m in archive.find("")] == ["2026-11-01_10-00_Standup"]
 
 
+def test_delete_with_an_open_file_deletes_nothing(tmp_path):
+    root = tmp_path / "recordings"
+    folder = _session(root, "2026-11-02_10-00_Budget")
+    before = sorted(p.name for p in folder.iterdir())
+    if sys.platform != "win32":
+        pytest.skip("only Windows refuses to rename a folder with an open file")
+    with open(folder / "meeting.flac", "rb"):  # e.g. a media player
+        with pytest.raises(retention.DeleteError) as caught:
+            retention.delete_session(root, folder)
+    assert not isinstance(caught.value, retention.PartialDeleteError)
+    assert sorted(p.name for p in folder.iterdir()) == before
+    assert session.list_sessions(root) == [folder]
+
+
+def _partial_rmtree(path, onexc=None):
+    """rmtree that deletes one file and then hits a file another program holds."""
+    files = sorted(p for p in Path(path).iterdir() if p.is_file())
+    files[0].unlink()
+    raise PermissionError(13, "in use", str(files[1]))
+
+
+def test_partly_deleted_session_leaves_the_archive_and_is_cleaned_up_later(tmp_path, monkeypatch):
+    root = tmp_path / "recordings"
+    keep = _session(root, "2026-11-01_10-00_Standup", text="Weekly standup notes.")
+    folder = _session(root, "2026-11-02_10-00_Budget", text="Steel price went up.")
+    archive = Archive(root)
+    assert archive.search("steel", 10)
+    monkeypatch.setattr(retention.shutil, "rmtree", _partial_rmtree)
+    with pytest.raises(retention.PartialDeleteError) as caught:
+        retention.delete_session(root, folder)
+    rest = caught.value.rest
+    assert not folder.exists() and rest.parent == root and rest.is_dir()
+    assert session.is_tombstone(rest.name) and "Budget" not in rest.name
+    # Neither the list, the search nor the MCP id lookup sees the remains.
+    assert session.list_sessions(root) == [keep]
+    assert archive.search("steel", 10) == []
+    assert [m.session for m in archive.find("")] == [keep]
+    with pytest.raises(ArchiveError):
+        archive.session(rest.name)
+    assert retention.select_expired(root, 1, NOW) == [keep]
+    # Later, with the file no longer in use.
+    monkeypatch.undo()
+    assert retention.remove_leftovers(root) == 1
+    assert not rest.exists() and keep.is_dir()
+
+
+def test_remove_leftovers_touches_only_tombstones(tmp_path):
+    root = tmp_path / "recordings"
+    keep = _session(root, "2026-11-01_10-00_Standup")
+    outside = tmp_path / "Documents"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="utf-8")
+    _junction(root / (session.TOMBSTONE_PREFIX + "link"), outside)
+    assert retention.remove_leftovers(root) == 0
+    assert keep.is_dir() and (outside / "keep.txt").exists()
+
+
 # --- audio retention ------------------------------------------------------------------
 
 
-def test_retention_days_parsing():
+def test_retention_days_parsing(caplog, monkeypatch):
+    monkeypatch.setattr(retention, "_reported_values", set())
     assert retention.retention_days(0) == 0
     assert retention.retention_days(None) == 0
-    assert retention.retention_days("30") == 30
-    assert retention.retention_days(-5) == 0
-    assert retention.retention_days("never") == 0
     assert retention.retention_days(14) == 14
+    assert retention.retention_days(365) == 365
+    with caplog.at_level("WARNING", logger="ucho.retention"):
+        # Only non-negative integers count; everything else means never.
+        for odd in (True, False, "30", "7.5", 7.5, -5, "never", [7]):
+            assert retention.retention_days(odd) == 0, odd
+        retention.retention_days(True)  # reported once per value
+    assert caplog.text.count("True is not a whole number") == 1
+    assert "'7.5' is not a whole number" in caplog.text
+
+
+def _transcribed(root, name, segments, **flags):
+    """A session saved the way meeting.py saves it, with the given completion keys."""
+    folder = root / name
+    folder.mkdir(parents=True)
+    for file in ("microphone.flac", "meeting.flac"):
+        (folder / file).write_bytes(b"fLaC synthetic")
+    meta = {"name": name.split("_")[-1], "date": (NOW - timedelta(days=40)).strftime("%Y-%m-%d %H:%M")}
+    meta.update(flags)
+    merge.save_results(folder, segments, meta)
+    return folder
+
+
+SEGMENTS = [merge.Segment(1.0, 3.0, "The budget for the first quarter.", "me")]
+
+
+def test_empty_transcript_keeps_its_audio(tmp_path):
+    root = tmp_path / "recordings"
+    # The reviewer's case: save_results always writes a header, even for no segments.
+    empty = _transcribed(root, "2026-10-01_10-00_Empty", [], transcript_complete=True)
+    legacy_empty = _transcribed(root, "2026-10-02_10-00_Old-empty", [])
+    assert retention.has_transcript(empty) and retention.has_transcript(legacy_empty)
+    assert retention.select_expired(root, 7, NOW) == []
+    assert retention.apply_retention(root, 7, now=NOW) == (0, 0)
+
+
+def test_cancelled_or_failed_transcript_keeps_its_audio(tmp_path):
+    root = tmp_path / "recordings"
+    _transcribed(root, "2026-10-01_10-00_Stopped", SEGMENTS, transcript_complete=False,
+                 transcription_cancelled=True)
+    _transcribed(root, "2026-10-02_10-00_Gaps", SEGMENTS, transcript_complete=False,
+                 transcription_errors=3)
+    # A hand-edited flag does not override the cancel marker.
+    _transcribed(root, "2026-10-03_10-00_Odd", SEGMENTS, transcript_complete=True,
+                 transcription_cancelled=True)
+    _transcribed(root, "2026-10-04_10-00_Text", SEGMENTS, transcript_complete="yes")
+    assert retention.select_expired(root, 7, NOW) == []
+
+
+def test_complete_transcript_loses_its_audio(tmp_path):
+    root = tmp_path / "recordings"
+    folder = _transcribed(root, "2026-10-01_10-00_Done", SEGMENTS, transcript_complete=True)
+    assert retention.select_expired(root, 7, NOW) == [folder]
+    assert retention.apply_retention(root, 7, now=NOW) == (1, 2)
+
+
+def test_legacy_sessions_need_at_least_one_utterance(tmp_path):
+    root = tmp_path / "recordings"
+    with_segments = _transcribed(root, "2026-10-01_10-00_Old", SEGMENTS)
+    # No segments in meta.json (hand-made or very old), utterances only in transcript.md.
+    md_only = _session(root, "2026-10-02_10-00_Md-only", NOW - timedelta(days=40), meta={"name": "x"})
+    (md_only / "transcript.md").write_text(
+        "# Transcript\n\n---\n\n**[00:00:01] Me:** We start.\n", encoding="utf-8")
+    header_only = _session(root, "2026-10-03_10-00_Header", NOW - timedelta(days=40), meta={"name": "y"})
+    assert sorted(retention.select_expired(root, 7, NOW)) == sorted([with_segments, md_only])
+    assert header_only.is_dir() and len(retention.audio_files(header_only)) == 2
 
 
 def test_selection_by_age_transcript_and_activity(tmp_path):
@@ -195,7 +315,8 @@ def test_selection_by_age_transcript_and_activity(tmp_path):
 
 def test_age_falls_back_to_the_folder_name(tmp_path):
     root = tmp_path / "recordings"
-    folder = _session(root, "2026-10-01_10-00_No-date", meta={"name": "No date"})
+    folder = _session(root, "2026-10-01_10-00_No-date", meta={"name": "No date", "segments": [
+        {"start": 1, "end": 2, "text": "Hello.", "speaker": "me"}]})
     assert retention.recorded_at(folder) == datetime(2026, 10, 1, 10, 0)
     assert retention.select_expired(root, 30, NOW) == [folder]
 
@@ -269,3 +390,27 @@ def test_retention_logs_counts_not_names(tmp_path, caplog):
         retention.apply_retention(root, 30, now=NOW)
     assert "removed 2 audio files from 1 sessions" in caplog.text
     assert "Secret" not in caplog.text
+
+
+def test_selection_for_the_settings_screen_runs_off_the_calling_thread(tmp_path, monkeypatch):
+    import threading
+
+    root = tmp_path / "recordings"
+    folder = _session(root, "2026-10-01_10-00_Old", NOW - timedelta(days=44))
+    threads, delivered = [], []
+    real = retention.select_expired
+
+    def select(recordings_dir, days, now=None, active=None):
+        threads.append(threading.current_thread())
+        return real(recordings_dir, days, NOW, active)
+
+    monkeypatch.setattr(retention, "select_expired", select)
+    retention.select_expired_in_background(root, 30, delivered.append).join(10)
+    assert delivered == [[folder]] and threads[0] is not threading.current_thread()
+
+    def broken(*_args, **_kwargs):
+        raise OSError("network drive gone")
+
+    monkeypatch.setattr(retention, "select_expired", broken)
+    retention.select_expired_in_background(root, 30, delivered.append).join(10)
+    assert delivered[-1] is None

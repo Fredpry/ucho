@@ -8,7 +8,8 @@ configured recordings directory, and must not be a symlink or junction
 (a link inside the archive could point anywhere on the disk).
 
 Retention removes only the audio tracks (.flac/.wav) of sessions that have a
-finished transcript and are older than the chosen number of days; the
+complete transcript (`transcript_complete`) and are older than the chosen
+number of days; the
 transcript, the summary and `meta.json` stay, and `meta.json` gets
 `audio_removed` so the app can say so instead of offering a player or
 "Transcribe again". Sessions the app is recording, transcribing or
@@ -23,14 +24,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import stat
+import threading
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 from . import session
-from .merge import META_FILE, TRANSCRIPT_MD
+from .merge import META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_MD, TRANSCRIPTION_CANCELLED
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +46,19 @@ AUDIO_REMOVED_KEY = "audio_removed"
 
 
 class DeleteError(Exception):
-    """A path that must not be deleted, or a deletion that failed."""
+    """A path that must not be deleted, or a deletion that failed (nothing was deleted)."""
+
+
+class PartialDeleteError(DeleteError):
+    """The session was taken out of the archive, but some of its files could not be deleted.
+
+    `rest` is the tombstone folder that still holds them (not listed as a
+    session); `remove_leftovers` tries again later.
+    """
+
+    def __init__(self, message: str, rest: Path):
+        super().__init__(message)
+        self.rest = rest
 
 
 def _is_link(path: Path) -> bool:
@@ -90,27 +106,85 @@ def _clear_readonly_and_retry(function, path, _error) -> None:
     function(path)
 
 
+def _error_text(error: OSError) -> str:
+    # The type and code only: the message would contain the path, i.e. the meeting title.
+    return f"{type(error).__name__} (winerror {getattr(error, 'winerror', None)})"
+
+
 def delete_session(recordings_dir: Path, folder: Path) -> None:
-    """Deletes a session folder with all its files, permanently. Raises DeleteError."""
+    """Deletes a session folder with all its files, permanently.
+
+    Raises DeleteError when nothing was deleted, PartialDeleteError when only
+    part of it was. rmtree deletes file by file and stops at the first file
+    another program has open, which would leave half a recording behind. So
+    the folder is first renamed to a tombstone name in the same folder: Windows refuses that rename while any file inside is open, and
+    then nothing has been touched. After the rename the session is gone from
+    the archive (`session.list_sessions` skips tombstones) even if a file
+    cannot be deleted.
+    """
     target = session_folder(recordings_dir, folder)
+    tombstone = target.parent / f"{session.TOMBSTONE_PREFIX}{uuid.uuid4().hex[:12]}"
+    try:
+        target.rename(tombstone)
+    except OSError as error:
+        raise DeleteError(_error_text(error)) from error
     try:
         # rmtree does not follow symlinks or junctions inside the folder; it removes the link.
-        shutil.rmtree(target, onexc=_clear_readonly_and_retry)
+        shutil.rmtree(tombstone, onexc=_clear_readonly_and_retry)
     except OSError as error:
-        raise DeleteError(f"{type(error).__name__} (winerror {getattr(error, 'winerror', None)})") from error
+        if not tombstone.exists():
+            # Removed meanwhile by `remove_leftovers` on the retention thread.
+            log.info("Deleted 1 session folder")
+            return
+        log.warning("Session folder only partly deleted: %s; the rest is in %s",
+                    _error_text(error), tombstone.name)
+        raise PartialDeleteError(_error_text(error), tombstone) from error
     log.info("Deleted 1 session folder")
+
+
+def remove_leftovers(recordings_dir: Path) -> int:
+    """Deletes tombstones left by deletions that failed halfway. Returns how many went."""
+    try:
+        root = Path(recordings_dir).resolve(strict=True)
+        candidates = [p for p in root.iterdir() if session.is_tombstone(p.name)]
+    except (OSError, RuntimeError):
+        return 0
+    removed = 0
+    for folder in candidates:
+        if _is_link(folder) or not folder.is_dir():
+            continue
+        try:
+            shutil.rmtree(folder, onexc=_clear_readonly_and_retry)
+            removed += 1
+        except OSError:
+            pass  # still open somewhere: next time
+    if removed:
+        log.info("Removed %d leftover folders of deleted recordings", removed)
+    return removed
 
 
 # --- audio retention ------------------------------------------------------------------
 
 
+_reported_values: set[str] = set()
+
+
 def retention_days(value) -> int:
-    """The setting as whole days; 0 (never) for anything that is not a positive number."""
-    try:
-        days = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return days if days > 0 else 0
+    """The setting as whole days; 0 (never) for anything but a non-negative integer.
+
+    settings.json can be edited by hand. Values like `true` (which int() made
+    1 day), "30" or 7.5 are not guessed at: they mean never, and the log says
+    so once per value.
+    """
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if value is not None:
+        text = repr(value)[:40]
+        if text not in _reported_values:
+            _reported_values.add(text)
+            log.warning("audio_retention_days %s is not a whole number of days >= 0 - audio is kept",
+                        text)
+    return 0
 
 
 def audio_files(folder: Path) -> list[Path]:
@@ -123,12 +197,47 @@ def audio_files(folder: Path) -> list[Path]:
 
 
 def has_transcript(folder: Path) -> bool:
-    """A finished transcript: transcript.md (or the v0.1 name) exists and is not empty."""
+    """transcript.md (or the v0.1 name) exists and is not empty; see also `transcript_complete`."""
     file = session.find_file(folder, TRANSCRIPT_MD)
     try:
         return file is not None and file.is_file() and file.stat().st_size > 0
     except OSError:
         return False
+
+
+# An utterance line of transcript.md: "**[00:01:02] Me:** text" (merge.as_markdown).
+_UTTERANCE = re.compile(r"^\*\*\[\d{1,3}:\d{2}:\d{2}\]", re.MULTILINE)
+
+
+def _transcript_has_utterances(folder: Path) -> bool:
+    file = session.find_file(folder, TRANSCRIPT_MD)
+    try:
+        return file is not None and bool(_UTTERANCE.search(file.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return False
+
+
+def transcript_complete(folder: Path, meta: dict) -> bool:
+    """True when the transcript can stand in for the audio.
+
+    transcript.md alone proves nothing: it always has a header, and Stop
+    during a transcription saves the segments so far as a normal result. So
+    meeting.py records `transcript_complete` in meta.json, true only for a
+    run that was neither cancelled nor had failed chunks; it is required
+    here, together with at least one segment.
+
+    Sessions transcribed before that flag existed (including v0.1) cannot
+    tell a cancelled run from a finished one. For them the rule is the
+    conservative one that can still be checked: at least one utterance, in
+    meta.json or in transcript.md. An empty or header-only transcript keeps
+    its audio; an old transcript cut short by Stop cannot be detected and is
+    treated like a finished one.
+    """
+    if TRANSCRIPT_COMPLETE in meta:
+        if meta.get(TRANSCRIPT_COMPLETE) is not True or meta.get(TRANSCRIPTION_CANCELLED):
+            return False
+        return bool(session.segments(meta))
+    return bool(session.segments(meta)) or _transcript_has_utterances(folder)
 
 
 def recorded_at(folder: Path, meta: dict | None = None) -> datetime | None:
@@ -163,6 +272,8 @@ def audio_expired(folder: Path, days: int, now: datetime | None = None,
     meta = session.read_meta(folder)
     if meta_file.exists() and not meta:
         return False  # unreadable meta.json: the flag could not be written, leave it alone
+    if not transcript_complete(folder, meta):
+        return False
     when = recorded_at(folder, meta)
     now = now or datetime.now()
     return when is not None and now - when >= timedelta(days=days)
@@ -182,6 +293,27 @@ def select_expired(recordings_dir: Path, days: int, now: datetime | None = None,
         if audio_expired(folder, days, now, active):
             result.append(folder)
     return result
+
+
+def select_expired_in_background(recordings_dir: Path, days: int,
+                                 deliver: Callable[[list[Path] | None], None]) -> threading.Thread:
+    """`select_expired` on a worker thread: it reads every meta.json, too slow for the UI thread.
+
+    `deliver` gets the list, or None when the selection failed, on the worker
+    thread; the UI posts it to its own thread and re-checks `active` there.
+    """
+    def work() -> None:
+        try:
+            selected = select_expired(recordings_dir, days)
+        except Exception as error:
+            # The type only: messages of file errors contain paths, i.e. meeting titles.
+            log.error("Selecting expired audio failed (%s)", type(error).__name__)
+            selected = None
+        deliver(selected)
+
+    thread = threading.Thread(target=work, name="retention-select", daemon=True)
+    thread.start()
+    return thread
 
 
 def _mark_audio_removed(folder: Path, when: datetime) -> None:

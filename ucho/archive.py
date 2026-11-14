@@ -74,19 +74,51 @@ def fold_map(text: str) -> tuple[str, list[int]]:
     return "".join(folded), origin
 
 
+def is_token_char(char: str) -> bool:
+    """A character the FTS5 unicode61 tokenizer keeps inside a token.
+
+    Its default `categories` are "L* N* Co": letters, numbers and private
+    use. Everything else separates tokens, also "_" (which `\\w` counts as a
+    word character), so "q1" finds "budżet_q1" and must be highlighted there.
+    """
+    category = unicodedata.category(char)
+    return category[0] in "LN" or category == "Co"
+
+
+def tokens(folded: str) -> list[str]:
+    """The tokens of a folded text, split the way FTS5 unicode61 splits them."""
+    result, current = [], []
+    for char in folded:
+        if is_token_char(char):
+            current.append(char)
+        elif current:
+            result.append("".join(current))
+            current = []
+    if current:
+        result.append("".join(current))
+    return result
+
+
 def match_spans(text: str, words: list[str]) -> list[tuple[int, int]]:
     """(start, end) offsets in the original `text` of words that start with a query word.
 
-    The same rule as the search: folded, a prefix of a word. 'zlot' marks
-    'Złot' in 'Złotych', 'lodz' marks 'Łódź'.
+    The same rule as the search: folded, a prefix of a token. 'zlot' marks
+    'Złot' in 'Złotych', 'lodz' marks 'Łódź', 'q1' marks 'q1' in 'budżet_q1'.
+    Combining marks right after the match ('ź' written as 'z' plus an accent)
+    belong to it.
     """
     folded, origin = fold_map(text)
     spans = []
     for word in {fold(w) for w in words if w}:
-        for found in re.finditer(r"(?<!\w)" + re.escape(word), folded):
-            start, end = found.start(), found.end()
-            if end > start:
-                spans.append((origin[start], origin[end - 1] + 1))
+        # Lookahead: every start position, also where matches would overlap.
+        for found in re.finditer("(?=" + re.escape(word) + ")", folded):
+            start, end = found.start(), found.start() + len(word)
+            if start > 0 and is_token_char(folded[start - 1]):
+                continue  # inside a token, not at its start
+            last = origin[end - 1] + 1
+            while last < len(text) and unicodedata.combining(text[last]):
+                last += 1
+            spans.append((origin[start], last))
     return sorted(set(spans))
 
 
@@ -95,9 +127,9 @@ def _like_escape(word: str) -> str:
 
 
 def _matches_words(folded: str, words: list[str]) -> bool:
-    """Every query word is a prefix of a word in the folded text (the FTS5 rule)."""
-    tokens = re.findall(r"\w+", folded)
-    return all(any(token.startswith(word) for token in tokens) for word in words)
+    """Every query word is a prefix of a token in the folded text (the FTS5 rule)."""
+    found = tokens(folded)
+    return all(any(token.startswith(word) for token in found) for word in words)
 
 
 @dataclass
@@ -135,7 +167,7 @@ class Archive:
         if not isinstance(id_, str) or not id_ or re.search(r"[\\/:]|\.\.", id_):
             raise ArchiveError(f"Invalid id: {id_!r}")
         path = self.folder / id_
-        if not path.is_dir():
+        if sessions.is_tombstone(id_) or not path.is_dir():
             raise ArchiveError(f"No meeting with id {id_!r}. Use list_meetings.")
         return path
 
@@ -252,8 +284,8 @@ class Archive:
 
         result = []
         for session in self.sessions():
-            title_words = re.findall(r"\w+", titles.get(session.name, "") + " "
-                                     + fold(session.name.replace("-", " ").replace("_", " ")))
+            title_words = tokens(titles.get(session.name, "") + " "
+                                 + fold(session.name.replace("-", " ").replace("_", " ")))
             title_match = all(any(t.startswith(w) for t in title_words) for w in words)
             session_hits = by_session.get(session.name, [])
             if title_match or session_hits:
