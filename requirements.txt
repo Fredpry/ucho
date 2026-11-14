@@ -1,6 +1,6 @@
 # Wersje sprawdzone na Windows 11, Python 3.12 (listopad 2026).
 # Versions tested on Windows 11, Python 3.12 (November 2026).
-openvino-genai==2026.3.1.0
+openvino-genai==2026.4.1.0
 openvino==2026.3.1
 openvino-tokenizers==2026.3.1.0
 huggingface_hub==1.30.0
