@@ -24,6 +24,14 @@ param(
     [switch]$Pause                 # wait for Enter before closing (install.cmd) / czekaj na Enter przed zamknieciem
 )
 
+# First thing: tell install.cmd that the script did start (it shows its own
+# result and waits for Enter from here on). Without this file install.cmd
+# knows that PowerShell could not run the script at all. A file in TEMP, not
+# install.log: the log may be impossible to write in a read-only folder.
+if ($env:UCHO_INSTALL_MARKER) {
+    try { [System.IO.File]::WriteAllText($env:UCHO_INSTALL_MARKER, 'started') } catch { }
+}
+
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $Root  # "-c from ucho..." imports need the program folder as working directory
@@ -43,7 +51,9 @@ $DefaultLlmModel = 'OpenVINO/Qwen3-8B-int4-ov'
 $Tmp = Join-Path $env:TEMP 'ucho-installer'
 
 $PL = (Get-UICulture).TwoLetterISOLanguageName -eq 'pl'
-function T($pl, $en) { if ($PL) { return $pl } else { return $en } }
+# Parameter names differ from $PL on purpose: PowerShell names are case-insensitive,
+# so a parameter called $pl would hide the language flag (always Polish).
+function T($textPl, $textEn) { if ($PL) { return $textPl } else { return $textEn } }
 
 function Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
 function Ok($text)   { Write-Host "    [OK] $text" -ForegroundColor Green }
@@ -77,16 +87,53 @@ function Test-Interactive {
 
 # Runs a program and copies its output into install.log as well. Windows
 # PowerShell's transcript does not record what a native program writes
-# straight to the console, and pip errors are what a bug report needs. pip
-# shows no progress bar when its output is piped, only the package names.
+# straight to the console, and errors (pip, winget, a failed model download)
+# are what a bug report needs. Every native program the installer depends on
+# runs through here. pip shows no progress bar when its output is piped, only
+# the package names; the model download turns its bars off (model.py below).
+# A progress line: bar characters (U+2580..U+259F), "10 MB / 25 MB" or "42%".
+$ProgressLine = '[\u2580-\u259F]|\d\s*[KMGT]?i?B\s*/\s*[\d.,]+\s*[KMGT]?i?B|^\s*\d{1,3}([.,]\d+)?\s*%\s*$'
 function Invoke-Logged([string]$Exe, [string[]]$Arguments) {
     $previous = $ErrorActionPreference
     # With 'Stop' the first line on stderr (e.g. a pip warning) would end the script.
     $ErrorActionPreference = 'Continue'
+    # Piped output is decoded with the console code page: Python writes UTF-8
+    # (PYTHONIOENCODING) and the console decodes UTF-8 for the duration, so
+    # Polish text from "ucho.hardware" reaches the screen and the log intact.
+    $previousIo = $env:PYTHONIOENCODING
+    $env:PYTHONIOENCODING = 'utf-8'
+    $previousEncoding = $null
+    try { $previousEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+    # Progress bars and spinners (winget) redraw a line with carriage returns,
+    # which PowerShell reads as separate lines. Spinner frames are dropped and
+    # a progress line is shown at most every 5 s (and its last state), so the
+    # window still moves and the log stays short.
+    $progress = @{ Pending = $null; Shown = [datetime]::MinValue }
     try {
-        & $Exe @Arguments 2>&1 | ForEach-Object { Write-Host "    $_" }
+        & $Exe @Arguments 2>&1 | ForEach-Object -Process {
+            # A stderr line arrives as an ErrorRecord; an empty one would print
+            # as "System.Management.Automation.RemoteException".
+            if ($_ -is [System.Management.Automation.ErrorRecord]) { $line = [string]$_.TargetObject } else { $line = [string]$_ }
+            if ($line -notmatch '\w') { return }
+            if ($line -match $ProgressLine) {
+                if (((Get-Date) - $progress.Shown).TotalSeconds -ge 5) {
+                    Write-Host "    $line"
+                    $progress.Shown = Get-Date
+                    $progress.Pending = $null
+                } else {
+                    $progress.Pending = $line
+                }
+                return
+            }
+            if ($progress.Pending) { Write-Host "    $($progress.Pending)"; $progress.Pending = $null }
+            Write-Host "    $line"
+        } -End {
+            if ($progress.Pending) { Write-Host "    $($progress.Pending)" }
+        }
     } finally {
         $ErrorActionPreference = $previous
+        $env:PYTHONIOENCODING = $previousIo
+        if ($previousEncoding) { try { [Console]::OutputEncoding = $previousEncoding } catch { } }
     }
     return $LASTEXITCODE
 }
@@ -193,7 +240,9 @@ if ($null -eq $version) {
         Fail (T 'Brak winget. Zainstaluj Pythona 3.12 z https://www.python.org/downloads/' 'winget not found. Install Python 3.12 from https://www.python.org/downloads/')
         Exit-Installer 1
     }
-    & winget install --id Python.Python.3.12 -e --scope user --silent --accept-package-agreements --accept-source-agreements
+    $code = Invoke-Logged 'winget' @('install', '--id', 'Python.Python.3.12', '-e', '--scope', 'user', '--silent',
+                                     '--accept-package-agreements', '--accept-source-agreements')
+    if ($code -ne 0) { Warn ((T 'winget zakonczyl sie kodem ' 'winget ended with code ') + $code) }
     Update-Path
     Start-Sleep -Seconds 2
     $version = Test-Python312
@@ -208,8 +257,8 @@ Ok "Python $version"
 
 Step (T 'Przygotowuje srodowisko wirtualne (.venv)' 'Preparing the virtual environment (.venv)')
 if (-not (Test-Path $VenvPy)) {
-    & py -3.12 -m venv $Venv
-    if ($LASTEXITCODE -ne 0) { Fail (T 'Nie udalo sie utworzyc .venv' 'Could not create .venv'); Exit-Installer 1 }
+    $code = Invoke-Logged 'py' @('-3.12', '-m', 'venv', $Venv)
+    if ($code -ne 0) { Fail (T 'Nie udalo sie utworzyc .venv' 'Could not create .venv'); Exit-Installer 1 }
     Ok (T 'Utworzono .venv' 'Created .venv')
 } else {
     Ok (T '.venv juz istnieje' '.venv already exists')
@@ -253,8 +302,8 @@ if (Test-Path $optOut) {
 # --- 4. Icon --------------------------------------------------------------
 
 Step (T 'Generuje ikone aplikacji' 'Generating the app icon')
-& $VenvPy -c "from ucho.icon import save_ico, draw_dictate; from pathlib import Path; save_ico(Path(r'$Icon')); save_ico(Path(r'$DictateIcon'), draw_dictate)"
-if ($LASTEXITCODE -eq 0) { Ok $Icon } else { Warn (T 'Nie udalo sie wygenerowac ikony (aplikacja zadziala bez niej)' 'Could not generate the icon (the app works without it)') }
+$code = Invoke-Logged $VenvPy @('-c', "from ucho.icon import save_ico, draw_dictate; from pathlib import Path; save_ico(Path(r'$Icon')); save_ico(Path(r'$DictateIcon'), draw_dictate)")
+if ($code -eq 0) { Ok $Icon } else { Warn (T 'Nie udalo sie wygenerowac ikony (aplikacja zadziala bez niej)' 'Could not generate the icon (the app works without it)') }
 
 # --- 5. Initial settings --------------------------------------------------
 
@@ -262,7 +311,7 @@ if ($LASTEXITCODE -eq 0) { Ok $Icon } else { Warn (T 'Nie udalo sie wygenerowac 
 # ustawienia.json to settings.json, so the user's choices and recordings folder
 # survive. The old file is kept.
 if ((-not (Test-Path $Settings)) -and (Test-Path $LegacySettings)) {
-    & $VenvPy -c "from ucho import config; config.Settings()"
+    $null = Invoke-Logged $VenvPy @('-c', 'from ucho import config; config.Settings()')
     if (Test-Path $Settings) {
         Ok (T 'Przeniesiono ustawienia z ustawienia.json do settings.json' 'Migrated ustawienia.json to settings.json')
     }
@@ -314,8 +363,8 @@ Ok ((T 'Nagrania: ' 'Recordings: ') + $Recordings)
 Step (T 'Sprawdzam sprzet i dobieram model' 'Checking the hardware and choosing the model')
 $hardwareArgs = @('-m', 'ucho.hardware', '--save')
 if (-not $newSettings) { $hardwareArgs += '--keep-choice' }
-& $VenvPy @hardwareArgs
-if ($LASTEXITCODE -ne 0) {
+$code = Invoke-Logged $VenvPy $hardwareArgs
+if ($code -ne 0) {
     Warn (T 'Nie udalo sie sprawdzic sprzetu - zostaja ustawienia domyslne' 'Hardware check failed - keeping the default settings')
 }
 
@@ -335,13 +384,57 @@ if ($device -eq 'CPU') {
 # --- 7. Models ------------------------------------------------------------
 
 # Download through the app code: the same pinned revision as in config.REVISIONS.
+# huggingface_hub's progress bars are off: piped into install.log, every redraw
+# of a bar would be a line. Instead the script prints how much of the model is
+# on the disk every 15 s, so the window shows that the download is moving, and
+# a failure ends with the traceback in the log.
 $modelScript = Join-Path $Tmp 'model.py'
 @'
+import os
+import stat
 import sys
+import threading
+
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 sys.path.insert(0, sys.argv[1])
+from ucho import config  # sets HF_HOME before huggingface_hub is imported
 from ucho.transcribe import model_path
-print(model_path(sys.argv[2], download=True))
+from huggingface_hub import constants
+
+repo, message = sys.argv[2], sys.argv[3]
+folder = os.path.join(constants.HF_HUB_CACHE, "models--" + repo.replace("/", "--"))
+
+
+def on_disk():
+    total = 0
+    for parent, _dirs, files in os.walk(folder):
+        for name in files:
+            try:
+                info = os.lstat(os.path.join(parent, name))
+            except OSError:
+                continue
+            if not stat.S_ISLNK(info.st_mode):  # snapshots may link to blobs
+                total += info.st_size
+    return total
+
+
+def report(done):
+    last = None
+    while not done.wait(15):
+        size = on_disk() // 2**20
+        if size != last:
+            print(message.format(size), flush=True)
+            last = size
+
+
+done = threading.Event()
+threading.Thread(target=report, args=(done,), daemon=True).start()
+try:
+    print(model_path(repo, download=True), flush=True)
+finally:
+    done.set()
 '@ | Out-File -FilePath $modelScript -Encoding utf8
+$progressText = T 'pobrano {0} MB' 'downloaded {0} MB'
 
 if (-not $SkipModel) {
     $size = & $VenvPy -c "from ucho import config; print(config.MODELS.get(r'$Model', {}).get('size', '?'))"
@@ -349,8 +442,8 @@ if (-not $SkipModel) {
     $size = "$size".Trim()
     if ($PL) { $size = $size -replace '\.', ',' }
     Step (T "Pobieram model $Model ($size, tylko raz)" "Downloading model $Model ($size, only once)")
-    & $VenvPy $modelScript $Root $Model
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-Logged $VenvPy @($modelScript, $Root, $Model, $progressText)
+    if ($code -ne 0) {
         Warn (T 'Pobieranie nie powiodlo sie - mozesz je powtorzyc w Ustawieniach aplikacji' 'Download failed - you can retry from the app Settings')
     } else {
         Ok (T 'Model gotowy' 'Model ready')
@@ -362,8 +455,8 @@ if (-not $SkipModel) {
 # Summaries are optional and off by default: transcription is the core of Ucho.
 if ($WithSummary) {
     Step (T "Pobieram model podsumowan $DefaultLlmModel (~5 GB, tylko raz)" "Downloading summary model $DefaultLlmModel (~5 GB, only once)")
-    & $VenvPy $modelScript $Root $DefaultLlmModel
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-Logged $VenvPy @($modelScript, $Root, $DefaultLlmModel, $progressText)
+    if ($code -ne 0) {
         Warn (T 'Pobieranie nie powiodlo sie - transkrypcja dziala, tylko bez podsumowan' 'Download failed - transcription works, just without summaries')
     } else {
         Ok (T 'Model podsumowan gotowy' 'Summary model ready')
@@ -402,7 +495,7 @@ foreach ($folder in @($desktop, $startMenu)) {
             $shortcut.Description = $item.Text
             if (Test-Path $item.Icon) { $shortcut.IconLocation = $item.Icon }
             $shortcut.Save()
-            & $VenvPy -c "from pathlib import Path; from ucho import config, winshell; winshell.set_shortcut_app_id(Path(r'$target'), config.APP_ID)"
+            $null = Invoke-Logged $VenvPy @('-c', "from pathlib import Path; from ucho import config, winshell; winshell.set_shortcut_app_id(Path(r'$target'), config.APP_ID)")
             Ok $target
         } catch {
             Warn ((T 'Nie udalo sie utworzyc skrotu: ' 'Could not create shortcut: ') + $target)

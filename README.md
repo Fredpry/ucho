@@ -34,7 +34,7 @@ Records Teams, Zoom and Meet calls and your dictation, and turns them into text 
 ## Install
 
 1. Download `Ucho-Windows.zip` from [Releases](../../releases). Right-click it, choose **Extract All…**, change the destination to `C:\Users\<you>` and click **Extract**. Ucho lands in `C:\Users\<you>\Ucho\app`, outside OneDrive and next to your recordings.
-2. Open that folder and double-click **`install.cmd`**. No admin rights needed. It takes 5 to 15 minutes, and at the end it prints the command that connects Ucho to your AI agent.
+2. Open that folder and double-click **`install.cmd`**. No admin rights needed. It downloads about 2 GB (Python, libraries, the speech model) and takes 10 to 20 minutes, longer on a slow connection. At the end it prints the command that connects Ucho to your AI agent.
 3. Open **Ucho** from the Start menu. The first-run wizard picks a model for your hardware.
 
 Windows 10 or 11, 16 GB RAM recommended, about 3 GB of disk (8 GB with summaries). No NVIDIA card needed. **Use headphones**, or the microphone records the other side a second time.
@@ -91,7 +91,7 @@ Restart the client afterwards.
 
 ## Uninstall
 
-Quit Ucho (tray icon → Quit) and double-click **`uninstall.cmd`** in the app folder. It removes the *Ucho* and *Ucho Dictate* shortcuts from the Desktop and the Start menu, the start-with-Windows entry, and after a question the `.venv`, the downloaded models, the settings and the logs. Your recordings in `C:\Users\<you>\Ucho\recordings` stay unless you confirm deleting them in a separate step. Then delete the app folder yourself, and remove Python 3.12 in Settings → Apps if nothing else uses it. Remove the agent link with `claude mcp remove -s user ucho`.
+Quit Ucho (tray icon → Quit) and double-click **`uninstall.cmd`** in the app folder. It removes the *Ucho* and *Ucho Dictate* shortcuts from the Desktop and the Start menu, the start-with-Windows entry, and after a question the `.venv`, the downloaded models, the settings and the logs. Your recordings in `C:\Users\<you>\Ucho\recordings` stay unless you confirm deleting them in a separate step, which lists them first and deletes only the recording folders Ucho created. If the recordings folder is your user folder, Documents, Desktop, Downloads, a OneDrive root or a drive root, it deletes nothing there. Then delete the app folder yourself, and remove Python 3.12 in Settings → Apps if nothing else uses it. Remove the agent link with `claude mcp remove -s user ucho`.
 
 ## More
 

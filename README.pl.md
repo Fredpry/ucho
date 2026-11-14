@@ -34,7 +34,7 @@ Nagrywa spotkania w Teams, Zoomie czy Meet oraz dyktowanie i zamienia je w tekst
 ## Instalacja
 
 1. Pobierz `Ucho-Windows.zip` z [Releases](../../releases). Kliknij plik prawym przyciskiem, wybierz **Wyodrębnij wszystkie…**, zmień folder docelowy na `C:\Users\<Ty>` i kliknij **Wyodrębnij**. Ucho trafi do `C:\Users\<Ty>\Ucho\app`, poza OneDrive, obok Twoich nagrań.
-2. Otwórz ten folder i kliknij dwukrotnie **`install.cmd`**. Uprawnienia administratora nie są potrzebne. Instalacja trwa od 5 do 15 minut, a na końcu instalator wypisze polecenie, które podłącza Ucho do Twojego agenta AI.
+2. Otwórz ten folder i kliknij dwukrotnie **`install.cmd`**. Uprawnienia administratora nie są potrzebne. Instalator pobiera ok. 2 GB (Python, biblioteki, model mowy), więc trwa to od 10 do 20 minut, a przy wolnym łączu dłużej. Na koniec wypisze polecenie, które podłącza Ucho do Twojego agenta AI.
 3. Otwórz **Ucho** z Menu Start. Kreator dobierze model do Twojego sprzętu.
 
 Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami). Karta NVIDIA nie jest potrzebna. **Używaj słuchawek**, bo inaczej mikrofon nagra rozmówców drugi raz.
@@ -91,7 +91,7 @@ Potem uruchom klienta ponownie.
 
 ## Odinstalowanie
 
-Zamknij Ucho (ikona w zasobniku → Zakończ) i kliknij dwukrotnie **`uninstall.cmd`** w folderze programu. Usunie skróty *Ucho* i *Ucho Dictate* z Pulpitu i Menu Start, wpis autostartu, a po pytaniu także `.venv`, pobrane modele, ustawienia i logi. Nagrania w `C:\Users\<Ty>\Ucho\recordings` zostają, chyba że osobno potwierdzisz ich usunięcie. Na koniec usuń sam folder programu, a Pythona 3.12 odinstaluj w Ustawieniach → Aplikacje, jeśli nic innego go nie używa. Połączenie z agentem usuniesz poleceniem `claude mcp remove -s user ucho`.
+Zamknij Ucho (ikona w zasobniku → Zakończ) i kliknij dwukrotnie **`uninstall.cmd`** w folderze programu. Usunie skróty *Ucho* i *Ucho Dictate* z Pulpitu i Menu Start, wpis autostartu, a po pytaniu także `.venv`, pobrane modele, ustawienia i logi. Nagrania w `C:\Users\<Ty>\Ucho\recordings` zostają, chyba że osobno potwierdzisz ich usunięcie: deinstalator najpierw je wypisze i usunie tylko foldery nagrań utworzone przez Ucho. Jeśli folder nagrań to Twój folder użytkownika, Dokumenty, Pulpit, Pobrane, główny folder OneDrive albo główny katalog dysku, niczego z niego nie usunie. Na koniec usuń sam folder programu, a Pythona 3.12 odinstaluj w Ustawieniach → Aplikacje, jeśli nic innego go nie używa. Połączenie z agentem usuniesz poleceniem `claude mcp remove -s user ucho`.
 
 ## Więcej
 
