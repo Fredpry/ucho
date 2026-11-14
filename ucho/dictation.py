@@ -54,6 +54,8 @@ _user32.GetForegroundWindow.restype = wintypes.HWND
 _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 _user32.GetAsyncKeyState.restype = ctypes.c_short
+_user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+_user32.GetClassNameW.restype = ctypes.c_int
 _user32.IsWindow.argtypes = [wintypes.HWND]
 _user32.IsWindow.restype = wintypes.BOOL
 _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -293,6 +295,22 @@ def foreground_is_ours() -> bool:
 
 def window_exists(window: int) -> bool:
     return bool(_user32.IsWindow(window))
+
+
+# The taskbar and the desktop are in front after a click on them, but nobody
+# dictates into them: a dictation started there has no target window.
+_SHELL_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"}
+
+
+def dictation_target() -> int | None:
+    """The foreground window as the target of a dictation; None for the taskbar or desktop."""
+    window = foreground_window()
+    if not window:
+        return None
+    name = ctypes.create_unicode_buffer(64)
+    if _user32.GetClassNameW(window, name, len(name)) and name.value in _SHELL_CLASSES:
+        return None
+    return window
 
 
 def activate(window: int) -> bool:
@@ -630,7 +648,7 @@ class DictationController:
             return False
         # Before anything of ours can take the focus: this is where the text goes.
         try:
-            self.target_window = foreground_window()
+            self.target_window = dictation_target()
         except Exception:
             self.target_window = None
         self.microphone.set_index(self.settings["microphone_index"])
