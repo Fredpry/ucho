@@ -789,6 +789,8 @@ class DictationWindow(ctk.CTkToplevel):
         self.after(250, self._icon)
 
     def _icon(self) -> None:
+        if not self.winfo_exists():
+            return
         icon_file = config.PROJECT_DIR / "ucho" / "assets" / "dictate.ico"
         try:
             if icon_file.exists():

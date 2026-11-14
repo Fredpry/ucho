@@ -31,3 +31,22 @@ jobs:
         run: |
           $bad = Select-String -Path install.ps1 -Pattern '[^\x00-\x7F]'
           if ($bad) { $bad; exit 1 }
+
+  gui-smoke:
+    # Starts the full UI (wizard, every screen, both layouts and themes) with
+    # the real dependencies, without audio capture and without a model, and
+    # fails when anything logged an error. The runner has no audio devices,
+    # which the app must survive.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install app dependencies
+        run: python -m pip install -r requirements.txt
+      - name: GUI start test
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m ucho --smoke-test 3

@@ -104,6 +104,12 @@ class Palette:
     focus: Pair
     hover: Pair  # quiet hover for list items and secondary buttons
     selected: Pair  # selected navigation item
+    # Status text on its soft tint (pills): a shade darker in light mode, so it
+    # keeps 4.5:1 (sage on a sage tint would be 4.2:1).
+    recording_ink: Pair
+    success_ink: Pair
+    info_ink: Pair
+    warning_ink: Pair
 
 
 def palette(tokens: dict | None = None) -> Palette:
@@ -120,9 +126,12 @@ def palette(tokens: dict | None = None) -> Palette:
     def status_pair(name: str) -> Pair:
         return status[name]["light"], status[name]["dark"]
 
-    def soft(p: Pair, amount: float = 0.14) -> Pair:
+    def soft(p: Pair, amount: float = 0.12) -> Pair:
         # A tint of the status color on the surface: pill and banner backgrounds.
         return mix(p[0], light["surface"], amount), mix(p[1], dark["surface"], amount + 0.06)
+
+    def ink(p: Pair) -> Pair:
+        return mix(p[0], "#000000", 0.82), p[1]
 
     recording = pair("recording")
     focus = (blush.get("600", FALLBACK_FOCUS[0]), blush.get("300", FALLBACK_FOCUS[1]))
@@ -141,6 +150,8 @@ def palette(tokens: dict | None = None) -> Palette:
         hover=(mix(light["surfaceMuted"], light["surface"], 0.7),
                mix(dark["surfaceMuted"], dark["surface"], 0.9)),
         selected=pair("brandSoft"),
+        recording_ink=ink(recording), success_ink=ink(status_pair("sage")),
+        info_ink=ink(status_pair("dusk")), warning_ink=ink(status_pair("amber")),
     )
 
 
