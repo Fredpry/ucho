@@ -8,8 +8,10 @@ and does not change files: it reads `meta.json`, the transcript and the
 summary from the recordings folder. That keeps the whole code reviewable in
 a few minutes.
 
-Sessions are read through `ucho.session`, so archives in the current format
-and in the pre-v0.2 one (Polish file names and `meta.json` keys) both work.
+Sessions are read and searched through `ucho.archive` (built on
+`ucho.session`), the same code the app's recordings list uses, so archives in
+the current format and in the pre-v0.2 one (Polish file names and `meta.json`
+keys) both work.
 
 Protocol: JSON-RPC 2.0, one message per line (MCP stdio transport).
 Only protocol responses go to stdout; logs go to stderr.
@@ -19,13 +21,13 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
 
 from ucho import session as sessions
+from ucho.archive import Archive, ArchiveError
+from ucho.archive import hms as _hms
 from ucho.merge import SPEAKER_LABELS, TRANSCRIPT_MD
 
 log = logging.getLogger("ucho_mcp")
@@ -113,18 +115,12 @@ ARGUMENT_ALIASES = {"od": "from", "do": "to", "fraza": "query",
                     "od_min": "from_min", "do_min": "to_min"}
 
 
-class ToolError(Exception):
-    """Error on the tool call side; goes back to the agent as isError."""
+# Bad arguments go back to the agent as isError. The archive raises the same class.
+ToolError = ArchiveError
 
 
-# --- archive -----------------------------------------------------------------
-
-
-def _hms(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    h, rest = divmod(seconds, 3600)
-    m, s = divmod(rest, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
+def _speaker(code) -> str:
+    return SPEAKER_LABELS.get(code, str(code or ""))
 
 
 def _date(text: str | None) -> datetime | None:
@@ -138,104 +134,10 @@ def _date(text: str | None) -> datetime | None:
     return None
 
 
-def _speaker(code) -> str:
-    return SPEAKER_LABELS.get(code, str(code or ""))
-
-
-class Archive:
-    def __init__(self, folder: Path):
-        self.folder = folder
-        self._index: sqlite3.Connection | None = None
-        self._index_state: tuple | None = None
-
-    # Security: the id is only a folder name directly inside the archive.
-    def session(self, id_: str) -> Path:
-        if not isinstance(id_, str) or not id_ or re.search(r"[\\/:]|\.\.", id_):
-            raise ToolError(f"Invalid id: {id_!r}")
-        path = self.folder / id_
-        if not path.is_dir():
-            raise ToolError(f"No meeting with id {id_!r}. Use list_meetings.")
-        return path
-
-    def sessions(self) -> list[Path]:
-        return sessions.list_sessions(self.folder)
-
-    @staticmethod
-    def meta(session: Path) -> dict:
-        return sessions.read_meta(session)
-
-    def describe(self, session: Path) -> dict:
-        meta = self.meta(session)
-        description = {
-            "id": session.name,
-            "title": meta.get("topic") or meta.get("name") or session.name,
-            "date": meta.get("date") or sessions.date_from_name(session.name),
-            "duration": _hms(meta["duration_s"]) if meta.get("duration_s") else None,
-            "transcript": sessions.find_file(session, TRANSCRIPT_MD) is not None,
-            "summary": sessions.find_file(session, sessions.SUMMARY_MD) is not None,
-        }
-        if meta.get("participants"):
-            description["participants"] = meta["participants"]
-        if meta.get("tldr"):
-            description["tldr"] = meta["tldr"]
-        return description
-
-    def segments(self, session: Path) -> list[dict]:
-        return [s for s in self.meta(session).get("segments") or [] if s.get("text")]
-
-    # --- full-text index ------------------------------------------------
-
-    def _state(self) -> tuple:
-        state = []
-        for session in self.sessions():
-            try:
-                state.append((session.name, (session / "meta.json").stat().st_mtime_ns))
-            except OSError:
-                continue
-        return tuple(state)
-
-    def index(self) -> sqlite3.Connection:
-        """In-memory FTS5 index, rebuilt when the archive changes."""
-        state = self._state()
-        if self._index is not None and state == self._index_state:
-            return self._index
-        db = sqlite3.connect(":memory:")
-        try:
-            db.execute("CREATE VIRTUAL TABLE u USING fts5(session UNINDEXED, start UNINDEXED,"
-                       " speaker UNINDEXED, text, tokenize='unicode61 remove_diacritics 2')")
-            self.fts = True
-        except sqlite3.OperationalError:
-            # SQLite without FTS5: a plain table and LIKE search.
-            db.execute("CREATE TABLE u (session, start, speaker, text)")
-            self.fts = False
-        for name, _ in state:
-            for seg in self.segments(self.folder / name):
-                db.execute("INSERT INTO u VALUES (?, ?, ?, ?)",
-                           (name, float(seg.get("start", 0)), seg.get("speaker", ""),
-                            str(seg["text"])))
-        db.commit()
-        if self._index is not None:
-            self._index.close()
-        self._index, self._index_state = db, state
-        return db
-
-    def search(self, query: str, limit: int) -> list[dict]:
-        db = self.index()
-        words = re.findall(r"\w+", query, flags=re.UNICODE)
-        if not words:
-            raise ToolError("Empty query.")
-        if self.fts:
-            match = " ".join(f'"{w}"*' for w in words)
-            rows = db.execute(
-                "SELECT session, start, speaker, text FROM u WHERE u MATCH ? "
-                "ORDER BY rank LIMIT ?", (match, limit)).fetchall()
-        else:
-            condition = " AND ".join("text LIKE ?" for _ in words)
-            rows = db.execute(
-                f"SELECT session, start, speaker, text FROM u WHERE {condition} LIMIT ?",
-                [f"%{w}%" for w in words] + [limit]).fetchall()
-        return [{"id": s, "time": _hms(st), "speaker": _speaker(sp), "excerpt": tx[:400]}
-                for s, st, sp, tx in rows]
+def search(archive: Archive, query: str, limit: int) -> list[dict]:
+    """search_transcripts result rows (the search itself lives in ucho.archive)."""
+    return [{"id": h.id, "time": _hms(h.start), "speaker": _speaker(h.speaker),
+             "excerpt": h.text[:400]} for h in archive.search(query, limit)]
 
 
 # --- tools -------------------------------------------------------------------
@@ -314,7 +216,7 @@ def call_tool(archive: Archive, name: str, args: dict) -> str:
         query = args.get("query")
         if not isinstance(query, str):
             raise ToolError("Provide a query.")
-        hits = archive.search(query, _number(args.get("limit"), "limit", 20, 200))
+        hits = search(archive, query, _number(args.get("limit"), "limit", 20, 200))
         if not hits:
             return f"Nothing found: {query!r}"
         return json.dumps(hits, ensure_ascii=False, indent=1)
