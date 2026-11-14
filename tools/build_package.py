@@ -1,9 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Builds dist/Ucho-Windows.zip and dist/SHA256SUMS.txt.
+r"""Builds dist/Ucho-Windows.zip and dist/SHA256SUMS.txt.
 
 The package holds only what the user needs: the app code, the MCP server,
-the installer and the documents. No tests, tools, models or data.
+the installer and uninstaller and the documents. No tests, tools, models or
+data.
+
+Everything sits under `Ucho/app/`. The README says: right click the zip,
+Extract All, destination `C:\Users\<you>`. The app then lands in
+`C:\Users\<you>\Ucho\app`, next to the default recordings folder
+`C:\Users\<you>\Ucho\recordings` and outside OneDrive, which is the path the
+README uses for the MCP command. Keeping the default destination also works
+(`Downloads\Ucho-Windows\Ucho\app`); the installer prints the real paths.
 """
 
 from __future__ import annotations
@@ -14,12 +22,13 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PACKAGE_DIR = "Ucho"
+PACKAGE_DIR = "Ucho/app"
 FILES = [
-    "install.ps1", "ucho.pyw", "dictate.pyw", "mcp_server.py", "requirements.txt",
+    "install.cmd", "install.ps1", "uninstall.cmd", "uninstall.ps1",
+    "ucho.pyw", "dictate.pyw", "mcp_server.py", "requirements.txt",
     "requirements-parakeet.txt",
     "design/tokens.json",
-    "LICENSE", "NOTICE", "README.md", "README.pl.md",
+    "LICENSE", "NOTICE", "README.md", "README.pl.md", "CHANGELOG.md",
     "PRIVACY.md", "THIRD_PARTY.md",
 ]
 DIRS = ["ucho", "ucho_mcp"]

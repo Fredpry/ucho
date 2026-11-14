@@ -1,9 +1,17 @@
 # Changelog
 
-## Unreleased (v0.2)
+## v0.2.0 (first public release, date set at tagging)
+
+### Upgrading from v0.1
+
+v0.1 was an internal build. To upgrade it, extract `Ucho-Windows.zip` over the old folder (the package now holds `Ucho\app\`, so extracting it to `C:\Users\<you>` updates `C:\Users\<you>\Ucho\app`) and run `install.cmd` again. Settings and old recordings are carried over (see *Compatibility* below). Close the old *Ucho Dyktuj* window first: it holds Ctrl+Shift+Space.
 
 ### Added
 
+- **Double-click install**: `install.cmd` runs `install.ps1` without changing the execution policy and keeps the window open at the end and after an error (`install.ps1 -Pause`). Started from inside the zip, it asks you to extract the zip first.
+- The installer logs every run to `install.log` in the app folder (pip output included) and says where the log is when something fails.
+- The installer ends with a summary: how to start Ucho, and the exact `claude mcp add -s user ucho -- ...` command with the paths of this installation.
+- `uninstall.cmd` / `uninstall.ps1`: remove the shortcuts, the start-with-Windows entry and, after a question, `.venv`, models, settings and logs. Only shortcuts and entries that point to this app folder are touched. Recordings are deleted only after a separate prompt where you type a word, and only folders that look like Ucho sessions.
 - Hardware detection and automatic model choice (`ucho/hardware.py`, `docs/hardware.md`). `python -m ucho.hardware` prints the hardware profile and a recommended Whisper model, device and dictation model with the reasons; `--benchmark` measures the real-time factor on a synthetic signal and steps one row down below 1.5x; `--save` writes the result to the settings.
 - New settings keys `dictation_model` and `hardware_profile`.
 - `ucho/session.py`: one reader of recording folders for the app and the MCP server, for both the current and the v0.1 format.
@@ -23,6 +31,10 @@
 
 ### Changed
 
+- `Ucho-Windows.zip` holds `Ucho\app\` instead of `Ucho\`: extracted to `C:\Users\<you>` it lands in `C:\Users\<you>\Ucho\app`, the path the README uses everywhere. `CHANGELOG.md` and the uninstaller are included.
+- Installing inside a OneDrive folder now stops with a clear warning and asks before continuing (default: stop). `-Force` or a non-interactive run continues with a warning.
+- The README suggests `claude mcp add -s user` (every project, not just the current folder) and has JSON and TOML snippets for Cursor, Claude Desktop and Codex. The speed claim is now 1 h in 4 to 7 min on Intel Arc (15x with a forced language, 8.9x with automatic language detection, `docs/benchmarks.md`).
+- Version 0.2.0 in `ucho.config.VERSION`; the MCP server reports the same version instead of keeping its own copy.
 - Models can be downloaded partially (`config.DOWNLOAD_PATTERNS`, used by `transcribe.model_path` both for the download and the offline check).
 
 - `dictate.pyw` and the *Ucho Dictate* shortcut start Ucho with dictation open (or open it in the running Ucho). The installer creates *Ucho* and *Ucho Dictate* shortcuts on the Desktop and in the Start menu, both with the Ucho AppUserModelID.
@@ -51,6 +63,6 @@
 - `dictate.json` (or v0.1 `dyktuj.json`) is imported into `settings.json` once and kept; a dictation model set by hand there is kept, the old default is not (the hardware recommendation wins). `dictate.example.json` is gone. Quit an older *Ucho Dyktuj* before starting v0.2: it holds Ctrl+Shift+Space.
 - The last dictated text is read from `ucho.log`, else from the old `dictate.log`.
 
-## v0.1.0
+## v0.1.0 (internal, not published)
 
-- First public version: local meeting transcription (microphone + system audio), dictation window, optional local summaries, read-only MCP server.
+- Internal build, never released publicly: local meeting transcription (microphone + system audio), dictation window, optional local summaries, read-only MCP server.

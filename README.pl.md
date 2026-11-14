@@ -22,7 +22,7 @@ Nagrywa spotkania w Teams, Zoomie czy Meet oraz dyktowanie i zamienia je w tekst
 | <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>R</kbd> | nagrywaj spotkanie, z dowolnego programu |
 | <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Spacja</kbd> | dyktuj tam, gdzie stoi kursor |
 | **MCP** | Claude Code, Cursor czy Codex czytają Twoje transkrypty |
-| **1 h → 4 min** | transkrypcja godziny rozmowy na grafice Intel Arc |
+| **1 h → 4–7 min** | transkrypcja godziny rozmowy na grafice Intel Arc ([pomiary](docs/benchmarks.md)) |
 
 <p align="center">
   <img src="docs/screens/meeting-recording-light-pl-1366x768.png" alt="Nagrywanie spotkania" width="49%">
@@ -33,31 +33,65 @@ Nagrywa spotkania w Teams, Zoomie czy Meet oraz dyktowanie i zamienia je w tekst
 
 ## Instalacja
 
-1. Pobierz `Ucho-Windows.zip` z [Releases](../../releases) i rozpakuj **poza OneDrive** (np. `C:\Users\<Ty>\Ucho\app`).
-2. Uruchom instalator, bez uprawnień administratora:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1
-   ```
+1. Pobierz `Ucho-Windows.zip` z [Releases](../../releases). Kliknij plik prawym przyciskiem, wybierz **Wyodrębnij wszystkie…**, zmień folder docelowy na `C:\Users\<Ty>` i kliknij **Wyodrębnij**. Ucho trafi do `C:\Users\<Ty>\Ucho\app`, poza OneDrive, obok Twoich nagrań.
+2. Otwórz ten folder i kliknij dwukrotnie **`install.cmd`**. Uprawnienia administratora nie są potrzebne. Instalacja trwa od 5 do 15 minut, a na końcu instalator wypisze polecenie, które podłącza Ucho do Twojego agenta AI.
 3. Otwórz **Ucho** z Menu Start. Kreator dobierze model do Twojego sprzętu.
 
-Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku. Karta NVIDIA nie jest potrzebna. **Używaj słuchawek**, bo inaczej mikrofon nagra rozmówców drugi raz.
+Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami). Karta NVIDIA nie jest potrzebna. **Używaj słuchawek**, bo inaczej mikrofon nagra rozmówców drugi raz.
 
 <details>
-<summary>Opcje instalatora i aktualizacja z v0.1</summary>
+<summary>Opcje instalatora i gdy coś nie działa</summary>
 
+- Z PowerShella zamiast dwukliku, w folderze programu: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
 - `-WithSummary`: lokalne podsumowania (model Qwen, ok. 5 GB). Domyślnie wyłączone.
 - `-WithParakeet`: dodatkowy silnik NVIDIA Parakeet, szybki na samym procesorze. Słabiej radzi sobie z angielskimi wtrąceniami. Wybierasz go w Ustawieniach → Sprzęt.
-- Aktualizacja z v0.1: rozpakuj paczkę na stary folder i uruchom `install.ps1` jeszcze raz. Ustawienia i stare nagrania zostaną przeniesione. Najpierw zamknij stare okno *Ucho Dyktuj*, bo trzyma skrót Ctrl+Shift+Spacja.
+- `-Force`: instalacja w folderze OneDrive bez pytania. Odradzamy: modele, ustawienia i log z podyktowanym tekstem trafiłyby do chmury.
+- Opcje działają też z plikiem do dwukliku: `install.cmd -WithSummary`.
+- Przebieg każdej instalacji trafia do `install.log` w folderze programu. Ucho nie ma jeszcze podpisu cyfrowego, więc Windows może ostrzec przed uruchomieniem `install.cmd`.
 
 </details>
 
 ## Agent AI (MCP)
 
+Instalator wypisuje to polecenie z prawdziwymi ścieżkami. Dzięki `-s user` Ucho działa w każdym projekcie:
+
 ```powershell
-claude mcp add ucho -- "C:\Users\<Ty>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<Ty>\Ucho\app\mcp_server.py"
+claude mcp add -s user ucho -- "C:\Users\<Ty>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<Ty>\Ucho\app\mcp_server.py"
 ```
 
-Potem zapytaj: *„Co ustaliliśmy w zeszłym tygodniu z dostawcą stali?”* Serwer działa tylko do odczytu, przez stdio, bez portów. W Claude Desktop i Cursorze dodaj serwer stdio z tym samym poleceniem. Agent wysyła przeczytane fragmenty do swojego modelu; Ucho samo niczego nie wysyła.
+Potem zapytaj: *„Co ustaliliśmy w zeszłym tygodniu z dostawcą stali?”* Serwer działa tylko do odczytu, przez stdio, bez portów. Agent wysyła przeczytane fragmenty do swojego modelu; Ucho samo niczego nie wysyła.
+
+<details>
+<summary>Cursor, Claude Desktop i Codex</summary>
+
+Cursor (`%USERPROFILE%\.cursor\mcp.json`) i Claude Desktop (Ustawienia → Developer → Edit Config) przyjmują JSON, w którym każdy ukośnik wsteczny trzeba podwoić:
+
+```json
+{
+  "mcpServers": {
+    "ucho": {
+      "command": "C:\\Users\\<Ty>\\Ucho\\app\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\<Ty>\\Ucho\\app\\mcp_server.py"]
+    }
+  }
+}
+```
+
+Codex (`%USERPROFILE%\.codex\config.toml`):
+
+```toml
+[mcp_servers.ucho]
+command = 'C:\Users\<Ty>\Ucho\app\.venv\Scripts\python.exe'
+args = ['C:\Users\<Ty>\Ucho\app\mcp_server.py']
+```
+
+Potem uruchom klienta ponownie.
+
+</details>
+
+## Odinstalowanie
+
+Zamknij Ucho (ikona w zasobniku → Zakończ) i kliknij dwukrotnie **`uninstall.cmd`** w folderze programu. Usunie skróty *Ucho* i *Ucho Dictate* z Pulpitu i Menu Start, wpis autostartu, a po pytaniu także `.venv`, pobrane modele, ustawienia i logi. Nagrania w `C:\Users\<Ty>\Ucho\recordings` zostają, chyba że osobno potwierdzisz ich usunięcie. Na koniec usuń sam folder programu, a Pythona 3.12 odinstaluj w Ustawieniach → Aplikacje, jeśli nic innego go nie używa. Połączenie z agentem usuniesz poleceniem `claude mcp remove -s user ucho`.
 
 ## Więcej
 

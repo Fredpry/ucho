@@ -5,7 +5,7 @@
 An MCP client (Claude Code, Claude Desktop, Cursor...) starts the server with
 its own working directory, so we give it the full path to this file:
 
-    claude mcp add ucho -- "C:\\Users\\<you>\\Ucho\\app\\.venv\\Scripts\\python.exe" "C:\\Users\\<you>\\Ucho\\app\\mcp_server.py"
+    claude mcp add -s user ucho -- "C:\\Users\\<you>\\Ucho\\app\\.venv\\Scripts\\python.exe" "C:\\Users\\<you>\\Ucho\\app\\mcp_server.py"
 """
 
 from __future__ import annotations

@@ -22,7 +22,7 @@ Records Teams, Zoom and Meet calls and your dictation, and turns them into text 
 | <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>R</kbd> | record a meeting, from any app |
 | <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Space</kbd> | dictate wherever your cursor is |
 | **MCP** | Claude Code, Cursor or Codex read your transcripts |
-| **1 h → 4 min** | to transcribe an hour of talk on Intel Arc graphics |
+| **1 h → 4–7 min** | to transcribe an hour of talk on Intel Arc graphics ([measured](docs/benchmarks.md)) |
 
 <p align="center">
   <img src="docs/screens/meeting-recording-light.png" alt="Recording a meeting" width="49%">
@@ -33,31 +33,65 @@ Records Teams, Zoom and Meet calls and your dictation, and turns them into text 
 
 ## Install
 
-1. Download `Ucho-Windows.zip` from [Releases](../../releases) and unzip it **outside OneDrive** (e.g. `C:\Users\<you>\Ucho\app`).
-2. Run the installer, no admin rights needed:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1
-   ```
+1. Download `Ucho-Windows.zip` from [Releases](../../releases). Right-click it, choose **Extract All…**, change the destination to `C:\Users\<you>` and click **Extract**. Ucho lands in `C:\Users\<you>\Ucho\app`, outside OneDrive and next to your recordings.
+2. Open that folder and double-click **`install.cmd`**. No admin rights needed. It takes 5 to 15 minutes, and at the end it prints the command that connects Ucho to your AI agent.
 3. Open **Ucho** from the Start menu. The first-run wizard picks a model for your hardware.
 
-Windows 10 or 11, 16 GB RAM recommended, about 3 GB of disk. No NVIDIA card needed. **Use headphones**, or the microphone records the other side a second time.
+Windows 10 or 11, 16 GB RAM recommended, about 3 GB of disk (8 GB with summaries). No NVIDIA card needed. **Use headphones**, or the microphone records the other side a second time.
 
 <details>
-<summary>Installer options and upgrading from v0.1</summary>
+<summary>Installer options and troubleshooting</summary>
 
+- From PowerShell instead of a double-click, in the app folder: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
 - `-WithSummary`: local summaries (Qwen model, about 5 GB). Off by default.
 - `-WithParakeet`: an extra NVIDIA Parakeet engine, fast on the CPU alone. Weaker with English phrases inside Polish sentences. Choose it in Settings → Hardware.
-- Upgrading from v0.1: unzip over the old folder and run `install.ps1` again. Settings and old recordings are carried over. Close the old *Ucho Dyktuj* window first, it holds Ctrl+Shift+Space.
+- `-Force`: install inside a OneDrive folder without asking. Not recommended: models, settings and the log with your dictated text would sync to the cloud.
+- Options also work with the double-click file: `install.cmd -WithSummary`.
+- Every run is logged to `install.log` in the app folder. Ucho is not code-signed yet, so Windows may warn before running `install.cmd`.
 
 </details>
 
 ## AI agent (MCP)
 
+The installer prints this command with your real paths. `-s user` makes Ucho available in every project:
+
 ```powershell
-claude mcp add ucho -- "C:\Users\<you>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<you>\Ucho\app\mcp_server.py"
+claude mcp add -s user ucho -- "C:\Users\<you>\Ucho\app\.venv\Scripts\python.exe" "C:\Users\<you>\Ucho\app\mcp_server.py"
 ```
 
-Then ask: *"What did we agree with the steel supplier last week?"* The server is read-only, runs over stdio and opens no ports. In Claude Desktop and Cursor, add a stdio server with the same command. The agent sends the excerpts it reads to its own model; Ucho itself sends nothing.
+Then ask: *"What did we agree with the steel supplier last week?"* The server is read-only, runs over stdio and opens no ports. The agent sends the excerpts it reads to its own model; Ucho itself sends nothing.
+
+<details>
+<summary>Cursor, Claude Desktop and Codex</summary>
+
+Cursor (`%USERPROFILE%\.cursor\mcp.json`) and Claude Desktop (Settings → Developer → Edit Config) take JSON, where every backslash is doubled:
+
+```json
+{
+  "mcpServers": {
+    "ucho": {
+      "command": "C:\\Users\\<you>\\Ucho\\app\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\Users\\<you>\\Ucho\\app\\mcp_server.py"]
+    }
+  }
+}
+```
+
+Codex (`%USERPROFILE%\.codex\config.toml`):
+
+```toml
+[mcp_servers.ucho]
+command = 'C:\Users\<you>\Ucho\app\.venv\Scripts\python.exe'
+args = ['C:\Users\<you>\Ucho\app\mcp_server.py']
+```
+
+Restart the client afterwards.
+
+</details>
+
+## Uninstall
+
+Quit Ucho (tray icon → Quit) and double-click **`uninstall.cmd`** in the app folder. It removes the *Ucho* and *Ucho Dictate* shortcuts from the Desktop and the Start menu, the start-with-Windows entry, and after a question the `.venv`, the downloaded models, the settings and the logs. Your recordings in `C:\Users\<you>\Ucho\recordings` stay unless you confirm deleting them in a separate step. Then delete the app folder yourself, and remove Python 3.12 in Settings → Apps if nothing else uses it. Remove the agent link with `claude mcp remove -s user ucho`.
 
 ## More
 

@@ -59,7 +59,7 @@ New-NetFirewallRule -DisplayName "Ucho - block" -Direction Outbound `
 # remove: Remove-NetFirewallRule -DisplayName "Ucho - block"
 ```
 
-Last measurement by the author: full recording, two-track transcription on the GPU and a summary with zero external connections (Nagrywacz, the predecessor of Ucho, 2026). This will be repeated on the v0.1.0 release build and the date added here.
+Last measurement by the author: full recording, two-track transcription on the GPU and a summary with zero external connections (Nagrywacz, the predecessor of Ucho, 2026). This will be repeated on the v0.2.0 release build and the date added here.
 
 ### MCP and AI agents
 
