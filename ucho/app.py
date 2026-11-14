@@ -229,8 +229,11 @@ class App(ctk.CTk):
         self._screens, self._nav, self._current = {}, {}, ""
         self._toast = None
         if self.dictation_window is not None:
-            self.dictation_window.destroy()
-            self.dictation_window = None
+            # customtkinter schedules title bar and icon updates on a new
+            # Toplevel (~200 ms); destroying it before they run makes Tk raise.
+            old, self.dictation_window = self.dictation_window, None
+            old.withdraw()
+            self.after(1500, lambda: old.winfo_exists() and old.destroy())
         self._body = ctk.CTkFrame(self, fg_color=C.bg, corner_radius=0)
         self._body.pack(fill="both", expand=True)
         if not self.settings["setup_complete"]:

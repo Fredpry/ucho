@@ -286,10 +286,10 @@ def entry(master, placeholder: str = "", **kwargs) -> ctk.CTkEntry:
 # --- status pill -------------------------------------------------------------------
 
 PILL_STYLES = {
-    "ready": (C.success, C.success_soft),
-    "recording": (C.recording, C.recording_soft),
-    "working": (C.info, C.info_soft),
-    "warning": (C.warning, C.warning_soft),
+    "ready": (C.success_ink, C.success_soft),
+    "recording": (C.recording_ink, C.recording_soft),
+    "working": (C.info_ink, C.info_soft),
+    "warning": (C.warning_ink, C.warning_soft),
     "idle": (C.text_muted, C.surface_muted),
 }
 
