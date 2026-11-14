@@ -42,7 +42,7 @@ Use a fresh Windows user account (or a machine where Ucho was never installed), 
 
 **A. Clean install**
 
-| ID | Python before | `instaluj.ps1` result | Duration (without model download) | Model download | Warnings / errors | Shortcuts work |
+| ID | Python before | `install.ps1` result | Duration (without model download) | Model download | Warnings / errors | Shortcuts work |
 |---|---|---|---|---|---|---|
 | L1 | | ok / failed | | | | |
 
@@ -134,15 +134,15 @@ Run it with the Python of an installed Ucho (it has OpenVINO and the models), fr
 
 ```powershell
 $py = "C:\Users\<you>\Ucho\app\.venv\Scripts\python.exe"
-& $py tools\benchmark_wer.py C:\bench\cv-pl --models-dir C:\Users\<you>\Ucho\app\modele --language pl
+& $py tools\benchmark_wer.py C:\bench\cv-pl --models-dir C:\Users\<you>\Ucho\app\models --language pl
 & $py tools\benchmark_wer.py C:\bench\cv-pl --language auto --json C:\bench\cv-pl-auto.json
 & $py tools\benchmark_wer.py C:\bench\cv-pl --wer-only                  # rescore, no transcription
 & $py tools\benchmark_wer.py C:\bench\cv-pl --wer-only --baseline C:\bench\v0.1.json
 ```
 
-Options: `--model` (OpenVINO repo id, default: the app default), `--device` (GPU, CPU, NPU, AUTO; GPU falls back to CPU), `--language` (auto, pl, en), `--limit N`, `--json`, `--baseline` (prints the change in percentage points), `--models-dir` (Hugging Face cache with the models; default `HF_HOME`, else `<repo>\modele`), `--from-tsv` (see below).
+Options: `--model` (OpenVINO repo id, default: the app default), `--device` (GPU, CPU, NPU, AUTO; GPU falls back to CPU), `--language` (auto, pl, en), `--limit N`, `--json`, `--baseline` (prints the change in percentage points), `--models-dir` (Hugging Face cache with the models; default `HF_HOME`, else `<repo>\models`), `--from-tsv` (see below).
 
-The tool works offline: it sets `HF_HUB_OFFLINE=1` and loads models from the local cache only. The model is loaded before the first file, so the per-file speed is not distorted by the one-off GPU compilation. The compiled GPU model is cached in `<checkout>\modele\ovcache` (ignored by git, about 3 GB for large-v3); delete it when you are done.
+The tool works offline: it sets `HF_HUB_OFFLINE=1` and loads models from the local cache only. The model is loaded before the first file, so the per-file speed is not distorted by the one-off GPU compilation. The compiled GPU model is cached in `<checkout>\models\ovcache` (ignored by git, about 3 GB for large-v3); delete it when you are done.
 
 ### Test data that may legally be used
 
@@ -186,7 +186,7 @@ Record the corpus version and the number of clips in the results table: WER is o
 
 1. Run the fixed Common Voice subset with the default model and device on the reference laptop (L1), `--language pl` and `--language auto`.
 2. Compare with the previous release's JSON using `--baseline`.
-3. A rise of more than **1 percentage point** in WER on the same subset blocks the release until explained (model revision change in `config.REWIZJE`, a change in `transcribe.py` thresholds, an OpenVINO upgrade).
+3. A rise of more than **1 percentage point** in WER on the same subset blocks the release until explained (model revision change in `config.REVISIONS`, a change in `transcribe.py` thresholds, an OpenVINO upgrade).
 4. Add a row below.
 
 | Date | Ucho version | Model (revision) | Device | Data (version, clips) | Language | WER | CER | Speed |

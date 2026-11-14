@@ -28,13 +28,13 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import config
-from .i18n import jezyk, t
+from .i18n import language, t
 
 log = logging.getLogger(__name__)
 
 GIB = 1024**3
 
-# Model ids are keys of config.MODELE.
+# Model ids are keys of config.MODELS.
 LARGE_INT8 = "OpenVINO/whisper-large-v3-int8-ov"
 LARGE_FP16 = "OpenVINO/whisper-large-v3-fp16-ov"
 TURBO_INT8 = "OpenVINO/whisper-large-v3-turbo-int8-ov"
@@ -368,7 +368,7 @@ def _num(x: float, digits: int = 1) -> str:
     text = f"{x:.{digits}f}"
     if "." in text:
         text = text.rstrip("0").rstrip(".")
-    return text.replace(".", ",") if jezyk() == "pl" else text
+    return text.replace(".", ",") if language() == "pl" else text
 
 
 def _model_name(repo_id: str) -> str:
@@ -382,39 +382,39 @@ def _choose_rule(p: HardwareProfile) -> tuple[str, list[str], list[str]]:
     warnings: list[str] = []
 
     if ram < 8:
-        warnings.append(t("Mniej niż 8 GB RAM ({ram} GB): wybrano najmniejszy model. "
-                          "Przed transkrypcją zamknij inne programy.", ram=_num(ram)))
+        warnings.append(t("Less than 8 GB RAM ({ram} GB): the smallest model was chosen. "
+                          "Close other programs before transcribing.", ram=_num(ram)))
         return "low_ram", reasons, warnings
 
     if gpu is not None:
-        reasons.append(t("Karta graficzna {gpu}: transkrypcja na GPU.", gpu=gpu.name or gpu.id))
+        reasons.append(t("Graphics {gpu}: transcription on the GPU.", gpu=gpu.name or gpu.id))
         if ram >= 16:
-            reasons.append(t("{ram} GB RAM: dyktowanie dostaje osobny model FP16 "
-                             "(pełna precyzja).", ram=_num(ram)))
+            reasons.append(t("{ram} GB RAM: dictation gets its own FP16 model "
+                             "(full precision).", ram=_num(ram)))
             return "gpu_16", reasons, warnings
-        reasons.append(t("{ram} GB RAM: dyktowanie korzysta z tego samego modelu "
-                         "co transkrypcja, żeby oszczędzić pamięć.", ram=_num(ram)))
+        reasons.append(t("{ram} GB RAM: dictation shares the transcription model "
+                         "to save memory.", ram=_num(ram)))
         return "gpu_8", reasons, warnings
 
     for old in p.gpus():
-        reasons.append(t("Karta {gpu} to starsza generacja grafiki Intela, "
-                         "za wolna na duży model.", gpu=old.name or old.id))
+        reasons.append(t("{gpu} is an older Intel graphics generation, "
+                         "too slow for the large model.", gpu=old.name or old.id))
     if not p.gpus():
-        reasons.append(t("OpenVINO nie widzi karty graficznej Intel: transkrypcja na procesorze."))
+        reasons.append(t("OpenVINO sees no Intel GPU: transcription on the CPU."))
 
     strong = p.avx512 or p.cores >= STRONG_CPU_CORES
-    cpu_line = t("Procesor {cpu}, rdzenie: {rdzenie}{avx}.", cpu=p.cpu_name or "?",
-                 rdzenie=p.cores, avx=", AVX-512" if p.avx512 else "")
+    cpu_line = t("CPU {cpu}, cores: {cores}{avx}.", cpu=p.cpu_name or "?",
+                 cores=p.cores, avx=", AVX-512" if p.avx512 else "")
     reasons.append(cpu_line)
     if strong and ram >= 16:
-        reasons.append(t("Wystarczająco mocny procesor i {ram} GB RAM na pełny model large-v3.",
+        reasons.append(t("CPU strong enough and {ram} GB RAM for the full large-v3 model.",
                          ram=_num(ram)))
         return "cpu_strong", reasons, warnings
     if not strong:
-        reasons.append(t("Mniej niż {n} rdzeni i brak AVX-512: szybszy model turbo.",
+        reasons.append(t("Fewer than {n} cores and no AVX-512: the faster turbo model.",
                          n=STRONG_CPU_CORES))
     else:
-        reasons.append(t("{ram} GB RAM to za mało na large-v3 na procesorze: szybszy model turbo.",
+        reasons.append(t("{ram} GB RAM is too little for large-v3 on the CPU: the faster turbo model.",
                          ram=_num(ram)))
     return "cpu_weak", reasons, warnings
 
@@ -436,12 +436,12 @@ def recommend(p: HardwareProfile) -> Recommendation:
 
     npu = p.npu()
     if npu is not None:
-        rec.reasons.append(t("Wykryto NPU ({npu}). Można go wypróbować w Ustawieniach "
-                             "jako opcję eksperymentalną.", npu=npu.name or npu.id))
+        rec.reasons.append(t("NPU found ({npu}). You can try it in Settings "
+                             "as an experimental option.", npu=npu.name or npu.id))
     for adapter in p.adapters:
         if any(word in adapter.name.upper() for word in ("NVIDIA", "RADEON")):
-            rec.reasons.append(t("Karta {gpu} nie jest obsługiwana przez OpenVINO, "
-                                 "więc Ucho jej nie użyje.", gpu=adapter.name))
+            rec.reasons.append(t("{gpu} is not supported by OpenVINO, "
+                                 "so Ucho will not use it.", gpu=adapter.name))
     return rec
 
 
@@ -456,17 +456,17 @@ def step_down(rec: Recommendation, p: HardwareProfile) -> Recommendation | None:
 def after_benchmark(rec: Recommendation, p: HardwareProfile, speed: float) -> Recommendation:
     """Keeps the recommendation when `speed` >= MIN_SPEED, otherwise steps one row down."""
     if speed >= MIN_SPEED:
-        rec.reasons.append(t("Pomiar: {x}× szybciej niż czas nagrania.", x=_num(speed)))
+        rec.reasons.append(t("Measured: {x}× faster than real time.", x=_num(speed)))
         return rec
     lower = step_down(rec, p)
     if lower is None:
-        rec.warnings.append(t("Pomiar: {x}× czasu nagrania, poniżej progu {prog}×, a lżejszego "
-                              "modelu już nie ma. Transkrypcja będzie wolna.",
-                              x=_num(speed), prog=_num(MIN_SPEED)))
+        rec.warnings.append(t("Measured {x}× real time, below the {threshold}× threshold, and there "
+                              "is no lighter model. Transcription will be slow.",
+                              x=_num(speed), threshold=_num(MIN_SPEED)))
         return rec
-    lower.reasons.append(t("Pomiar: {x}× czasu nagrania, poniżej progu {prog}×: "
-                           "wybrano o stopień lżejszy model {model}.",
-                           x=_num(speed), prog=_num(MIN_SPEED), model=_model_name(lower.model)))
+    lower.reasons.append(t("Measured {x}× real time, below the {threshold}× threshold: "
+                           "one step lighter model {model} chosen.",
+                           x=_num(speed), threshold=_num(MIN_SPEED), model=_model_name(lower.model)))
     return lower
 
 
@@ -476,7 +476,7 @@ def after_benchmark(rec: Recommendation, p: HardwareProfile, speed: float) -> Re
 @dataclass
 class BenchmarkResult:
     model: str
-    device: str  # device actually used (Silnik falls back to CPU)
+    device: str  # device actually used (Engine falls back to CPU)
     audio_s: float
     load_s: float
     process_s: float
@@ -560,38 +560,38 @@ def _forced_kwargs(engine, tokens: int) -> dict:
 def benchmark(model: str, device: str, seconds: float = 10.0) -> BenchmarkResult:
     """Measures the real-time factor of `model` on `device` with a synthetic signal.
 
-    Reuses transcribe.Silnik for loading, so the GPU to CPU fallback and the
+    Reuses transcribe.Engine for loading, so the GPU to CPU fallback and the
     restricted language detection behave as in a real transcription. The first
     call is a warm-up: on the GPU it allocates buffers, which a long recording
     pays only once. Raises when the model is not downloaded.
     """
     from . import transcribe
 
-    engine = transcribe.Silnik(model, device)
+    engine = transcribe.Engine(model, device)
     start = time.monotonic()
-    engine.zaladuj()
+    engine.load()
     load_s = time.monotonic() - start
     try:
         audio = synthetic_speech(seconds)
         tokens = max(1, round(seconds * TOKENS_PER_SECOND))
         try:
             kwargs = _forced_kwargs(engine, tokens)
-            engine._wywolaj(audio[: transcribe.CZESTOTLIWOSC * 2], kwargs)
+            engine._call(audio[: transcribe.SAMPLE_RATE * 2], kwargs)
         except Exception as error:
             # An older openvino-genai may reject one of the arguments. Free
             # decoding still gives a (too optimistic) number, so we go on.
             log.warning("Forced decoding not accepted (%s), measuring free decoding", error)
             kwargs, tokens = None, 0
-            engine.generuj(audio[: transcribe.CZESTOTLIWOSC * 2], None)
+            engine.generate(audio[: transcribe.SAMPLE_RATE * 2], None)
         start = time.monotonic()
         if kwargs is None:
-            engine.generuj(audio, None)
+            engine.generate(audio, None)
         else:
-            engine._wywolaj(audio, kwargs)
+            engine._call(audio, kwargs)
         process_s = time.monotonic() - start
         used = engine.device
     finally:
-        engine.zwolnij()
+        engine.release()
     log.info("Benchmark %s on %s: %.2fs for %.0fs of audio (%d tokens), load %.1fs",
              model, used, process_s, seconds, tokens, load_s)
     return BenchmarkResult(model, used, seconds, load_s, process_s, tokens)
@@ -627,7 +627,7 @@ def summary(p: HardwareProfile, rec: Recommendation,
     }
 
 
-def save(settings: config.Ustawienia, p: HardwareProfile, rec: Recommendation,
+def save(settings: config.Settings, p: HardwareProfile, rec: Recommendation,
          measured: BenchmarkResult | None = None, keep_choice: bool = False) -> list[str]:
     """Writes the recommendation into settings. Returns the keys that changed.
 
@@ -649,7 +649,7 @@ def save(settings: config.Ustawienia, p: HardwareProfile, rec: Recommendation,
             settings[key] = new[key]
             changed.append(key)
     settings["hardware_profile"] = summary(p, rec, measured)
-    settings.zapisz()
+    settings.save()
     return changed
 
 
@@ -657,49 +657,49 @@ def save(settings: config.Ustawienia, p: HardwareProfile, rec: Recommendation,
 
 
 def _describe(p: HardwareProfile) -> list[str]:
-    lines = [t("Profil sprzętu")]
-    ram = t("{ram} GB widoczne dla systemu, {wolne} GB wolne",
-            ram=_num(p.ram_total_gb), wolne=_num(p.ram_free_gb))
+    lines = [t("Hardware profile")]
+    ram = t("{ram} GB visible to the system, {free} GB free",
+            ram=_num(p.ram_total_gb), free=_num(p.ram_free_gb))
     if p.ram_installed_gb:
-        ram += " (" + t("zainstalowane: {ram} GB", ram=_num(p.ram_installed_gb)) + ")"
-    lines.append(f"  {t('Pamięć RAM')}: {ram}")
-    cores_text = t("rdzenie: {fizyczne}, wątki: {logiczne}",
-                fizyczne=p.physical_cores or "?", logiczne=p.logical_cores)
-    isa = ", ".join(n for n, jest in (("AVX2", p.avx2), ("AVX-512", p.avx512)) if jest)
-    lines.append(f"  {t('Procesor')}: {p.cpu_name or '?'} ({cores_text}"
+        ram += " (" + t("installed: {ram} GB", ram=_num(p.ram_installed_gb)) + ")"
+    lines.append(f"  {t('RAM')}: {ram}")
+    cores_text = t("cores: {physical}, threads: {logical}",
+                     physical=p.physical_cores or "?", logical=p.logical_cores)
+    isa = ", ".join(n for n, present in (("AVX2", p.avx2), ("AVX-512", p.avx512)) if present)
+    lines.append(f"  {t('CPU')}: {p.cpu_name or '?'} ({cores_text}"
                  + (f", {isa}" if isa else "") + ")")
     if p.devices:
-        lines.append(f"  {t('Urządzenia OpenVINO')} ({p.openvino_version or '?'}):")
+        lines.append(f"  {t('OpenVINO devices')} ({p.openvino_version or '?'}):")
         for d in p.devices:
             details = [x for x in (
                 d.type if d.id != "CPU" else "",
-                t("{gb} GB pamięci", gb=_num(d.memory_gb)) if d.memory_gb else "",
+                t("{gb} GB memory", gb=_num(d.memory_gb)) if d.memory_gb else "",
                 f"uarch {d.uarch}" if d.uarch else "",
-                t("sterownik {wersja}", wersja=d.driver) if d.driver else "",
+                t("driver {version}", version=d.driver) if d.driver else "",
             ) if x]
             lines.append(f"    {d.id}: {d.name or '?'}"
                          + (f" ({', '.join(details)})" if details else ""))
     else:
-        lines.append(f"  {t('Urządzenia OpenVINO')}: {t('brak (OpenVINO niedostępne)')}")
+        lines.append(f"  {t('OpenVINO devices')}: {t('none (OpenVINO unavailable)')}")
     if p.adapters:
-        lines.append(f"  {t('Karty graficzne')}:")
+        lines.append(f"  {t('Graphics adapters')}:")
         for a in p.adapters:
-            lines.append(f"    {a.name}" + (f" ({t('sterownik {wersja}', wersja=a.driver_version)})"
+            lines.append(f"    {a.name}" + (f" ({t('driver {version}', version=a.driver_version)})"
                                             if a.driver_version else ""))
     return lines
 
 
 def _describe_rec(rec: Recommendation) -> list[str]:
     lines = [
-        t("Rekomendacja"),
-        f"  {t('Model transkrypcji')}: {rec.model}",
-        f"  {t('Urządzenie')}: {rec.device}",
-        f"  {t('Model dyktowania')}: {rec.dictation_model}",
-        f"  {t('Uzasadnienie')}:",
+        t("Recommendation"),
+        f"  {t('Transcription model')}: {rec.model}",
+        f"  {t('Device')}: {rec.device}",
+        f"  {t('Dictation model')}: {rec.dictation_model}",
+        f"  {t('Reasons')}:",
     ]
     lines += [f"    - {reason}" for reason in rec.reasons]
     if rec.warnings:
-        lines.append(f"  {t('Ostrzeżenia')}:")
+        lines.append(f"  {t('Warnings')}:")
         lines += [f"    ! {warning}" for warning in rec.warnings]
     return lines
 
@@ -712,7 +712,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Hardware profile and Whisper model recommendation (offline).",
     )
     parser.add_argument("--save", action="store_true",
-                        help="write the recommendation to ustawienia.json")
+                        help="write the recommendation to settings.json")
     parser.add_argument("--keep-choice", action="store_true",
                         help="with --save: keep model/device the user changed by hand")
     parser.add_argument("--benchmark", action="store_true",
@@ -726,8 +726,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(errors="replace")
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
 
-    settings = config.Ustawienia()
-    i18n.ustaw_jezyk(settings["jezyk_interfejsu"])
+    settings = config.Settings()
+    i18n.set_language(settings["ui_language"])
 
     p = profile()
     rec = recommend(p)
@@ -735,24 +735,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.benchmark:
         from . import transcribe
 
-        if not transcribe.model_pobrany(rec.model):
-            print(t("Pomiar pominięty: model {model} nie jest pobrany.", model=rec.model))
+        if not transcribe.model_downloaded(rec.model):
+            print(t("Measurement skipped: model {model} is not downloaded.", model=rec.model))
         else:
-            print(t("Mierzę {model} na {device} ({s} s sygnału syntetycznego)...",
+            print(t("Measuring {model} on {device} ({s} s of synthetic signal)...",
                     model=_model_name(rec.model), device=rec.device, s=_num(args.seconds)))
             try:
                 measured = benchmark(rec.model, rec.device, args.seconds)
             except Exception as error:
                 log.exception("Benchmark failed")
-                print(t("Pomiar nie powiódł się: {blad}", blad=error))
+                print(t("Measurement failed: {error}", error=error))
             else:
-                print(t("Ładowanie {load} s, przetwarzanie {proc} s na {device}: "
-                        "{x}× szybciej niż czas nagrania.",
+                print(t("Load {load} s, processing {proc} s on {device}: "
+                        "{x}× faster than real time.",
                         load=_num(measured.load_s), proc=_num(measured.process_s, 2),
                         device=measured.device, x=_num(measured.speed)))
                 if measured.device != rec.device:
-                    rec.warnings.append(t("Model nie ruszył na {device}, pomiar dotyczy {uzyte}.",
-                                          device=rec.device, uzyte=measured.device))
+                    rec.warnings.append(t("The model did not start on {device}; the measurement is for {used}.",
+                                          device=rec.device, used=measured.device))
                 rec = after_benchmark(rec, p, measured.speed)
 
     print("\n".join(_describe(p)))
@@ -763,12 +763,12 @@ def main(argv: list[str] | None = None) -> int:
         changed = save(settings, p, rec, measured, keep_choice=args.keep_choice)
         print()
         if changed:
-            print(t("Zapisano w ustawieniach: {klucze}.", klucze=", ".join(changed)))
+            print(t("Saved to settings: {keys}.", keys=", ".join(changed)))
         else:
-            print(t("Ustawienia już zgodne z rekomendacją, zapisano profil sprzętu."))
+            print(t("Settings already match the recommendation; hardware profile saved."))
         manual = [k for k in SETTINGS_KEYS if settings[k] != getattr(rec, k)]
         if manual:
-            print(t("Zostawiono ręczny wybór: {klucze}.", klucze=", ".join(
+            print(t("Kept the manual choice: {keys}.", keys=", ".join(
                 f"{k}={settings[k]}" for k in manual)))
     return 0
 

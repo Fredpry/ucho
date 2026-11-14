@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Serwer MCP na sztucznym archiwum: protokol, narzedzia i bezpieczenstwo id."""
+"""MCP server on a synthetic archive: protocol, tools, id security, old and new formats."""
 import json
 import subprocess
 import sys
@@ -8,108 +8,185 @@ from pathlib import Path
 
 import pytest
 
-from ucho_mcp.serwer import Archiwum, obsluz
+from ucho_mcp.server import Archive, handle
 
-KORZEN = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent
+
+OLD_ID = "2026-11-10_10-00_Budzet"
+NEW_ID = "2026-11-12_14-30_Rekrutacja"
+NEW_ID_2 = "2026-11-13_09-00_Standup"
 
 
-def _sesja(katalog: Path, nazwa: str, data: str, segmenty: list[tuple]) -> None:
-    sesja = katalog / nazwa
-    sesja.mkdir(parents=True)
+def _old_session(folder: Path, name: str, date: str, segments: list[tuple]) -> None:
+    """Pre-v0.2 format: Polish meta.json keys and file names."""
+    session = folder / name
+    session.mkdir(parents=True)
     meta = {
-        "nazwa": nazwa.split("_")[2],
-        "data": data,
+        "nazwa": name.split("_")[2],
+        "data": date,
         "trwanie_s": 600,
-        "segmenty": [{"start": s, "koniec": s + 5, "tekst": t, "mowca": m}
-                     for s, m, t in segmenty],
+        "segmenty": [{"start": s, "koniec": s + 5, "tekst": text, "mowca": speaker}
+                     for s, speaker, text in segments],
     }
-    (sesja / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
-    (sesja / "transkrypt.md").write_text("# transkrypt", encoding="utf-8")
+    (session / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (session / "transkrypt.md").write_text("# transkrypt", encoding="utf-8")
+    (session / "podsumowanie.md").write_text("# Podsumowanie\nStary format.", encoding="utf-8")
+
+
+def _new_session(folder: Path, name: str, date: str, segments: list[tuple],
+                 summary: str | None = None) -> None:
+    """Current format: English keys, speaker codes, English file names."""
+    session = folder / name
+    session.mkdir(parents=True)
+    meta = {
+        "name": name.split("_")[2],
+        "date": date,
+        "duration_s": 300,
+        "segments": [{"start": s, "end": s + 5, "text": text, "speaker": speaker}
+                     for s, speaker, text in segments],
+    }
+    (session / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (session / "transcript.md").write_text("# transcript", encoding="utf-8")
+    if summary:
+        (session / "summary.md").write_text(summary, encoding="utf-8")
 
 
 @pytest.fixture
-def archiwum(tmp_path: Path) -> Archiwum:
-    _sesja(tmp_path, "2026-11-10_10-00_Budzet", "2026-11-10 10:00", [
+def archive(tmp_path: Path) -> Archive:
+    _old_session(tmp_path, OLD_ID, "2026-11-10 10:00", [
         (5, "Ja", "Zaczynamy od budżetu na czwarty kwartał."),
         (130, "Spotkanie", "Dostawca stali podniósł cenę o dziesięć procent."),
     ])
-    _sesja(tmp_path, "2026-11-12_14-30_Rekrutacja", "2026-11-12 14:30", [
-        (10, "Spotkanie", "Mamy trzech kandydatów na stanowisko."),
+    _new_session(tmp_path, NEW_ID, "2026-11-12 14:30", [
+        (10, "meeting", "Mamy trzech kandydatów na stanowisko."),
+        (200, "me", "Umówmy rozmowy na środę."),
+    ], summary="# Summary\nThree candidates.")
+    _new_session(tmp_path, NEW_ID_2, "2026-11-13 09:00", [
+        (3, "me", "Krótki standup zespołu."),
     ])
-    (tmp_path / "2026-11-12_14-30_Rekrutacja" / "podsumowanie.md").write_text(
-        "# Podsumowanie\nTrzech kandydatów.", encoding="utf-8")
-    return Archiwum(tmp_path)
+    return Archive(tmp_path)
 
 
-def _wywolaj(archiwum, nazwa, **argumenty):
-    odpowiedz = obsluz(archiwum, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                                  "params": {"name": nazwa, "arguments": argumenty}})
-    wynik = odpowiedz["result"]
-    return wynik["content"][0]["text"], wynik["isError"]
+def _call(archive, name, **arguments):
+    response = handle(archive, {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                "params": {"name": name, "arguments": arguments}})
+    result = response["result"]
+    return result["content"][0]["text"], result["isError"]
 
 
-def test_initialize_i_lista_narzedzi(archiwum):
-    init = obsluz(archiwum, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                             "params": {"protocolVersion": "2025-06-18"}})
+def test_initialize_and_tool_list(archive):
+    init = handle(archive, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                            "params": {"protocolVersion": "2025-06-18"}})
     assert init["result"]["protocolVersion"] == "2025-06-18"
     assert init["result"]["serverInfo"]["name"] == "ucho"
-    narzedzia = obsluz(archiwum, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    nazwy = {n["name"] for n in narzedzia["result"]["tools"]}
-    assert nazwy == {"list_meetings", "get_transcript", "get_summary", "search_transcripts"}
-    assert obsluz(archiwum, {"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
+    tools = handle(archive, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    by_name = {tool["name"]: tool for tool in tools["result"]["tools"]}
+    assert set(by_name) == {"list_meetings", "get_transcript", "get_summary", "search_transcripts"}
+    assert set(by_name["list_meetings"]["inputSchema"]["properties"]) == {"from", "to", "query", "limit"}
+    assert by_name["search_transcripts"]["inputSchema"]["required"] == ["query"]
+    assert handle(archive, {"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
 
 
-def test_list_meetings_od_najnowszych_i_filtr_dat(archiwum):
-    tekst, blad = _wywolaj(archiwum, "list_meetings")
-    assert not blad
-    lista = json.loads(tekst)
-    assert [s["id"] for s in lista] == ["2026-11-12_14-30_Rekrutacja", "2026-11-10_10-00_Budzet"]
-    tekst, _ = _wywolaj(archiwum, "list_meetings", od="2026-11-11")
-    assert [s["id"] for s in json.loads(tekst)] == ["2026-11-12_14-30_Rekrutacja"]
+def test_list_meetings_newest_first_both_formats(archive):
+    text, error = _call(archive, "list_meetings")
+    assert not error
+    meetings = json.loads(text)
+    assert [m["id"] for m in meetings] == [NEW_ID_2, NEW_ID, OLD_ID]
+    old = meetings[2]
+    assert old["title"] == "Budzet"
+    assert old["date"] == "2026-11-10 10:00"
+    assert old["duration"] == "00:10:00"
+    assert old["transcript"] and old["summary"]
+    new = meetings[1]
+    assert new["title"] == "Rekrutacja" and new["duration"] == "00:05:00"
+    assert new["transcript"] and new["summary"]
+    assert meetings[0]["summary"] is False
 
 
-def test_get_transcript_z_zakresem_minut(archiwum):
-    tekst, blad = _wywolaj(archiwum, "get_transcript", id="2026-11-10_10-00_Budzet", od_min=2)
-    assert not blad
-    assert "Dostawca stali" in tekst
-    assert "budżetu" not in tekst
+def test_list_meetings_date_filter_and_old_alias(archive):
+    text, _ = _call(archive, "list_meetings", **{"from": "2026-11-11", "to": "2026-11-12"})
+    assert [m["id"] for m in json.loads(text)] == [NEW_ID]
+    text, _ = _call(archive, "list_meetings", od="2026-11-11", do="2026-11-12")
+    assert [m["id"] for m in json.loads(text)] == [NEW_ID]
+    text, _ = _call(archive, "list_meetings", query="budzet")
+    assert [m["id"] for m in json.loads(text)] == [OLD_ID]
+    text, _ = _call(archive, "list_meetings", fraza="standup")
+    assert [m["id"] for m in json.loads(text)] == [NEW_ID_2]
 
 
-def test_get_summary(archiwum):
-    tekst, _ = _wywolaj(archiwum, "get_summary", id="2026-11-12_14-30_Rekrutacja")
-    assert "Trzech kandydatów" in tekst
-    tekst, blad = _wywolaj(archiwum, "get_summary", id="2026-11-10_10-00_Budzet")
-    assert not blad and "nie ma podsumowania" in tekst
+def test_get_transcript_old_format_with_minutes(archive):
+    text, error = _call(archive, "get_transcript", id=OLD_ID, from_min=2)
+    assert not error
+    assert "Meeting: Dostawca stali" in text
+    assert "budżetu" not in text
+    text, _ = _call(archive, "get_transcript", id=OLD_ID, od_min=2)
+    assert "Dostawca stali" in text and "budżetu" not in text
+    text, _ = _call(archive, "get_transcript", id=OLD_ID)
+    assert "[00:00:05] Me: Zaczynamy od budżetu" in text
 
 
-def test_wyszukiwanie_bez_polskich_znakow_i_po_poczatku_slowa(archiwum):
-    tekst, blad = _wywolaj(archiwum, "search_transcripts", fraza="budzet")
-    assert not blad
-    trafienia = json.loads(tekst)
-    assert trafienia[0]["id"] == "2026-11-10_10-00_Budzet"
-    assert trafienia[0]["czas"] == "00:00:05"
-    tekst, _ = _wywolaj(archiwum, "search_transcripts", fraza="kandyd")
-    assert json.loads(tekst)[0]["id"] == "2026-11-12_14-30_Rekrutacja"
+def test_get_transcript_new_format_with_minutes(archive):
+    text, error = _call(archive, "get_transcript", id=NEW_ID, to_min=1)
+    assert not error
+    assert "[00:00:10] Meeting: Mamy trzech kandydatów" in text
+    assert "środę" not in text
+    text, _ = _call(archive, "get_transcript", id=NEW_ID, do_min=1)
+    assert "środę" not in text
+    text, _ = _call(archive, "get_transcript", id=NEW_ID, from_min=3)
+    assert "Me: Umówmy rozmowy na środę." in text
 
 
-@pytest.mark.parametrize("zle_id", ["..", "../poza", "a/b", "C:\\Windows", "nie-ma-takiego"])
-def test_id_nie_wychodzi_poza_archiwum(archiwum, zle_id):
-    tekst, blad = _wywolaj(archiwum, "get_transcript", id=zle_id)
-    assert blad
+def test_get_summary_old_and_new_file_names(archive):
+    text, _ = _call(archive, "get_summary", id=OLD_ID)
+    assert "Stary format." in text
+    text, _ = _call(archive, "get_summary", id=NEW_ID)
+    assert "Three candidates." in text
+    text, error = _call(archive, "get_summary", id=NEW_ID_2)
+    assert not error and "no summary" in text
 
 
-def test_serwer_przez_stdio(archiwum):
-    wejscie = "\n".join(json.dumps(w) for w in [
+def test_search_without_diacritics_and_by_prefix(archive):
+    text, error = _call(archive, "search_transcripts", query="budzet")
+    assert not error
+    hits = json.loads(text)
+    assert hits[0]["id"] == OLD_ID
+    assert hits[0]["time"] == "00:00:05"
+    assert hits[0]["speaker"] == "Me"
+    text, _ = _call(archive, "search_transcripts", query="kandyd")
+    hit = json.loads(text)[0]
+    assert hit["id"] == NEW_ID and hit["speaker"] == "Meeting"
+    assert "kandydatów" in hit["excerpt"]
+    text, _ = _call(archive, "search_transcripts", fraza="srod")
+    assert json.loads(text)[0]["id"] == NEW_ID
+
+
+@pytest.mark.parametrize("bad_id", ["..", "../outside", "a/b", "C:\\Windows", "no-such-meeting"])
+def test_id_stays_inside_archive(archive, bad_id):
+    _, error = _call(archive, "get_transcript", id=bad_id)
+    assert error
+
+
+def _stdio(archive_dir: Path, flag: str) -> list[dict]:
+    stdin = "\n".join(json.dumps(m) for m in [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize",
          "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                     "clientInfo": {"name": "test", "version": "0"}}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-         "params": {"name": "search_transcripts", "arguments": {"fraza": "stali"}}},
+         "params": {"name": "search_transcripts", "arguments": {"query": "stali"}}},
+        {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+         "params": {"name": "list_meetings", "arguments": {}}},
     ]) + "\n"
-    proces = subprocess.run(
-        [sys.executable, str(KORZEN / "mcp_serwer.py"), "--katalog", str(archiwum.katalog)],
-        input=wejscie.encode("utf-8"), capture_output=True, timeout=30, check=True)
-    linie = [json.loads(linia) for linia in proces.stdout.decode("utf-8").splitlines()]
-    assert [o["id"] for o in linie] == [1, 2]
-    assert "Dostawca stali" in linie[1]["result"]["content"][0]["text"]
+    process = subprocess.run(
+        [sys.executable, str(ROOT / "mcp_server.py"), flag, str(archive_dir)],
+        input=stdin.encode("utf-8"), capture_output=True, timeout=30, check=True)
+    return [json.loads(line) for line in process.stdout.decode("utf-8").splitlines()]
+
+
+@pytest.mark.parametrize("flag", ["--recordings-dir", "--katalog"])
+def test_server_over_stdio(archive, flag):
+    responses = _stdio(archive.folder, flag)
+    assert [r["id"] for r in responses] == [1, 2, 3]
+    assert "Dostawca stali" in responses[1]["result"]["content"][0]["text"]
+    meetings = json.loads(responses[2]["result"]["content"][0]["text"])
+    assert {m["id"] for m in meetings} == {OLD_ID, NEW_ID, NEW_ID_2}

@@ -1,57 +1,57 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
 <#
-    Ucho - instalator / installer.
+    Ucho - installer / instalator.
 
-    Uruchom / Run: prawy przycisk -> "Uruchom w programie PowerShell"
-    albo / or:  powershell -ExecutionPolicy Bypass -File .\instaluj.ps1
+    Run / Uruchom: right click -> "Run with PowerShell"
+    or / albo:  powershell -ExecutionPolicy Bypass -File .\install.ps1
 
-    Nie wymaga uprawnien administratora i mozna go uruchamiac wielokrotnie.
     No admin rights needed; safe to run more than once.
+    Nie wymaga uprawnien administratora i mozna go uruchamiac wielokrotnie.
 
-    Teksty bez polskich znakow: PowerShell 5.1 czyta plik bez BOM jako ANSI.
+    ASCII only: PowerShell 5.1 reads a file without a BOM as ANSI.
 #>
 
 [CmdletBinding()]
 param(
-    [switch]$PomijModel,            # nie pobieraj modelu Whisper / skip the Whisper model
-    [switch]$ZPodsumowaniem,        # pobierz tez model podsumowan / also download the summary model
-    [switch]$PrzeinstalujPakiety    # wymus ponowna instalacje / force reinstall of packages
+    [switch]$SkipModel,            # skip the Whisper model / nie pobieraj modelu Whisper
+    [switch]$WithSummary,          # also download the summary model / pobierz tez model podsumowan
+    [switch]$ReinstallPackages     # force reinstall of packages / wymus ponowna instalacje
 )
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Definition
-Set-Location $Root  # importy "-c from ucho..." wymagaja pracy w katalogu programu
+Set-Location $Root  # "-c from ucho..." imports need the program folder as working directory
 $Venv = Join-Path $Root '.venv'
 $VenvPy = Join-Path $Venv 'Scripts\python.exe'
 $VenvPyw = Join-Path $Venv 'Scripts\pythonw.exe'
-$Modele = Join-Path $Root 'modele'
-$Ikona = Join-Path $Root 'ucho\assets\ikona.ico'
-$Ustawienia = Join-Path $Root 'ustawienia.json'
-$Wymagania = Join-Path $Root 'requirements.txt'
-$Nagrania = Join-Path $env:USERPROFILE 'Ucho\nagrania'
-$ModelDomyslny = 'OpenVINO/whisper-large-v3-int8-ov'
-$ModelLLMDomyslny = 'OpenVINO/Qwen3-8B-int4-ov'
-$Tmp = Join-Path $env:TEMP 'ucho-instalator'
+$Icon = Join-Path $Root 'ucho\assets\icon.ico'
+$Settings = Join-Path $Root 'settings.json'
+$LegacySettings = Join-Path $Root 'ustawienia.json'
+$Requirements = Join-Path $Root 'requirements.txt'
+$Recordings = Join-Path $env:USERPROFILE 'Ucho\recordings'
+$DefaultModel = 'OpenVINO/whisper-large-v3-int8-ov'
+$DefaultLlmModel = 'OpenVINO/Qwen3-8B-int4-ov'
+$Tmp = Join-Path $env:TEMP 'ucho-installer'
 
 $PL = (Get-UICulture).TwoLetterISOLanguageName -eq 'pl'
 function T($pl, $en) { if ($PL) { return $pl } else { return $en } }
 
-function Krok($tekst) { Write-Host "`n==> $tekst" -ForegroundColor Cyan }
-function Ok($tekst)   { Write-Host "    [OK] $tekst" -ForegroundColor Green }
-function Uwaga($t)    { Write-Host "    [!]  $t" -ForegroundColor Yellow }
-function Blad($t)     { Write-Host "    [X]  $t" -ForegroundColor Red }
+function Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
+function Ok($text)   { Write-Host "    [OK] $text" -ForegroundColor Green }
+function Warn($text) { Write-Host "    [!]  $text" -ForegroundColor Yellow }
+function Fail($text) { Write-Host "    [X]  $text" -ForegroundColor Red }
 
-function Odswiez-Sciezke {
-    $maszyna = [Environment]::GetEnvironmentVariable('Path', 'Machine')
-    $uzytkownik = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $env:Path = "$maszyna;$uzytkownik"
+function Update-Path {
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$machine;$user"
 }
 
 function Test-Python312 {
     try {
-        $wynik = & py -3.12 -c "import sys; print(sys.version.split()[0])"
-        if ($LASTEXITCODE -eq 0 -and $wynik) { return $wynik.Trim() }
+        $result = & py -3.12 -c "import sys; print(sys.version.split()[0])"
+        if ($LASTEXITCODE -eq 0 -and $result) { return $result.Trim() }
     } catch { }
     return $null
 }
@@ -63,200 +63,215 @@ Write-Host (T '  Ucho - lokalna transkrypcja spotkan i dyktowanie' '  Ucho - loc
 Write-Host (T '  Dziala offline. Audio i transkrypty nie opuszczaja tego komputera.' '  Works offline. Audio and transcripts never leave this computer.') -ForegroundColor DarkGray
 
 if ($Root -match 'OneDrive') {
-    Uwaga (T 'Program lezy w folderze OneDrive. Modele (kilka GB) i logi beda synchronizowane do chmury.' 'The program is inside a OneDrive folder. Models (several GB) and logs will sync to the cloud.')
-    Uwaga (T 'Zalecane: rozpakuj Ucho np. do C:\Users\<Ty>\Ucho\app' 'Recommended: unpack Ucho to e.g. C:\Users\<you>\Ucho\app')
+    Warn (T 'Program lezy w folderze OneDrive. Modele (kilka GB) i logi beda synchronizowane do chmury.' 'The program is inside a OneDrive folder. Models (several GB) and logs will sync to the cloud.')
+    Warn (T 'Zalecane: rozpakuj Ucho np. do C:\Users\<Ty>\Ucho\app' 'Recommended: unpack Ucho to e.g. C:\Users\<you>\Ucho\app')
 }
 
 # --- 1. Python 3.12 -------------------------------------------------------
 
-Krok (T 'Sprawdzam Pythona 3.12' 'Checking Python 3.12')
-$wersja = Test-Python312
-if ($null -eq $wersja) {
-    Uwaga (T 'Brak Pythona 3.12 - instaluje przez winget (kilka minut)' 'Python 3.12 not found - installing with winget (a few minutes)')
+Step (T 'Sprawdzam Pythona 3.12' 'Checking Python 3.12')
+$version = Test-Python312
+if ($null -eq $version) {
+    Warn (T 'Brak Pythona 3.12 - instaluje przez winget (kilka minut)' 'Python 3.12 not found - installing with winget (a few minutes)')
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Blad (T 'Brak winget. Zainstaluj Pythona 3.12 z https://www.python.org/downloads/' 'winget not found. Install Python 3.12 from https://www.python.org/downloads/')
+        Fail (T 'Brak winget. Zainstaluj Pythona 3.12 z https://www.python.org/downloads/' 'winget not found. Install Python 3.12 from https://www.python.org/downloads/')
         exit 1
     }
     & winget install --id Python.Python.3.12 -e --scope user --silent --accept-package-agreements --accept-source-agreements
-    Odswiez-Sciezke
+    Update-Path
     Start-Sleep -Seconds 2
-    $wersja = Test-Python312
-    if ($null -eq $wersja) {
-        Blad (T 'Instalacja Pythona nie powiodla sie. Otworz nowe okno i uruchom skrypt ponownie.' 'Python installation failed. Open a new window and run the script again.')
+    $version = Test-Python312
+    if ($null -eq $version) {
+        Fail (T 'Instalacja Pythona nie powiodla sie. Otworz nowe okno i uruchom skrypt ponownie.' 'Python installation failed. Open a new window and run the script again.')
         exit 1
     }
 }
-Ok "Python $wersja"
+Ok "Python $version"
 
-# --- 2. Srodowisko wirtualne ---------------------------------------------
+# --- 2. Virtual environment -----------------------------------------------
 
-Krok (T 'Przygotowuje srodowisko wirtualne (.venv)' 'Preparing the virtual environment (.venv)')
+Step (T 'Przygotowuje srodowisko wirtualne (.venv)' 'Preparing the virtual environment (.venv)')
 if (-not (Test-Path $VenvPy)) {
     & py -3.12 -m venv $Venv
-    if ($LASTEXITCODE -ne 0) { Blad (T 'Nie udalo sie utworzyc .venv' 'Could not create .venv'); exit 1 }
+    if ($LASTEXITCODE -ne 0) { Fail (T 'Nie udalo sie utworzyc .venv' 'Could not create .venv'); exit 1 }
     Ok (T 'Utworzono .venv' 'Created .venv')
 } else {
     Ok (T '.venv juz istnieje' '.venv already exists')
 }
 
-# --- 3. Zaleznosci (przypiete wersje z requirements.txt) -----------------
+# --- 3. Dependencies (pinned versions from requirements.txt) ---------------
 
-Krok (T 'Instaluje zaleznosci (za pierwszym razem ok. 400 MB)' 'Installing dependencies (about 400 MB the first time)')
+Step (T 'Instaluje zaleznosci (za pierwszym razem ok. 400 MB)' 'Installing dependencies (about 400 MB the first time)')
 & $VenvPy -m pip install --upgrade --quiet pip setuptools wheel
-if ($LASTEXITCODE -ne 0) { Blad (T 'Aktualizacja pip nie powiodla sie' 'pip upgrade failed'); exit 1 }
+if ($LASTEXITCODE -ne 0) { Fail (T 'Aktualizacja pip nie powiodla sie' 'pip upgrade failed'); exit 1 }
 
-$argi = @('-m', 'pip', 'install', '-r', $Wymagania)
-if ($PrzeinstalujPakiety) { $argi += '--force-reinstall' }
-& $VenvPy @argi
-if ($LASTEXITCODE -ne 0) { Blad (T 'Instalacja zaleznosci nie powiodla sie' 'Dependency installation failed'); exit 1 }
+$pipArgs = @('-m', 'pip', 'install', '-r', $Requirements)
+if ($ReinstallPackages) { $pipArgs += '--force-reinstall' }
+& $VenvPy @pipArgs
+if ($LASTEXITCODE -ne 0) { Fail (T 'Instalacja zaleznosci nie powiodla sie' 'Dependency installation failed'); exit 1 }
 Ok (T 'Zaleznosci zainstalowane' 'Dependencies installed')
 
-# Pakiet openvino-telemetry przychodzi razem z OpenVINO. Aplikacja go nie uzywa
-# (korzystaja z niego tylko narzedzia do konwersji modeli), ale zapisujemy
-# odmowe zgody, zeby nic nie moglo wyslac danych nawet przy recznym uzyciu narzedzi.
+# The openvino-telemetry package comes with OpenVINO. The app does not use it
+# (only the model conversion tools do), but we record the opt-out anyway, so
+# nothing can send data even when someone runs those tools by hand.
 $optOut = Join-Path $Venv 'Scripts\opt_in_out.exe'
 if (Test-Path $optOut) {
     & $optOut --opt_out | Out-Null
     Ok (T 'Telemetria OpenVINO wylaczona' 'OpenVINO telemetry disabled')
 }
 
-# --- 4. Ikona -------------------------------------------------------------
+# --- 4. Icon --------------------------------------------------------------
 
-Krok (T 'Generuje ikone aplikacji' 'Generating the app icon')
-& $VenvPy -c "from ucho.ikona import zapisz_ico; from pathlib import Path; zapisz_ico(Path(r'$Ikona'))"
-if ($LASTEXITCODE -eq 0) { Ok $Ikona } else { Uwaga (T 'Nie udalo sie wygenerowac ikony (aplikacja zadziala bez niej)' 'Could not generate the icon (the app works without it)') }
+Step (T 'Generuje ikone aplikacji' 'Generating the app icon')
+& $VenvPy -c "from ucho.icon import save_ico; from pathlib import Path; save_ico(Path(r'$Icon'))"
+if ($LASTEXITCODE -eq 0) { Ok $Icon } else { Warn (T 'Nie udalo sie wygenerowac ikony (aplikacja zadziala bez niej)' 'Could not generate the icon (the app works without it)') }
 
-# --- 5. Ustawienia poczatkowe --------------------------------------------
+# --- 5. Initial settings --------------------------------------------------
 
-# Najpierw plik z wartosciami domyslnymi (klucze jak w config.DOMYSLNE), potem
-# krok 6 wpisuje do niego rekomendacje sprzetowa. Odwrotna kolejnosc nadpisalaby
-# rekomendacje wartosciami domyslnymi.
-Krok (T 'Zapisuje ustawienia poczatkowe' 'Writing initial settings')
-$noweUstawienia = -not (Test-Path $Ustawienia)
-if ($noweUstawienia) {
-    $konfiguracja = [ordered]@{
-        katalog_nagran          = $Nagrania
-        model                   = $ModelDomyslny
+# Update from v0.1: the app code itself (config.Settings) migrates
+# ustawienia.json to settings.json, so the user's choices and recordings folder
+# survive. The old file is kept.
+if ((-not (Test-Path $Settings)) -and (Test-Path $LegacySettings)) {
+    & $VenvPy -c "from ucho import config; config.Settings()"
+    if (Test-Path $Settings) {
+        Ok (T 'Przeniesiono ustawienia z ustawienia.json do settings.json' 'Migrated ustawienia.json to settings.json')
+    }
+}
+
+# First the file with defaults (keys as in config.DEFAULTS), then step 6 writes
+# the hardware recommendation into it. The other order would overwrite the
+# recommendation with the defaults.
+Step (T 'Zapisuje ustawienia poczatkowe' 'Writing initial settings')
+$newSettings = -not (Test-Path $Settings)
+if ($newSettings) {
+    $configuration = [ordered]@{
+        recordings_dir          = $Recordings
+        model                   = $DefaultModel
         device                  = 'GPU'
-        jezyk                   = 'auto'
-        jezyk_interfejsu        = 'auto'
-        sciezki                 = 'obie'
-        mikrofon_index          = $null
+        language                = 'auto'
+        ui_language             = 'auto'
+        tracks                  = 'both'
+        microphone_index        = $null
         system_index            = $null
         hotkey                  = '<ctrl>+<alt>+r'
         tray                    = $true
-        transkrybuj_po_stopie   = $true
-        podsumowanie            = [bool]$ZPodsumowaniem
-        model_llm               = $ModelLLMDomyslny
-        zmiana_nazwy            = [bool]$ZPodsumowaniem
+        transcribe_after_stop   = $true
+        summary_enabled         = [bool]$WithSummary
+        summary_model           = $DefaultLlmModel
+        rename_folder           = [bool]$WithSummary
         dictation_model         = 'OpenVINO/whisper-large-v3-fp16-ov'
         hardware_profile        = $null
     }
-    $konfiguracja | ConvertTo-Json | Out-File -FilePath $Ustawienia -Encoding utf8
-    Ok $Ustawienia
+    $configuration | ConvertTo-Json | Out-File -FilePath $Settings -Encoding utf8
+    Ok $Settings
 } else {
-    Ok (T 'ustawienia.json juz istnieje - zostawiam wybory uzytkownika' 'ustawienia.json already exists - keeping the user choices')
+    Ok (T 'settings.json juz istnieje - zostawiam wybory uzytkownika' 'settings.json already exists - keeping the user choices')
 }
-New-Item -ItemType Directory -Force -Path $Nagrania | Out-Null
-Ok ((T 'Nagrania: ' 'Recordings: ') + $Nagrania)
+# Existing settings keep their own recordings folder (e.g. ...\Ucho\nagrania).
+try {
+    $stored = Get-Content -Raw -Encoding UTF8 -Path $Settings | ConvertFrom-Json
+    if ($stored.recordings_dir) { $Recordings = [string]$stored.recordings_dir }
+} catch { }
+New-Item -ItemType Directory -Force -Path $Recordings | Out-Null
+Ok ((T 'Nagrania: ' 'Recordings: ') + $Recordings)
 
-# --- 6. Sprzet i dobor modelu --------------------------------------------
+# --- 6. Hardware and model choice ------------------------------------------
 
-# ucho.hardware czyta RAM, procesor i urzadzenia OpenVINO, dobiera model
-# i urzadzenie z tabeli regul (docs/hardware.md) i zapisuje je w ustawieniach.
-# Przy ponownej instalacji --keep-choice nadpisuje tylko to, czego uzytkownik
-# nie zmienil recznie (np. po aktualizacji sterownika GPU wejdzie na GPU).
-Krok (T 'Sprawdzam sprzet i dobieram model' 'Checking the hardware and choosing the model')
-$argiSprzetu = @('-m', 'ucho.hardware', '--save')
-if (-not $noweUstawienia) { $argiSprzetu += '--keep-choice' }
-& $VenvPy @argiSprzetu
+# ucho.hardware reads RAM, CPU and OpenVINO devices, picks the model and the
+# device from the rule table (docs/hardware.md) and writes them to the settings.
+# On a re-install --keep-choice overwrites only what the user did not change
+# by hand (e.g. after a GPU driver update it switches to the GPU).
+Step (T 'Sprawdzam sprzet i dobieram model' 'Checking the hardware and choosing the model')
+$hardwareArgs = @('-m', 'ucho.hardware', '--save')
+if (-not $newSettings) { $hardwareArgs += '--keep-choice' }
+& $VenvPy @hardwareArgs
 if ($LASTEXITCODE -ne 0) {
-    Uwaga (T 'Nie udalo sie sprawdzic sprzetu - zostaja ustawienia domyslne' 'Hardware check failed - keeping the default settings')
+    Warn (T 'Nie udalo sie sprawdzic sprzetu - zostaja ustawienia domyslne' 'Hardware check failed - keeping the default settings')
 }
 
-$Model = $ModelDomyslny
+$Model = $DefaultModel
 $device = 'GPU'
 try {
-    $zapisane = Get-Content -Raw -Encoding UTF8 -Path $Ustawienia | ConvertFrom-Json
-    if ($zapisane.model) { $Model = [string]$zapisane.model }
-    if ($zapisane.device) { $device = [string]$zapisane.device }
+    $stored = Get-Content -Raw -Encoding UTF8 -Path $Settings | ConvertFrom-Json
+    if ($stored.model) { $Model = [string]$stored.model }
+    if ($stored.device) { $device = [string]$stored.device }
 } catch {
-    Uwaga (T 'Nie udalo sie odczytac ustawien - pobiore model domyslny' 'Could not read the settings - downloading the default model')
+    Warn (T 'Nie udalo sie odczytac ustawien - pobiore model domyslny' 'Could not read the settings - downloading the default model')
 }
 if ($device -eq 'CPU') {
-    Uwaga (T 'Jesli masz Intel Arc lub Iris Xe, zaktualizuj sterownik graficzny i uruchom instalator ponownie' 'If you have Intel Arc or Iris Xe, update the graphics driver and run the installer again')
+    Warn (T 'Jesli masz Intel Arc lub Iris Xe, zaktualizuj sterownik graficzny i uruchom instalator ponownie' 'If you have Intel Arc or Iris Xe, update the graphics driver and run the installer again')
 }
 
-# --- 7. Modele ------------------------------------------------------------
+# --- 7. Models ------------------------------------------------------------
 
-# Pobieranie przez aplikacje: ta sama przypieta rewizja co w config.REWIZJE.
-$skryptModelu = Join-Path $Tmp 'model.py'
+# Download through the app code: the same pinned revision as in config.REVISIONS.
+$modelScript = Join-Path $Tmp 'model.py'
 @'
 import sys
 sys.path.insert(0, sys.argv[1])
-from ucho.transcribe import sciezka_modelu
-print(sciezka_modelu(sys.argv[2], pobierz=True))
-'@ | Out-File -FilePath $skryptModelu -Encoding utf8
+from ucho.transcribe import model_path
+print(model_path(sys.argv[2], download=True))
+'@ | Out-File -FilePath $modelScript -Encoding utf8
 
-if (-not $PomijModel) {
-    $rozmiar = & $VenvPy -c "from ucho import config; print(config.MODELE.get(r'$Model', {}).get('rozmiar', '?'))"
-    if ($LASTEXITCODE -ne 0 -or -not $rozmiar) { $rozmiar = '?' }
-    $rozmiar = "$rozmiar".Trim()
-    if (-not $PL) { $rozmiar = $rozmiar -replace ',', '.' }
-    Krok (T "Pobieram model $Model ($rozmiar, tylko raz)" "Downloading model $Model ($rozmiar, only once)")
-    & $VenvPy $skryptModelu $Root $Model
+if (-not $SkipModel) {
+    $size = & $VenvPy -c "from ucho import config; print(config.MODELS.get(r'$Model', {}).get('size', '?'))"
+    if ($LASTEXITCODE -ne 0 -or -not $size) { $size = '?' }
+    $size = "$size".Trim()
+    if ($PL) { $size = $size -replace '\.', ',' }
+    Step (T "Pobieram model $Model ($size, tylko raz)" "Downloading model $Model ($size, only once)")
+    & $VenvPy $modelScript $Root $Model
     if ($LASTEXITCODE -ne 0) {
-        Uwaga (T 'Pobieranie nie powiodlo sie - mozesz je powtorzyc w Ustawieniach aplikacji' 'Download failed - you can retry from the app Settings')
+        Warn (T 'Pobieranie nie powiodlo sie - mozesz je powtorzyc w Ustawieniach aplikacji' 'Download failed - you can retry from the app Settings')
     } else {
         Ok (T 'Model gotowy' 'Model ready')
     }
 } else {
-    Uwaga (T 'Pominieto pobieranie modelu (-PomijModel)' 'Skipped model download (-PomijModel)')
+    Warn (T 'Pominieto pobieranie modelu (-SkipModel)' 'Skipped model download (-SkipModel)')
 }
 
-# Podsumowania sa opcjonalne i domyslnie wylaczone: rdzeniem Ucho jest transkrypcja.
-if ($ZPodsumowaniem) {
-    Krok (T "Pobieram model podsumowan $ModelLLMDomyslny (~5 GB, tylko raz)" "Downloading summary model $ModelLLMDomyslny (~5 GB, only once)")
-    & $VenvPy $skryptModelu $Root $ModelLLMDomyslny
+# Summaries are optional and off by default: transcription is the core of Ucho.
+if ($WithSummary) {
+    Step (T "Pobieram model podsumowan $DefaultLlmModel (~5 GB, tylko raz)" "Downloading summary model $DefaultLlmModel (~5 GB, only once)")
+    & $VenvPy $modelScript $Root $DefaultLlmModel
     if ($LASTEXITCODE -ne 0) {
-        Uwaga (T 'Pobieranie nie powiodlo sie - transkrypcja dziala, tylko bez podsumowan' 'Download failed - transcription works, just without summaries')
+        Warn (T 'Pobieranie nie powiodlo sie - transkrypcja dziala, tylko bez podsumowan' 'Download failed - transcription works, just without summaries')
     } else {
         Ok (T 'Model podsumowan gotowy' 'Summary model ready')
     }
 }
 
-# --- 8. Skroty ------------------------------------------------------------
+# --- 8. Shortcuts ---------------------------------------------------------
 
-Krok (T 'Tworze skroty' 'Creating shortcuts')
+Step (T 'Tworze skroty' 'Creating shortcuts')
 $shell = New-Object -ComObject WScript.Shell
-$cele = @(
+$targets = @(
     (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Ucho.lnk'),
     (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Ucho.lnk')
 )
-foreach ($cel in $cele) {
+foreach ($target in $targets) {
     try {
-        $katalogSkrotu = Split-Path -Parent $cel
-        if (-not (Test-Path $katalogSkrotu)) { New-Item -ItemType Directory -Force -Path $katalogSkrotu | Out-Null }
-        $skrot = $shell.CreateShortcut($cel)
-        $skrot.TargetPath = $VenvPyw
-        # uruchom.pyw zamiast "-m ucho": dziala takze wtedy, gdy Windows
-        # wystartuje skrot bez katalogu roboczego (np. z przypietego kafelka).
-        $skrot.Arguments = "`"$(Join-Path $Root 'uruchom.pyw')`""
-        $skrot.WorkingDirectory = $Root
-        $skrot.Description = (T 'Lokalne nagrywanie i transkrypcja spotkan' 'Local meeting recording and transcription')
-        if (Test-Path $Ikona) { $skrot.IconLocation = $Ikona }
-        $skrot.Save()
-        # AppUserModelID w skrocie - przypiety kafelek sklei sie z dzialajacym
-        # oknem zamiast tworzyc drugi przycisk na pasku.
-        & $VenvPy -c "from pathlib import Path; from ucho import config, winshell; winshell.ustaw_id_skrotu(Path(r'$cel'), config.ID_APLIKACJI)"
-        Ok $cel
+        $shortcutDir = Split-Path -Parent $target
+        if (-not (Test-Path $shortcutDir)) { New-Item -ItemType Directory -Force -Path $shortcutDir | Out-Null }
+        $shortcut = $shell.CreateShortcut($target)
+        $shortcut.TargetPath = $VenvPyw
+        # ucho.pyw instead of "-m ucho": works also when Windows starts the
+        # shortcut without a working directory (e.g. from a pinned tile).
+        $shortcut.Arguments = "`"$(Join-Path $Root 'ucho.pyw')`""
+        $shortcut.WorkingDirectory = $Root
+        $shortcut.Description = (T 'Lokalne nagrywanie i transkrypcja spotkan' 'Local meeting recording and transcription')
+        if (Test-Path $Icon) { $shortcut.IconLocation = $Icon }
+        $shortcut.Save()
+        # AppUserModelID in the shortcut: the pinned tile merges with the
+        # running window instead of creating a second taskbar button.
+        & $VenvPy -c "from pathlib import Path; from ucho import config, winshell; winshell.set_shortcut_app_id(Path(r'$target'), config.APP_ID)"
+        Ok $target
     } catch {
-        Uwaga ((T 'Nie udalo sie utworzyc skrotu: ' 'Could not create shortcut: ') + $cel)
+        Warn ((T 'Nie udalo sie utworzyc skrotu: ' 'Could not create shortcut: ') + $target)
     }
 }
 
-# Wariant z konsola - przydatny, gdy cos nie dziala i chcesz zobaczyc blad.
-$cmd = Join-Path $Root 'Ucho (diagnostyka).cmd'
+# Console variant - useful when something does not work and you want to see the error.
+$cmd = Join-Path $Root 'Ucho (diagnostics).cmd'
 @"
 @echo off
 cd /d "%~dp0"
@@ -266,11 +281,22 @@ pause
 "@ | Out-File -FilePath $cmd -Encoding ascii
 Ok $cmd
 
-# Dyktuj - osobne okno do dyktowania na tym samym modelu Whisper.
+# Dictate - a separate dictation window on the same Whisper model.
 try {
-    & $VenvPy (Join-Path $Root 'dyktuj.pyw') --skroty | ForEach-Object { Ok $_ }
+    & $VenvPy (Join-Path $Root 'dictate.pyw') --shortcuts | ForEach-Object { Ok $_ }
 } catch {
-    Uwaga (T 'Nie udalo sie utworzyc skrotow Dyktuj' 'Could not create the Dictate shortcuts')
+    Warn (T 'Nie udalo sie utworzyc skrotow Dyktuj' 'Could not create the Dictate shortcuts')
+}
+
+# Leftovers of v0.1: the diagnostics file and the Dictate shortcuts had Polish
+# names, and the shortcuts point to a start script that no longer exists.
+$legacy = @(
+    (Join-Path $Root 'Ucho (diagnostyka).cmd'),
+    (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Ucho Dyktuj.lnk'),
+    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Ucho Dyktuj.lnk')
+)
+foreach ($old in $legacy) {
+    if (Test-Path $old) { Remove-Item -Force $old -ErrorAction SilentlyContinue }
 }
 
 Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue

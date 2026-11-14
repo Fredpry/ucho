@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Buduje dist/Ucho-Windows.zip i dist/SHA256SUMS.txt.
+"""Builds dist/Ucho-Windows.zip and dist/SHA256SUMS.txt.
 
-Do paczki trafia tylko to, czego potrzebuje uzytkownik: kod aplikacji, serwer
-MCP, instalator i dokumenty. Bez testow, narzedzi, modeli i danych.
+The package holds only what the user needs: the app code, the MCP server,
+the installer and the documents. No tests, tools, models or data.
 """
 
 from __future__ import annotations
@@ -13,38 +13,38 @@ import sys
 import zipfile
 from pathlib import Path
 
-KORZEN = Path(__file__).resolve().parent.parent
-KATALOG_PACZKI = "Ucho"
-PLIKI = [
-    "instaluj.ps1", "uruchom.pyw", "dyktuj.pyw", "mcp_serwer.py", "requirements.txt",
-    "dyktuj.example.json", "LICENSE", "NOTICE", "README.md", "README.pl.md",
+ROOT = Path(__file__).resolve().parent.parent
+PACKAGE_DIR = "Ucho"
+FILES = [
+    "install.ps1", "ucho.pyw", "dictate.pyw", "mcp_server.py", "requirements.txt",
+    "dictate.example.json", "LICENSE", "NOTICE", "README.md", "README.pl.md",
     "PRIVACY.md", "THIRD_PARTY.md",
 ]
-KATALOGI = ["ucho", "ucho_mcp"]
-POMIJANE = {"__pycache__"}
+DIRS = ["ucho", "ucho_mcp"]
+SKIPPED = {"__pycache__"}
 
 
-def zawartosc() -> list[Path]:
-    wynik = [KORZEN / p for p in PLIKI]
-    for katalog in KATALOGI:
-        wynik += [p for p in (KORZEN / katalog).rglob("*")
-                  if p.is_file() and not POMIJANE & set(p.parts) and p.suffix != ".pyc"]
-    brakujace = [p for p in wynik if not p.exists()]
-    if brakujace:
-        raise SystemExit(f"Brak plikow: {brakujace}")
-    return sorted(wynik)
+def contents() -> list[Path]:
+    result = [ROOT / p for p in FILES]
+    for folder in DIRS:
+        result += [p for p in (ROOT / folder).rglob("*")
+                   if p.is_file() and not SKIPPED & set(p.parts) and p.suffix != ".pyc"]
+    missing = [p for p in result if not p.exists()]
+    if missing:
+        raise SystemExit(f"Missing files: {missing}")
+    return sorted(result)
 
 
 def main() -> int:
-    dist = KORZEN / "dist"
+    dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
-    paczka = dist / "Ucho-Windows.zip"
-    with zipfile.ZipFile(paczka, "w", compression=zipfile.ZIP_DEFLATED) as zip_:
-        for plik in zawartosc():
-            zip_.write(plik, f"{KATALOG_PACZKI}/{plik.relative_to(KORZEN).as_posix()}")
-    skrot = hashlib.sha256(paczka.read_bytes()).hexdigest()
-    (dist / "SHA256SUMS.txt").write_text(f"{skrot}  {paczka.name}\n", encoding="utf-8")
-    print(f"{paczka} ({paczka.stat().st_size / 1e6:.1f} MB)\nSHA-256 {skrot}")
+    package = dist / "Ucho-Windows.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_DEFLATED) as zip_:
+        for file in contents():
+            zip_.write(file, f"{PACKAGE_DIR}/{file.relative_to(ROOT).as_posix()}")
+    digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    (dist / "SHA256SUMS.txt").write_text(f"{digest}  {package.name}\n", encoding="utf-8")
+    print(f"{package} ({package.stat().st_size / 1e6:.1f} MB)\nSHA-256 {digest}")
     return 0
 
 

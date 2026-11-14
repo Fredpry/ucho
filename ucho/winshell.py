@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Integracja z paskiem zadan Windows - przypinanie i ikona.
+"""Windows taskbar integration - pinning and the icon.
 
-Aplikacja startuje przez `pythonw.exe`, wiec bez dodatkowych danych Windows
-traktuje okno jak "jakiegos Pythona": przypiecie laduje ikone interpretera,
-a klikniecie przypietego kafelka odpala pythonw bez argumentow.
+The app starts through `pythonw.exe`, so without extra data Windows treats the
+window as "some Python": pinning picks up the interpreter icon, and clicking
+the pinned tile starts pythonw with no arguments.
 
-Zalatwiaja to dwie rzeczy:
-  * wlasny AppUserModelID (ustawiany w `app.uruchom`) - tozsamosc aplikacji,
-  * wlasciwosci powloki: na oknie (`System.AppUserModel.Relaunch*`) i na
-    skrotach .lnk (`System.AppUserModel.ID`), zeby przypiety kafelek wskazywal
-    nasza ikone i nasze polecenie, a przypiecie sklejalo sie z dzialajacym oknem.
+Two things fix that:
+  * our own AppUserModelID (set in `app.run`) - the identity of the app,
+  * shell properties: on the window (`System.AppUserModel.Relaunch*`) and on
+    the .lnk shortcuts (`System.AppUserModel.ID`), so the pinned tile points to
+    our icon and our command, and pinning merges with the running window.
 
-Wszystko idzie przez ctypes - nie ciagniemy pywin32 dla kilku wywolan COM.
-Kazda funkcja jest "best effort": na bledzie zwraca False i tylko loguje.
+Everything goes through ctypes - we do not pull in pywin32 for a few COM calls.
+Every function is "best effort": on error it returns False and only logs.
 """
 
 from __future__ import annotations
@@ -45,36 +45,37 @@ class _PROPERTYKEY(ctypes.Structure):
 
 
 class _PROPVARIANT(ctypes.Structure):
-    # vt + 3 pola rezerwowe + unia. Uzywamy tylko wariantu tekstowego (VT_LPWSTR),
-    # wiec unie opisujemy jako wskaznik na napis plus dopelnienie do 16 bajtow.
+    # vt + 3 reserved fields + a union. We only use the string variant
+    # (VT_LPWSTR), so the union is described as a string pointer plus padding
+    # up to 16 bytes.
     _fields_ = [
         ("vt", wintypes.USHORT),
         ("wReserved1", wintypes.WORD),
         ("wReserved2", wintypes.WORD),
         ("wReserved3", wintypes.WORD),
         ("pwszVal", c_void_p),
-        ("dopelnienie", c_void_p),
+        ("padding", c_void_p),
     ]
 
 
-def _guid(tekst: str) -> _GUID:
-    wynik = _GUID()
-    ctypes.windll.ole32.CLSIDFromString(tekst, byref(wynik))
-    return wynik
+def _guid(text: str) -> _GUID:
+    result = _GUID()
+    ctypes.windll.ole32.CLSIDFromString(text, byref(result))
+    return result
 
 
-# Grupa wlasciwosci AppUserModel - identyfikatory z propkey.h.
+# AppUserModel property group - identifiers from propkey.h.
 _FMTID_AUM = "{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}"
 _PID_RELAUNCH_COMMAND = 2
 _PID_RELAUNCH_ICON = 3
-_PID_RELAUNCH_NAZWA = 4
+_PID_RELAUNCH_NAME = 4
 _PID_ID = 5
 
 _IID_PROPERTY_STORE = "{886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99}"
 _IID_PERSIST_FILE = "{0000010B-0000-0000-C000-000000000046}"
 _CLSID_SHELL_LINK = "{00021401-0000-0000-C000-000000000046}"
 
-# Indeksy metod w tablicach wirtualnych (po trzech metodach IUnknown).
+# Method indices in the virtual tables (after the three IUnknown methods).
 _IDX_SET_VALUE = 6      # IPropertyStore::SetValue
 _IDX_COMMIT = 7         # IPropertyStore::Commit
 _IDX_QUERY_INTERFACE = 0
@@ -83,146 +84,147 @@ _IDX_PF_LOAD = 5        # IPersistFile::Load
 _IDX_PF_SAVE = 6        # IPersistFile::Save
 
 
-def _metoda(wskaznik: c_void_p, indeks: int, *typy_arg):
-    """Zwraca wywolywalna metode COM spod danego indeksu tablicy wirtualnej."""
-    vtbl = ctypes.cast(wskaznik, POINTER(POINTER(c_void_p)))[0]
-    prototyp = ctypes.WINFUNCTYPE(ctypes.HRESULT, c_void_p, *typy_arg)
-    return prototyp(vtbl[indeks])
+def _method(pointer: c_void_p, index: int, *arg_types):
+    """Returns a callable COM method at the given virtual table index."""
+    vtbl = ctypes.cast(pointer, POINTER(POINTER(c_void_p)))[0]
+    prototype = ctypes.WINFUNCTYPE(ctypes.HRESULT, c_void_p, *arg_types)
+    return prototype(vtbl[index])
 
 
-def _zwolnij(wskaznik: c_void_p) -> None:
+def _release(pointer: c_void_p) -> None:
     try:
         ctypes.WINFUNCTYPE(ctypes.c_ulong, c_void_p)(
-            ctypes.cast(wskaznik, POINTER(POINTER(c_void_p)))[0][_IDX_RELEASE]
-        )(wskaznik)
+            ctypes.cast(pointer, POINTER(POINTER(c_void_p)))[0][_IDX_RELEASE]
+        )(pointer)
     except Exception:
         pass
 
 
-def _propvariant_tekst(wartosc: str) -> _PROPVARIANT:
-    """PROPVARIANT typu VT_LPWSTR.
+def _propvariant_text(value: str) -> _PROPVARIANT:
+    """A PROPVARIANT of type VT_LPWSTR.
 
-    `InitPropVariantFromString` jest funkcja inline z naglowka, a nie eksportem
-    propsys.dll - napis alokujemy sami. Pamiec zwalnia pozniej PropVariantClear,
-    dlatego musi pochodzic z CoTaskMemAlloc.
+    `InitPropVariantFromString` is an inline function from a header, not a
+    propsys.dll export, so we allocate the string ourselves. PropVariantClear
+    frees it later, so it must come from CoTaskMemAlloc.
     """
     ctypes.windll.ole32.CoTaskMemAlloc.restype = c_void_p
-    bajty = (len(wartosc) + 1) * ctypes.sizeof(ctypes.c_wchar)
-    bufor = ctypes.windll.ole32.CoTaskMemAlloc(bajty)
-    if not bufor:
+    size = (len(value) + 1) * ctypes.sizeof(ctypes.c_wchar)
+    buffer = ctypes.windll.ole32.CoTaskMemAlloc(size)
+    if not buffer:
         raise MemoryError("CoTaskMemAlloc")
-    ctypes.memmove(bufor, ctypes.create_unicode_buffer(wartosc), bajty)
-    wariant = _PROPVARIANT()
-    wariant.vt = _VT_LPWSTR
-    wariant.pwszVal = bufor
-    return wariant
+    ctypes.memmove(buffer, ctypes.create_unicode_buffer(value), size)
+    variant = _PROPVARIANT()
+    variant.vt = _VT_LPWSTR
+    variant.pwszVal = buffer
+    return variant
 
 
-def _ustaw_tekst(magazyn: c_void_p, pid: int, wartosc: str) -> None:
-    klucz = _PROPERTYKEY(_guid(_FMTID_AUM), pid)
-    wariant = _propvariant_tekst(wartosc)
+def _set_text(store: c_void_p, pid: int, value: str) -> None:
+    key = _PROPERTYKEY(_guid(_FMTID_AUM), pid)
+    variant = _propvariant_text(value)
     try:
-        _metoda(magazyn, _IDX_SET_VALUE, POINTER(_PROPERTYKEY), POINTER(_PROPVARIANT))(
-            magazyn, byref(klucz), byref(wariant)
+        _method(store, _IDX_SET_VALUE, POINTER(_PROPERTYKEY), POINTER(_PROPVARIANT))(
+            store, byref(key), byref(variant)
         )
     finally:
-        ctypes.windll.ole32.PropVariantClear(byref(wariant))
+        ctypes.windll.ole32.PropVariantClear(byref(variant))
 
 
 def _com_start() -> None:
-    # RPC_E_CHANGED_MODE oznacza, ze COM juz dziala w innym trybie - to nam nie
-    # przeszkadza, korzystamy z istniejacej inicjalizacji watku.
+    # RPC_E_CHANGED_MODE means COM already runs in another mode - that is fine,
+    # we use the thread's existing initialization.
     try:
         ctypes.windll.ole32.CoInitialize(None)
     except OSError:
         pass
 
 
-def opisz_okno(hwnd: int, polecenie: str, nazwa: str, ikona: str,
-               id_aplikacji: str | None = None) -> bool:
-    """Nadaje oknu dane do przypiecia: polecenie startowe, nazwe i ikone.
+def describe_window(hwnd: int, command: str, name: str, icon: str,
+                    app_id: str | None = None) -> bool:
+    """Gives the window its pinning data: start command, name and icon.
 
-    Dzieki temu "Przypnij do paska zadan" na dzialajacym oknie tworzy kafelek
-    naszej aplikacji, a nie skrot do pythonw.exe.
+    This way "Pin to taskbar" on the running window creates a tile for our
+    app instead of a shortcut to pythonw.exe.
     """
     if sys.platform != "win32":
         return False
-    magazyn = c_void_p()
+    store = c_void_p()
     try:
         _com_start()
         ctypes.windll.shell32.SHGetPropertyStoreForWindow(
-            wintypes.HWND(hwnd), byref(_guid(_IID_PROPERTY_STORE)), byref(magazyn)
+            wintypes.HWND(hwnd), byref(_guid(_IID_PROPERTY_STORE)), byref(store)
         )
-        if not magazyn:
+        if not store:
             return False
-        if id_aplikacji:
-            _ustaw_tekst(magazyn, _PID_ID, id_aplikacji)
-        _ustaw_tekst(magazyn, _PID_RELAUNCH_COMMAND, polecenie)
-        _ustaw_tekst(magazyn, _PID_RELAUNCH_NAZWA, nazwa)
-        _ustaw_tekst(magazyn, _PID_RELAUNCH_ICON, ikona)
-        _metoda(magazyn, _IDX_COMMIT)(magazyn)
+        if app_id:
+            _set_text(store, _PID_ID, app_id)
+        _set_text(store, _PID_RELAUNCH_COMMAND, command)
+        _set_text(store, _PID_RELAUNCH_NAME, name)
+        _set_text(store, _PID_RELAUNCH_ICON, icon)
+        _method(store, _IDX_COMMIT)(store)
         return True
     except Exception:
-        log.debug("Nie udalo sie opisac okna dla paska zadan", exc_info=True)
+        log.debug("Could not describe the window for the taskbar", exc_info=True)
         return False
     finally:
-        if magazyn:
-            _zwolnij(magazyn)
+        if store:
+            _release(store)
 
 
-def ustaw_id_skrotu(sciezka: Path, id_aplikacji: str) -> bool:
-    """Zapisuje AppUserModelID w pliku .lnk.
+def set_shortcut_app_id(path: Path, app_id: str) -> bool:
+    """Writes the AppUserModelID into a .lnk file.
 
-    Skrot z tym samym identyfikatorem co proces sklei sie z dzialajacym oknem -
-    przypiety kafelek i uruchomiona aplikacja to jeden przycisk na pasku.
+    A shortcut with the same id as the process merges with the running window:
+    the pinned tile and the running app are one taskbar button.
     """
-    if sys.platform != "win32" or not sciezka.exists():
+    if sys.platform != "win32" or not path.exists():
         return False
     link = c_void_p()
-    plik = c_void_p()
-    magazyn = c_void_p()
+    persist_file = c_void_p()
+    store = c_void_p()
     try:
         _com_start()
         ctypes.windll.ole32.CoCreateInstance(
             byref(_guid(_CLSID_SHELL_LINK)), None, _CLSCTX_INPROC_SERVER,
-            byref(_guid(_IID_PERSIST_FILE)), byref(plik),
+            byref(_guid(_IID_PERSIST_FILE)), byref(persist_file),
         )
-        if not plik:
+        if not persist_file:
             return False
-        _metoda(plik, _IDX_PF_LOAD, wintypes.LPCWSTR, wintypes.DWORD)(
-            plik, str(sciezka), _STGM_READWRITE
+        _method(persist_file, _IDX_PF_LOAD, wintypes.LPCWSTR, wintypes.DWORD)(
+            persist_file, str(path), _STGM_READWRITE
         )
-        _metoda(plik, _IDX_QUERY_INTERFACE, POINTER(_GUID), POINTER(c_void_p))(
-            plik, byref(_guid(_IID_PROPERTY_STORE)), byref(magazyn)
+        _method(persist_file, _IDX_QUERY_INTERFACE, POINTER(_GUID), POINTER(c_void_p))(
+            persist_file, byref(_guid(_IID_PROPERTY_STORE)), byref(store)
         )
-        if not magazyn:
+        if not store:
             return False
-        _ustaw_tekst(magazyn, _PID_ID, id_aplikacji)
-        _metoda(magazyn, _IDX_COMMIT)(magazyn)
-        # Zapis musi isc przez IPersistFile - sam Commit zostaje w pamieci.
-        _metoda(plik, _IDX_PF_SAVE, wintypes.LPCWSTR, wintypes.BOOL)(plik, None, True)
+        _set_text(store, _PID_ID, app_id)
+        _method(store, _IDX_COMMIT)(store)
+        # The save must go through IPersistFile - Commit alone stays in memory.
+        _method(persist_file, _IDX_PF_SAVE, wintypes.LPCWSTR, wintypes.BOOL)(
+            persist_file, None, True)
         return True
     except Exception:
-        log.debug("Nie udalo sie ustawic ID skrotu %s", sciezka, exc_info=True)
+        log.debug("Could not set the shortcut id for %s", path, exc_info=True)
         return False
     finally:
-        for wskaznik in (magazyn, plik, link):
-            if wskaznik:
-                _zwolnij(wskaznik)
+        for pointer in (store, persist_file, link):
+            if pointer:
+                _release(pointer)
 
 
-def sciezki_skrotow() -> list[Path]:
-    """Skroty tworzone przez instalator: pulpit i Menu Start."""
+def shortcut_paths() -> list[Path]:
+    """Shortcuts created by the installer: Desktop and Start menu."""
     import os
 
-    wynik: list[Path] = []
-    pulpit = os.environ.get("USERPROFILE")
-    if pulpit:
-        wynik.append(Path(pulpit) / "Desktop" / "Ucho.lnk")
+    result: list[Path] = []
+    profile = os.environ.get("USERPROFILE")
+    if profile:
+        result.append(Path(profile) / "Desktop" / "Ucho.lnk")
     appdata = os.environ.get("APPDATA")
     if appdata:
-        wynik.append(
+        result.append(
             Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
             / "Ucho.lnk"
         )
-    return wynik
+    return result

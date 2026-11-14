@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Dopisuje albo podmienia naglowek SPDX we wszystkich plikach zrodlowych.
+"""Adds or replaces the SPDX header in all source files.
 
-Uzycie:
-    python tools/set_copyright.py                      # posiadacz domyslny
-    python tools/set_copyright.py "Nowy posiadacz"     # zmiana posiadacza praw
-    python tools/set_copyright.py --check              # tylko sprawdz (CI)
+Usage:
+    python tools/set_copyright.py                      # default holder
+    python tools/set_copyright.py "New holder"         # change the copyright holder
+    python tools/set_copyright.py --check              # check only (CI)
 """
 
 from __future__ import annotations
@@ -14,44 +14,44 @@ import re
 import sys
 from pathlib import Path
 
-KORZEN = Path(__file__).resolve().parent.parent
-POSIADACZ = "Fryderyk Pryjma"
-ROK = "2026"
-WZORCE = ["ucho/**/*.py", "ucho_mcp/**/*.py", "tests/**/*.py", "tools/**/*.py", "*.py", "*.pyw"]
-LINIA_PRAW = re.compile(r"^# SPDX-FileCopyrightText: .*$", re.MULTILINE)
-LINIA_LICENCJI = "# SPDX-License-Identifier: Apache-2.0"
+ROOT = Path(__file__).resolve().parent.parent
+HOLDER = "Fryderyk Pryjma"
+YEAR = "2026"
+PATTERNS = ["ucho/**/*.py", "ucho_mcp/**/*.py", "tests/**/*.py", "tools/**/*.py", "*.py", "*.pyw"]
+COPYRIGHT_LINE = re.compile(r"^# SPDX-FileCopyrightText: .*$", re.MULTILINE)
+LICENSE_LINE = "# SPDX-License-Identifier: Apache-2.0"
 
 
-def pliki() -> list[Path]:
-    wynik: set[Path] = set()
-    for wzorzec in WZORCE:
-        wynik.update(p for p in KORZEN.glob(wzorzec) if ".venv" not in p.parts)
-    return sorted(wynik)
+def files() -> list[Path]:
+    result: set[Path] = set()
+    for pattern in PATTERNS:
+        result.update(p for p in ROOT.glob(pattern) if ".venv" not in p.parts)
+    return sorted(result)
 
 
-def naglowek(posiadacz: str) -> str:
-    return f"# SPDX-FileCopyrightText: {ROK} {posiadacz}\n{LINIA_LICENCJI}\n"
+def header(holder: str) -> str:
+    return f"# SPDX-FileCopyrightText: {YEAR} {holder}\n{LICENSE_LINE}\n"
 
 
 def main(argv: list[str]) -> int:
-    sprawdz = "--check" in argv
-    argumenty = [a for a in argv if not a.startswith("--")]
-    posiadacz = argumenty[0] if argumenty else POSIADACZ
-    braki = []
-    for plik in pliki():
-        tekst = plik.read_text(encoding="utf-8")
-        if LINIA_PRAW.search(tekst) and LINIA_LICENCJI in tekst:
-            nowy = LINIA_PRAW.sub(f"# SPDX-FileCopyrightText: {ROK} {posiadacz}", tekst, count=1)
+    check = "--check" in argv
+    args = [a for a in argv if not a.startswith("--")]
+    holder = args[0] if args else HOLDER
+    pending = []
+    for file in files():
+        text = file.read_text(encoding="utf-8")
+        if COPYRIGHT_LINE.search(text) and LICENSE_LINE in text:
+            new = COPYRIGHT_LINE.sub(f"# SPDX-FileCopyrightText: {YEAR} {holder}", text, count=1)
         else:
-            nowy = naglowek(posiadacz) + tekst
-        if nowy != tekst:
-            braki.append(plik.relative_to(KORZEN))
-            if not sprawdz:
-                plik.write_text(nowy, encoding="utf-8")
-    if sprawdz and braki:
-        print("Brak albo inny naglowek SPDX:", *braki, sep="\n  ")
+            new = header(holder) + text
+        if new != text:
+            pending.append(file.relative_to(ROOT))
+            if not check:
+                file.write_text(new, encoding="utf-8")
+    if check and pending:
+        print("Missing or different SPDX header:", *pending, sep="\n  ")
         return 1
-    print(f"{'Do zmiany' if sprawdz else 'Zmieniono'}: {len(braki)} plikow")
+    print(f"{'To change' if check else 'Changed'}: {len(pending)} files")
     return 0
 
 

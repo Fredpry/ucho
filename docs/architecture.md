@@ -22,7 +22,7 @@ Short chunks have a price: on "mhm", a cough or noise the detector guesses among
 
 ## 4. OpenVINO on the integrated GPU
 
-Whisper large-v3 INT8 runs through OpenVINO GenAI on the Intel Arc iGPU, with no PyTorch and no conversion on the user's machine (models are ready-made OpenVINO IR from Hugging Face, pinned to a fixed revision). Measured on a Core Ultra 7 258V: an 85 s recording in 5.7 s on the GPU and 35 s on the CPU. The first GPU load compiles the model (~21 s); the result is cached in `modele/ovcache`. If the GPU fails, Ucho falls back to the CPU and records that in `meta.json`.
+Whisper large-v3 INT8 runs through OpenVINO GenAI on the Intel Arc iGPU, with no PyTorch and no conversion on the user's machine (models are ready-made OpenVINO IR from Hugging Face, pinned to a fixed revision). Measured on a Core Ultra 7 258V: an 85 s recording in 5.7 s on the GPU and 35 s on the CPU. The first GPU load compiles the model (~21 s); the result is cached in `models/ovcache`. If the GPU fails, Ucho falls back to the CPU and records that in `meta.json`.
 
 ## 5. Optional summaries that cannot invent names or dates
 
@@ -37,19 +37,19 @@ Meetings up to ~40 minutes are summarized in one pass. Longer ones are split, bu
 
 ## 6. MCP: the archive as memory for your agent
 
-`ucho_mcp/serwer.py` is a stdio MCP server built only on the Python standard library: JSON-RPC over stdin/stdout, no ports, no network, read-only. It reads `meta.json` segments, builds an in-memory SQLite FTS5 index (diacritics-insensitive, prefix search) and rebuilds it when the archive changes. Meeting ids are folder names; anything containing a path separator or `..` is rejected.
+`ucho_mcp/server.py` is a stdio MCP server built only on the Python standard library: JSON-RPC over stdin/stdout, no ports, no network, read-only. It reads `meta.json` segments through `ucho/session.py` (the same reader the app uses, which also understands the Polish file names and keys of v0.1 archives), builds an in-memory SQLite FTS5 index (diacritics-insensitive, prefix search) and rebuilds it when the archive changes. Meeting ids are folder names; anything containing a path separator or `..` is rejected.
 
 Ucho deliberately has no chatbot. The agent you already use (Claude Code, Cursor, Codex) reads the transcripts and summarizes them. That keeps the app small and leaves the choice of model, and of whether text may leave the machine, to the user.
 
 ## Files per meeting
 
 ```
-nagrania\2026-11-14_10-00_Budzet-Q4\
-    mikrofon.flac      microphone track
-    spotkanie.flac     system audio track
-    transkrypt.md      transcript with speakers and timestamps
-    transkrypt.srt     subtitles
-    transkrypt.txt     plain text
+recordings\2026-11-14_10-00_Budget-Q4\
+    microphone.flac    microphone track
+    meeting.flac       system audio track
+    transcript.md      transcript with speakers and timestamps
+    transcript.srt     subtitles
+    transcript.txt     plain text
     meta.json          session parameters + structured segments
-    podsumowanie.md    only if summaries are enabled
+    summary.md         only if summaries are enabled
 ```

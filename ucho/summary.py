@@ -1,17 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Lokalne podsumowanie transkryptu malym modelem jezykowym.
+"""Local transcript summary with a small language model.
 
-Ten sam runtime co Whisper - OpenVINO GenAI na tej samej zintegrowanej karcie -
-wiec nie ma tu Ollamy, serwera HTTP ani procesu w tle. Model laduje sie dopiero
-po zakonczonej transkrypcji i jest zwalniany natychmiast po wygenerowaniu
-podsumowania (`SilnikLLM.zwolnij`), zeby nie trzymac ~2 GB pamieci przez cale
-zycie aplikacji. Sieci nie dotykamy: model czytamy z `modele\\hub` przez
-`transcribe.sciezka_modelu(..., pobierz=False)`.
+Same runtime as Whisper - OpenVINO GenAI on the same integrated GPU - so there
+is no Ollama, HTTP server or background process here. The model loads only
+after transcription has finished and is released right after the summary is
+generated (`LLMEngine.release`), so ~2 GB of memory is not held for the whole
+life of the app. No network: the model is read from `models\\hub` through
+`transcribe.model_path(..., download=False)`.
 
-Model zwraca JSON wymuszony schematem (`StructuredOutputConfig`), a nie zwykly
-tekst do sparsowania - dzieki temu nazwa folderu i podsumowanie nie zaleza od
-tego, czy maly model akurat trafil w format.
+The model returns JSON constrained by a schema (`StructuredOutputConfig`), not
+free text to parse - so the folder name and the summary do not depend on
+whether a small model happened to get the format right.
+
+The prompts are Polish because the summaries are Polish; the JSON field names
+the prompts refer to (temat, uczestnicy, punkty, ustalenia) stay Polish too and
+are mapped to English keys in `_normalize`.
 """
 
 from __future__ import annotations
@@ -28,50 +32,56 @@ from typing import Callable
 
 from . import config, transcribe
 from .i18n import t
-from .merge import Segment, czas_hms, jako_tekst, slug
+from .merge import SPEAKER_ME, SPEAKER_MEETING, Segment, as_text, format_hms, slug
 
 log = logging.getLogger(__name__)
 
-# Ile znakow transkryptu wchodzi w jedno przejscie modelu. Godzinne spotkanie to
-# ok. 50-80 kB tekstu, czyli znacznie wiecej niz warto wpychac naraz w model 4B
-# na iGPU - dlatego dluzsze transkrypty lecą map-reduce.
+# How many transcript characters go into one model pass. A one-hour meeting is
+# about 50-80 kB of text, far more than is worth pushing into a 4B model on an
+# iGPU at once - which is why longer transcripts go through map-reduce.
 #
-# Prog dobrany tak, zeby typowe spotkanie (do ~40 min, ok. 24 kB) zmiescilo sie
-# w JEDNYM przejsciu. Map-reduce gubi ustalenia negocjowane przez cala rozmowe:
-# w tescie model wziął pierwszy zaproponowany termin ("wtorek 29") i nie zobaczyl,
-# ze pol godziny pozniej przesuniety zostal na srode. Streszczenie streszczen
-# nie ma z czego tego odtworzyc - fragment o wtorku i fragment o srodzie sa
-# osobno. 24 kB to ok. 8 tys. tokenow, czyli wciaz z zapasem w oknie Qwena.
-MAKS_ZNAKOW_FRAGMENTU = 24_000
-MAKS_FRAGMENTOW = 8
+# The threshold is chosen so a typical meeting (up to ~40 min, about 24 kB)
+# fits in ONE pass. Map-reduce loses decisions negotiated over the whole
+# conversation: in a test the model took the first proposed date ("wtorek 29")
+# and did not see that half an hour later it was moved to Wednesday. A summary
+# of summaries has nothing to rebuild that from - the Tuesday part and the
+# Wednesday part are separate. 24 kB is about 8k tokens, still well within
+# Qwen's context window.
+MAX_CHUNK_CHARS = 24_000
+MAX_CHUNKS = 8
 
-# Fragment zwraca teraz trzy listy zamiast dwoch (doszly ustalenia), wiec 320
-# tokenow potrafilo urwac odpowiedz w polowie ostatniego ustalenia.
-MAKS_TOKENOW_FRAGMENT = 560
-MAKS_TOKENOW_FINAL = 700
+# A chunk now returns three lists instead of two (decisions were added), so 320
+# tokens could cut the answer off in the middle of the last decision.
+MAX_TOKENS_CHUNK = 560
+MAX_TOKENS_FINAL = 700
 
-MAKS_UCZESTNIKOW = 6
-# Prog podobienstwa imienia do slowa z transkryptu - patrz `_pada_w_tekscie`.
-PODOBIENSTWO_IMIENIA = 0.8
-# Powyzej tego dwa punkty uznajemy za to samo zdanie - patrz `_zdania`.
-PODOBIENSTWO_ZDANIA = 0.75
-MAKS_PUNKTOW = 5
-MAKS_USTALEN = 6
-MAKS_ZNAKOW_TEMATU = 60
+MAX_PARTICIPANTS = 6
+# Similarity threshold between a name and a transcript word - see `_name_in_text`.
+NAME_SIMILARITY = 0.8
+# Above this two points count as the same sentence - see `_sentences`.
+SENTENCE_SIMILARITY = 0.75
+MAX_POINTS = 5
+MAX_DECISIONS = 6
+MAX_TOPIC_CHARS = 60
 
-# Etykiety sciezek audio - model lubi je brac za imiona, wiec odsiewamy je twardo.
-NIE_IMIONA = {
+# Polish speaker labels used in the text sent to the model. The Polish prompt
+# (`_LABEL_NOTE`) refers to exactly these, whatever the UI language is.
+_PROMPT_LABELS = {SPEAKER_ME: "Ja", SPEAKER_MEETING: "Spotkanie"}
+
+# Audio track labels and Polish role words - the model likes to take them for
+# names, so they are filtered out hard. Polish data, matched against Polish output.
+NOT_NAMES = {
     "ja", "spotkanie", "uczestnik", "uczestnicy", "rozmowca", "rozmowcy",
     "mowca", "prowadzacy", "nieznany", "brak", "wszyscy", "gosc", "user",
-    # Funkcje i role - model podaje je zamiast imienia, gdy imie nie padlo.
+    # Functions and roles - the model gives them instead of a name when no name was said.
     "dyrektor", "dyrektorka", "prezes", "kierownik", "kierowniczka", "szef",
     "szefowa", "klient", "klientka", "zespol", "zespół", "zarzad", "zarząd",
     "administrator", "moderator", "asystent", "asystentka",
 }
 
-# Bez tego ta sama osoba trafia na liste dwa razy: raz jako "Pan Marek",
-# raz jako "Marek".
-_GRZECZNOSCIOWE = re.compile(
+# Without this the same person lands on the list twice: once as "Pan Marek",
+# once as "Marek". Polish honorifics.
+_HONORIFICS = re.compile(
     r"^(pan|pani|panie|pana|panu|panią|pania|dr|prof|inż|inz|mgr)\.?\s+",
     re.IGNORECASE,
 )
@@ -79,7 +89,9 @@ _GRZECZNOSCIOWE = re.compile(
 StatusFn = Callable[[str], None]
 
 
-SCHEMAT_FRAGMENTU = {
+# JSON schemas for the model. Field names are Polish because the Polish prompts
+# below name them; `_normalize` maps them to English result keys.
+CHUNK_SCHEMA = {
     "type": "object",
     "properties": {
         "punkty": {"type": "array", "items": {"type": "string"}},
@@ -90,7 +102,7 @@ SCHEMAT_FRAGMENTU = {
     "additionalProperties": False,
 }
 
-SCHEMAT_PODSUMOWANIA = {
+SUMMARY_SCHEMA = {
     "type": "object",
     "properties": {
         "temat": {"type": "string"},
@@ -124,12 +136,12 @@ SYSTEM = (
     "Odpowiadasz zawsze samym poprawnym JSON-em, bez komentarza."
 )
 
-_NOTA_ETYKIET = (
+_LABEL_NOTE = (
     'Etykiety "Ja:" i "Spotkanie:" oznaczają źródło dźwięku (mikrofon i głośniki), '
     "a NIE imiona — nigdy nie traktuj ich jako uczestników."
 )
 
-PROMPT_FRAGMENTU = """Fragment {numer} z {razem} transkryptu spotkania. {nota}
+CHUNK_PROMPT = """Fragment {number} z {total} transkryptu spotkania. {note}
 
 Zwróć JSON o polach:
 - "punkty": do 3 najważniejszych rzeczy merytorycznych z tego fragmentu, każda jako jedno krótkie zdanie po polsku. Pomiń small talk i sprawy techniczne połączenia.
@@ -141,7 +153,7 @@ Fragment:
 {material}
 ---"""
 
-PROMPT_PODSUMOWANIA = """Poniżej {zrodlo} spotkania. {nota}
+SUMMARY_PROMPT = """Poniżej {source} spotkania. {note}
 
 Zwróć JSON o polach:
 - "temat": 2-5 słów nazywających to spotkanie, po polsku, bez daty. Ma opisywać po co się spotkano, a nie firmę wspomnianą po drodze.
@@ -156,249 +168,250 @@ Zwróć JSON o polach:
 # --- model ----------------------------------------------------------------
 
 
-class SilnikLLM:
-    """Leniwie budowany LLMPipeline z automatycznym zejsciem na CPU.
+class LLMEngine:
+    """Lazily built LLMPipeline with automatic fallback to the CPU.
 
-    Swiadomie lustrzany wobec `transcribe.Silnik` - ta sama kolejnosc prob
-    (zadane urzadzenie, potem CPU; z cache kompilacji, potem bez).
+    Deliberately mirrors `transcribe.Engine` - the same order of attempts
+    (requested device, then CPU; with the compile cache, then without).
     """
 
     def __init__(self, repo_id: str, device: str = "GPU"):
         self.repo_id = repo_id
-        self.zadany_device = device
+        self.requested_device = device
         self.device = device
         self._pipe = None
 
-    def zaladuj(self) -> None:
+    def load(self) -> None:
         if self._pipe is not None:
             return
 
         import openvino_genai as ov_genai
 
-        katalog = str(transcribe.sciezka_modelu(self.repo_id, pobierz=False))
-        cache = str(config.KATALOG_CACHE_OV)
-        config.KATALOG_CACHE_OV.mkdir(parents=True, exist_ok=True)
+        folder = str(transcribe.model_path(self.repo_id, download=False))
+        cache = str(config.OV_CACHE_DIR)
+        config.OV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-        kandydaci = [self.zadany_device]
-        if self.zadany_device != "CPU":
-            kandydaci.append("CPU")
+        candidates = [self.requested_device]
+        if self.requested_device != "CPU":
+            candidates.append("CPU")
 
-        ostatni_blad: Exception | None = None
-        for device in kandydaci:
+        last_error: Exception | None = None
+        for device in candidates:
             for kwargs in ({"CACHE_DIR": cache}, {}):
                 try:
                     start = time.monotonic()
-                    self._pipe = ov_genai.LLMPipeline(katalog, device, **kwargs)
+                    self._pipe = ov_genai.LLMPipeline(folder, device, **kwargs)
                     self.device = device
                     log.info(
-                        "LLM gotowy na %s w %.1fs (%s, cache=%s)",
+                        "LLM ready on %s in %.1fs (%s, cache=%s)",
                         device, time.monotonic() - start, self.repo_id, bool(kwargs),
                     )
                     return
-                except Exception as blad:
-                    ostatni_blad = blad
-                    log.warning("Nie udalo sie zbudowac LLM na %s: %s", device, blad)
+                except Exception as error:
+                    last_error = error
+                    log.warning("Could not build the LLM on %s: %s", device, error)
 
-        raise RuntimeError(f"Nie udalo sie zaladowac modelu jezykowego: {ostatni_blad}")
+        raise RuntimeError(f"Could not load the language model: {last_error}")
 
-    def zwolnij(self) -> None:
-        """Oddaje pamiec zajeta przez model - to jest to 'wylaczenie po uzyciu'."""
+    def release(self) -> None:
+        """Frees the memory held by the model - this is the 'off after use'."""
         if self._pipe is None:
             return
         self._pipe = None
         gc.collect()
-        log.info("Pipeline LLM zwolniony")
+        log.info("LLM pipeline released")
 
-    def _prompt(self, uzytkownik: str) -> str:
-        """Sklada prompt w formacie oczekiwanym przez model.
+    def _prompt(self, user: str) -> str:
+        """Builds the prompt in the format the model expects.
 
-        Qwen3 domyslnie wlacza tryb rozumowania i marnuje setki tokenow na blok
-        <think>. Wylaczamy go przez `extra_context`, a gdyby ta wersja szablonu
-        go nie znala - skladamy ChatML recznie z pustym blokiem <think>, dokladnie
-        tak, jak robi to szablon Qwen3 przy enable_thinking=False.
+        Qwen3 turns on reasoning mode by default and wastes hundreds of tokens on
+        a <think> block. We turn it off through `extra_context`, and if this
+        template version does not know it - we build ChatML by hand with an
+        empty <think> block, exactly as the Qwen3 template does with
+        enable_thinking=False.
         """
-        historia = [
+        history = [
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": uzytkownik},
+            {"role": "user", "content": user},
         ]
         tokenizer = self._pipe.get_tokenizer()
         for kwargs in ({"extra_context": {"enable_thinking": False}}, {}):
             try:
-                prompt = tokenizer.apply_chat_template(historia, True, **kwargs)
+                prompt = tokenizer.apply_chat_template(history, True, **kwargs)
                 if prompt:
                     return prompt
-            except Exception as blad:
-                log.debug("apply_chat_template(%s) nie zadzialal: %s", kwargs, blad)
+            except Exception as error:
+                log.debug("apply_chat_template(%s) failed: %s", kwargs, error)
 
         prompt = (
             f"<|im_start|>system\n{SYSTEM}<|im_end|>\n"
-            f"<|im_start|>user\n{uzytkownik}<|im_end|>\n"
+            f"<|im_start|>user\n{user}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
         if "qwen3" in self.repo_id.lower():
             prompt += "<think>\n\n</think>\n\n"
         return prompt
 
-    def generuj_json(self, uzytkownik: str, schemat: dict, maks_tokenow: int,
-                     anuluj: threading.Event | None = None) -> dict:
-        """Jedno przejscie modelu z wymuszonym schematem JSON.
+    def generate_json(self, user: str, schema: dict, max_tokens: int,
+                      cancel: threading.Event | None = None) -> dict:
+        """One model pass with an enforced JSON schema.
 
-        `anuluj` sprawdzamy przez streamer, czyli po kazdym tokenie - inaczej
-        przycisk "Przerwij" nie robilby nic przez kilkanascie sekund generacji.
+        `cancel` is checked through the streamer, i.e. after every token -
+        otherwise the "Stop" button would do nothing for many seconds of generation.
         """
         import openvino_genai as ov_genai
 
-        prompt = self._prompt(uzytkownik)
+        prompt = self._prompt(user)
 
         streamer = None
-        if anuluj is not None:
-            def streamer(_fragment: str):
-                return (ov_genai.StreamingStatus.CANCEL if anuluj.is_set()
+        if cancel is not None:
+            def streamer(_piece: str):
+                return (ov_genai.StreamingStatus.CANCEL if cancel.is_set()
                         else ov_genai.StreamingStatus.RUNNING)
 
-        for wymuszaj in (True, False):
-            konfiguracja = ov_genai.GenerationConfig()
-            konfiguracja.max_new_tokens = maks_tokenow
-            konfiguracja.do_sample = False
-            if wymuszaj:
+        for enforce in (True, False):
+            gen_config = ov_genai.GenerationConfig()
+            gen_config.max_new_tokens = max_tokens
+            gen_config.do_sample = False
+            if enforce:
                 try:
-                    konfiguracja.structured_output_config = ov_genai.StructuredOutputConfig(
-                        json_schema=json.dumps(schemat)
+                    gen_config.structured_output_config = ov_genai.StructuredOutputConfig(
+                        json_schema=json.dumps(schema)
                     )
-                except Exception as blad:
-                    log.warning("Wymuszony JSON niedostepny: %s", blad)
+                except Exception as error:
+                    log.warning("Enforced JSON unavailable: %s", error)
                     continue
             try:
-                wynik = self._pipe.generate(prompt, konfiguracja, streamer)
-            except Exception as blad:
-                # Grammar-constrained decoding potrafi nie wystartowac na GPU -
-                # wtedy druga iteracja leci zwyklym dekodowaniem.
-                log.warning("Generacja (wymuszony JSON=%s) nie powiodla sie: %s",
-                            wymuszaj, blad)
+                result = self._pipe.generate(prompt, gen_config, streamer)
+            except Exception as error:
+                # Grammar-constrained decoding can fail to start on the GPU -
+                # then the second iteration uses plain decoding.
+                log.warning("Generation (enforced JSON=%s) failed: %s", enforce, error)
                 continue
 
-            if anuluj is not None and anuluj.is_set():
+            if cancel is not None and cancel.is_set():
                 return {}
 
-            dane = _wczytaj_json(_bez_rozumowania(str(wynik)))
-            if dane is not None:
-                return dane
-            log.warning("Model nie zwrocil poprawnego JSON (wymuszony=%s)", wymuszaj)
+            data = _load_json(_without_reasoning(str(result)))
+            if data is not None:
+                return data
+            log.warning("The model did not return valid JSON (enforced=%s)", enforce)
 
         return {}
 
 
-# --- tekst ----------------------------------------------------------------
+# --- text -----------------------------------------------------------------
 
 
-def _bez_rozumowania(tekst: str) -> str:
-    """Usuwa bloki <think>...</think>, takze niedomkniete."""
-    tekst = re.sub(r"<think>.*?</think>", " ", tekst, flags=re.DOTALL | re.IGNORECASE)
-    if "</think>" in tekst:
-        tekst = tekst.rsplit("</think>", 1)[1]
-    return tekst.replace("<think>", " ").strip()
+def _without_reasoning(text: str) -> str:
+    """Removes <think>...</think> blocks, also unclosed ones."""
+    text = re.sub(r"<think>.*?</think>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return text.replace("<think>", " ").strip()
 
 
-def _wczytaj_json(tekst: str) -> dict | None:
-    """Parsuje odpowiedz modelu; przy nadmiarowym tekscie wycina pierwszy obiekt."""
-    tekst = tekst.strip()
-    if tekst.startswith("```"):
-        tekst = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", tekst).strip()
+def _load_json(text: str) -> dict | None:
+    """Parses the model answer; with extra text around it cuts out the first object."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text).strip()
     try:
-        dane = json.loads(tekst)
+        data = json.loads(text)
     except ValueError:
-        dopasowanie = re.search(r"\{.*\}", tekst, re.DOTALL)
-        if not dopasowanie:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if not match:
             return None
         try:
-            dane = json.loads(dopasowanie.group(0))
+            data = json.loads(match.group(0))
         except ValueError:
             return None
-    return dane if isinstance(dane, dict) else None
+    return data if isinstance(data, dict) else None
 
 
-def _fragmenty(tekst: str) -> list[str]:
-    """Tnie transkrypt na kawalki po calych wypowiedziach.
+def _chunks(text: str) -> list[str]:
+    """Cuts the transcript into pieces at whole utterances.
 
-    Przy bardzo dlugich spotkaniach bierzemy rownomierna probke fragmentow -
-    lepiej streszczic osiem kawalkow z calego spotkania niz przemielic wszystko
-    i kazac uzytkownikowi czekac kilkanascie minut.
+    For very long meetings we take an even sample of the pieces - better to
+    summarize eight pieces from the whole meeting than to grind through
+    everything and make the user wait many minutes.
     """
-    kawalki: list[str] = []
-    biezacy: list[str] = []
-    dlugosc = 0
+    pieces: list[str] = []
+    current: list[str] = []
+    length = 0
 
-    for linia in tekst.splitlines():
-        if biezacy and dlugosc + len(linia) > MAKS_ZNAKOW_FRAGMENTU:
-            kawalki.append("\n".join(biezacy))
-            biezacy, dlugosc = [], 0
-        biezacy.append(linia)
-        dlugosc += len(linia) + 1
+    for line in text.splitlines():
+        if current and length + len(line) > MAX_CHUNK_CHARS:
+            pieces.append("\n".join(current))
+            current, length = [], 0
+        current.append(line)
+        length += len(line) + 1
 
-    if biezacy:
-        kawalki.append("\n".join(biezacy))
-    if not kawalki:
+    if current:
+        pieces.append("\n".join(current))
+    if not pieces:
         return []
-    if len(kawalki) <= MAKS_FRAGMENTOW:
-        return kawalki
+    if len(pieces) <= MAX_CHUNKS:
+        return pieces
 
-    krok = len(kawalki) / MAKS_FRAGMENTOW
-    return [kawalki[min(int(i * krok), len(kawalki) - 1)] for i in range(MAKS_FRAGMENTOW)]
-
-
-# --- porzadkowanie odpowiedzi ---------------------------------------------
+    step = len(pieces) / MAX_CHUNKS
+    return [pieces[min(int(i * step), len(pieces) - 1)] for i in range(MAX_CHUNKS)]
 
 
-def _zdania(wartosc, limit: int) -> list[str]:
-    """Porzadkuje liste zdan od modelu, odsiewajac powtorzenia.
+# --- cleaning up the answer -----------------------------------------------
 
-    Nie tylko identyczne: maly model potrafi wypelnic liste piecioma wariantami
-    tego samego zdania ("Firma chce zarejestrować wizytę, by zaprezentować
-    rozwiązanie" / "...by omówić zastosowanie"). Lepiej oddac trzy rozne punkty
-    niz piec razy jeden.
+
+def _sentences(value, limit: int) -> list[str]:
+    """Tidies the model's list of sentences, dropping repetitions.
+
+    Not only identical ones: a small model can fill the list with five variants
+    of the same sentence ("Firma chce zarejestrować wizytę, by zaprezentować
+    rozwiązanie" / "...by omówić zastosowanie"). Better to return three
+    different points than one point five times.
     """
-    wynik: list[str] = []
-    if isinstance(wartosc, str):
-        wartosc = [wartosc]
-    if not isinstance(wartosc, (list, tuple)):
-        return wynik
-    for element in wartosc:
-        tekst = " ".join(str(element).split()).strip(" -•*")
-        if not tekst:
+    result: list[str] = []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return result
+    for item in value:
+        text = " ".join(str(item).split()).strip(" -•*")
+        if not text:
             continue
-        if any(difflib.SequenceMatcher(None, tekst.lower(), juz.lower()).ratio()
-               >= PODOBIENSTWO_ZDANIA for juz in wynik):
+        if any(difflib.SequenceMatcher(None, text.lower(), seen.lower()).ratio()
+               >= SENTENCE_SIMILARITY for seen in result):
             continue
-        wynik.append(tekst)
-        if len(wynik) >= limit:
+        result.append(text)
+        if len(result) >= limit:
             break
-    return wynik
+    return result
 
 
-def _uproszczone(tekst: str) -> str:
-    """Male litery bez ogonkow - do porownywania imion z trescia transkryptu."""
-    return unicodedata.normalize("NFKD", tekst.lower()).encode("ascii", "ignore").decode()
+def _simplified(text: str) -> str:
+    """Lower case without diacritics - for comparing names with the transcript."""
+    return unicodedata.normalize("NFKD", text.lower()).encode("ascii", "ignore").decode()
 
 
-def _slowa(tekst: str) -> set[str]:
-    """Zbior slow transkryptu w postaci porownywalnej z imionami."""
-    return set(re.findall(r"[a-z]+", _uproszczone(tekst)))
+def _words(text: str) -> set[str]:
+    """Set of transcript words in a form comparable with names."""
+    return set(re.findall(r"[a-z]+", _simplified(text)))
 
 
-def _slowa_dokladne(tekst: str) -> set[str]:
-    """Jak `_slowa`, ale z zachowanymi ogonkami.
+def _exact_words(text: str) -> set[str]:
+    """Like `_words`, but with Polish diacritics kept.
 
-    Do nazw miesiecy ogonki sa konieczne: bez nich "mają" zlewa sie z "maja",
-    czyli kazde spotkanie, na ktorym ktos czegos "ma", potwierdzaloby maj.
+    Month names need the diacritics: without them "mają" merges with "maja",
+    so every meeting where someone "has" something would confirm May.
     """
-    return set(re.findall(r"[a-ząćęłńóśźż]+", tekst.lower()))
+    return set(re.findall(r"[a-ząćęłńóśźż]+", text.lower()))
 
 
-# Model lubi dopowiedziec miesiac tam, gdzie padl sam numer dnia - w tescie
-# z "wtorek 29" zrobil "29 lutego", a potem "29 marca". Zadna instrukcja
-# w promptcie tego nie zatrzymala, wiec wycinamy je po fakcie: miesiac zostaje
-# tylko wtedy, gdy naprawde padl w rozmowie.
-MIESIACE = {
+# The model likes to add a month where only the day number was said - in a test
+# it turned "wtorek 29" into "29 lutego" and then "29 marca". No instruction in
+# the prompt stopped it, so we cut them afterwards: a month stays only when it
+# was really said in the conversation. Polish month forms (nominative, genitive,
+# locative) - data matched against Polish summaries.
+MONTHS = {
     "styczeń": ("styczeń", "stycznia", "styczniu"),
     "luty": ("luty", "lutego", "lutym"),
     "marzec": ("marzec", "marca", "marcu"),
@@ -414,295 +427,302 @@ MIESIACE = {
 }
 
 
-# Data liczbowa z miesiacem: "29.02", "29.02.2026", "29/02". Drugi czlon musi
-# byc poprawnym miesiacem (01-12), zeby nie pomylic daty z godzina - "12.00"
-# ma tam "00", a "13.30" ma "30", wiec obie zostaja nietkniete.
-_DATA_LICZBOWA = re.compile(r"\b(\d{1,2})[./](0?[1-9]|1[0-2])(?:[./](\d{2,4}))?\b")
+# Numeric date with a month: "29.02", "29.02.2026", "29/02". The second part
+# must be a valid month (01-12) so a date is not confused with a time - "12.00"
+# has "00" there and "13.30" has "30", so both stay untouched.
+_NUMERIC_DATE = re.compile(r"\b(\d{1,2})[./](0?[1-9]|1[0-2])(?:[./](\d{2,4}))?\b")
 
 
-def _bez_zmyslonych_dat(zdanie: str, slowa: set[str], transkrypt: str) -> str:
-    """Usuwa ze zdania czesci daty, ktore nie padly w transkrypcie.
+def _without_invented_dates(sentence: str, words: set[str], transcript: str) -> str:
+    """Removes date parts from the sentence that were not said in the transcript.
 
-    Nazwy miesiecy znikaja w calosci, a z dat liczbowych zostaje sam dzien.
-    Zaden prompt tego nie zalatwil: 4B robil z "wtorek 29" najpierw "29 lutego",
-    potem "29 marca", a 8B - "29.02". Lepiej oddac niepelna date niz zmyslona.
+    Month names disappear entirely, numeric dates keep only the day. No prompt
+    solved this: 4B turned "wtorek 29" first into "29 lutego", then "29 marca",
+    and 8B into "29.02". Better an incomplete date than an invented one.
     """
-    obecne = set(re.findall(r"[a-ząćęłńóśźż]+", zdanie.lower()))
-    for formy in MIESIACE.values():
-        if not (obecne & set(formy)) or (slowa & set(formy)):
+    present = set(re.findall(r"[a-ząćęłńóśźż]+", sentence.lower()))
+    for forms in MONTHS.values():
+        if not (present & set(forms)) or (words & set(forms)):
             continue
-        wzor = re.compile(r"\s*\b(?:%s)\b" % "|".join(formy), re.IGNORECASE)
-        zdanie = wzor.sub("", zdanie)
-        log.info("Usuwam zmyslony miesiac %r", formy[0])
+        pattern = re.compile(r"\s*\b(?:%s)\b" % "|".join(forms), re.IGNORECASE)
+        sentence = pattern.sub("", sentence)
+        log.info("Removing invented month %r", forms[0])
 
-    def sam_dzien(dopasowanie: re.Match) -> str:
-        if dopasowanie.group(0) in transkrypt:
-            return dopasowanie.group(0)
-        log.info("Zmyslona data liczbowa %r - zostawiam sam dzien",
-                 dopasowanie.group(0))
-        return dopasowanie.group(1)
+    def day_only(match: re.Match) -> str:
+        if match.group(0) in transcript:
+            return match.group(0)
+        log.info("Invented numeric date %r - keeping the day only", match.group(0))
+        return match.group(1)
 
-    zdanie = _DATA_LICZBOWA.sub(sam_dzien, zdanie)
-    return " ".join(zdanie.split())
+    sentence = _NUMERIC_DATE.sub(day_only, sentence)
+    return " ".join(sentence.split())
 
 
-def _pada_w_tekscie(imie: str, slowa: set[str]) -> bool:
-    """Czy imie faktycznie pada w transkrypcie (z tolerancja na odmiane).
+def _name_in_text(name: str, words: set[str]) -> bool:
+    """Whether the name is really said in the transcript (tolerating inflection).
 
-    Model potrafi dopisac osobe, ktorej nie bylo - w tescie wymyslil "Teresę"
-    z przekreconego "Teros?". Sprawdzamy wiec, czy w transkrypcie stoi slowo
-    dostatecznie podobne do imienia.
+    The model can add a person who was not there - in a test it invented
+    "Teresę" from a garbled "Teros?". So we check that the transcript contains
+    a word similar enough to the name.
 
-    Porownujemy CALE slowa, nie podlancuchy: "Teresa" siedzi w srodku
-    "zainteresowani", a "Robert" w "robimy". I z tolerancja na odmiane, bo
-    polskie imiona maja jeszcze e ruchome - "Paweł" pada w nagraniu wylacznie
-    jako "Pawle" i "Pawła", nigdy w mianowniku. Prog 0,8 zmierzony na
-    transkrypcie spotkania: 6/6 imion obecnych trafionych, 0/8 nieobecnych
-    przepuszczonych.
+    We compare WHOLE words, not substrings: "Teresa" hides inside
+    "zainteresowani", and "Robert" in "robimy". And with tolerance for
+    inflection, because Polish names also have a mobile e - "Paweł" occurs in
+    the recording only as "Pawle" and "Pawła", never in the nominative.
+    Threshold 0.8 measured on a meeting transcript: 6/6 present names found,
+    0/8 absent names let through.
     """
-    rdzen = _uproszczone(imie).split()[0]
-    if len(rdzen) < 3:
+    stem = _simplified(name).split()[0]
+    if len(stem) < 3:
         return False
-    kandydaci = [slowo for slowo in slowa if slowo[:3] == rdzen[:3]]
-    return bool(difflib.get_close_matches(rdzen, kandydaci, n=1,
-                                          cutoff=PODOBIENSTWO_IMIENIA))
+    candidates = [word for word in words if word[:3] == stem[:3]]
+    return bool(difflib.get_close_matches(stem, candidates, n=1,
+                                          cutoff=NAME_SIMILARITY))
 
 
-def _imiona(wartosc, transkrypt: str | None = None) -> list[str]:
-    """Zostawia tylko to, co wyglada na imie - reszte modelu odrzucamy.
+def _names(value, transcript: str | None = None) -> list[str]:
+    """Keeps only what looks like a name - the rest of the model output is dropped.
 
-    Gdy podasz `transkrypt`, imiona sa dodatkowo sprawdzane pod katem tego, czy
-    w ogole w nim padly.
+    With `transcript`, names are also checked for whether they were said in it
+    at all.
     """
-    wynik: list[str] = []
-    widziane: set[str] = set()
-    if not isinstance(wartosc, (list, tuple)):
-        return wynik
+    result: list[str] = []
+    seen: set[str] = set()
+    if not isinstance(value, (list, tuple)):
+        return result
 
-    porownywalny = _slowa(transkrypt) if transkrypt else None
+    comparable = _words(transcript) if transcript else None
 
-    for element in wartosc:
-        imie = " ".join(str(element).split()).strip(" -,.")
-        imie = _GRZECZNOSCIOWE.sub("", imie).strip()
-        if not (2 <= len(imie) <= 24):
+    for item in value:
+        name = " ".join(str(item).split()).strip(" -,.")
+        name = _HONORIFICS.sub("", name).strip()
+        if not (2 <= len(name) <= 24):
             continue
-        if not re.fullmatch(r"[^\W\d_][\w'’-]*(?: [^\W\d_][\w'’-]*)?", imie, re.UNICODE):
+        if not re.fullmatch(r"[^\W\d_][\w'’-]*(?: [^\W\d_][\w'’-]*)?", name, re.UNICODE):
             continue
-        # Pierwszy czlon tez, inaczej "Kierownik produkcji" czy "Dyrektor
-        # finansowy" przechodza obok filtru jednowyrazowego.
-        if imie.lower() in widziane:
+        # The first word too, otherwise "Kierownik produkcji" or "Dyrektor
+        # finansowy" slip past the single-word filter.
+        if name.lower() in seen:
             continue
-        if {imie.lower(), imie.lower().split()[0]} & NIE_IMIONA:
+        if {name.lower(), name.lower().split()[0]} & NOT_NAMES:
             continue
-        if porownywalny is not None and not _pada_w_tekscie(imie, porownywalny):
-            log.info("Odrzucam imie %r - nie pada w transkrypcie", imie)
+        if comparable is not None and not _name_in_text(name, comparable):
+            log.info("Rejecting name %r - not said in the transcript", name)
             continue
-        widziane.add(imie.lower())
-        wynik.append(imie[:1].upper() + imie[1:])
-        if len(wynik) >= MAKS_UCZESTNIKOW:
+        seen.add(name.lower())
+        result.append(name[:1].upper() + name[1:])
+        if len(result) >= MAX_PARTICIPANTS:
             break
-    return wynik
+    return result
 
 
-def _normalizuj(dane: dict, transkrypt: str | None = None) -> dict:
-    temat = " ".join(str(dane.get("temat", "")).split()).strip(" .-\"'")
-    tldr = " ".join(str(dane.get("tldr", "")).split())
-    punkty = _zdania(dane.get("punkty"), MAKS_PUNKTOW)
-    ustalenia = _zdania(dane.get("ustalenia"), MAKS_USTALEN)
+def _normalize(data: dict, transcript: str | None = None) -> dict:
+    """Model answer (Polish schema fields) -> cleaned result with English keys."""
+    topic = " ".join(str(data.get("temat", "")).split()).strip(" .-\"'")
+    tldr = " ".join(str(data.get("tldr", "")).split())
+    key_points = _sentences(data.get("punkty"), MAX_POINTS)
+    decisions = _sentences(data.get("ustalenia"), MAX_DECISIONS)
 
-    if transkrypt:
-        slowa = _slowa_dokladne(transkrypt)
-        tldr = _bez_zmyslonych_dat(tldr, slowa, transkrypt)
-        punkty = [_bez_zmyslonych_dat(p, slowa, transkrypt) for p in punkty]
-        ustalenia = [_bez_zmyslonych_dat(u, slowa, transkrypt) for u in ustalenia]
+    if transcript:
+        words = _exact_words(transcript)
+        tldr = _without_invented_dates(tldr, words, transcript)
+        key_points = [_without_invented_dates(p, words, transcript) for p in key_points]
+        decisions = [_without_invented_dates(d, words, transcript) for d in decisions]
 
     return {
-        "temat": temat[:MAKS_ZNAKOW_TEMATU],
-        "uczestnicy": _imiona(dane.get("uczestnicy"), transkrypt),
+        "topic": topic[:MAX_TOPIC_CHARS],
+        "participants": _names(data.get("uczestnicy"), transcript),
         "tldr": tldr,
-        "punkty": punkty,
-        "ustalenia": ustalenia,
+        "key_points": key_points,
+        "decisions": decisions,
     }
 
 
-# --- glowna funkcja -------------------------------------------------------
+def _prompt_label(speaker: str) -> str:
+    return _PROMPT_LABELS.get(speaker, speaker)
 
 
-def podsumuj(
-    segmenty: list[Segment],
+# --- main function --------------------------------------------------------
+
+
+def summarize(
+    segments: list[Segment],
     model: str,
     device: str = "GPU",
     status: StatusFn | None = None,
-    anuluj: threading.Event | None = None,
+    cancel: threading.Event | None = None,
 ) -> dict:
-    """Zwraca {temat, uczestnicy, tldr, punkty, ustalenia, model_llm, device_llm}.
+    """Returns {topic, participants, tldr, key_points, decisions, summary_model,
+    summary_device, summary_time_s}.
 
-    Pusty slownik oznacza, ze nie bylo czego podsumowac albo model nie zwrocil
-    nic sensownego - wywolujacy ma wtedy zostawic wszystko tak, jak bylo.
+    An empty dict means there was nothing to summarize or the model returned
+    nothing useful - the caller should then leave everything as it was.
     """
-    tekst = jako_tekst(segmenty).strip() if segmenty else ""
-    if not tekst:
+    text = as_text(segments, label=_prompt_label).strip() if segments else ""
+    if not text:
         return {}
 
-    silnik = SilnikLLM(model, device)
+    engine = LLMEngine(model, device)
     start = time.monotonic()
     try:
         if status:
-            status(t("Ładuję model podsumowania..."))
-        silnik.zaladuj()
+            status(t("Loading the summary model..."))
+        engine.load()
 
-        fragmenty = _fragmenty(tekst)
-        imiona: list[str] = []
+        chunks = _chunks(text)
+        names: list[str] = []
 
-        if len(fragmenty) > 1:
-            notatki: list[str] = []
-            ustalenia: list[str] = []
-            for i, fragment in enumerate(fragmenty, start=1):
-                if anuluj is not None and anuluj.is_set():
+        if len(chunks) > 1:
+            notes: list[str] = []
+            decisions: list[str] = []
+            for i, chunk in enumerate(chunks, start=1):
+                if cancel is not None and cancel.is_set():
                     break
                 if status:
-                    status(t("Podsumowuję fragment {i}/{n}...", i=i, n=len(fragmenty)))
-                czesc = silnik.generuj_json(
-                    PROMPT_FRAGMENTU.format(
-                        numer=i, razem=len(fragmenty),
-                        nota=_NOTA_ETYKIET, material=fragment,
+                    status(t("Summarizing part {i}/{n}...", i=i, n=len(chunks)))
+                part = engine.generate_json(
+                    CHUNK_PROMPT.format(
+                        number=i, total=len(chunks),
+                        note=_LABEL_NOTE, material=chunk,
                     ),
-                    SCHEMAT_FRAGMENTU,
-                    MAKS_TOKENOW_FRAGMENT,
-                    anuluj,
+                    CHUNK_SCHEMA,
+                    MAX_TOKENS_CHUNK,
+                    cancel,
                 )
-                notatki.extend(_zdania(czesc.get("punkty"), 3))
-                ustalenia.extend(_zdania(czesc.get("ustalenia"), MAKS_USTALEN))
-                imiona.extend(_imiona(czesc.get("uczestnicy"), tekst))
+                notes.extend(_sentences(part.get("punkty"), 3))
+                decisions.extend(_sentences(part.get("ustalenia"), MAX_DECISIONS))
+                names.extend(_names(part.get("uczestnicy"), text))
 
-            if not notatki and not ustalenia:
+            if not notes and not decisions:
                 return {}
             material = "Notatki z kolejnych fragmentów:\n" + "\n".join(
-                f"- {punkt}" for punkt in notatki
+                f"- {point}" for point in notes
             )
-            zrodlo = "notatki z transkryptu"
-            # Ustalenia przekazujemy osobno, bo to one najczesciej gubily sie
-            # przy sklejaniu notatek - model traktowal termin jak jeden z wielu
-            # punktow i wycinal go przy limicie piatki.
-            if ustalenia:
+            source = "notatki z transkryptu"
+            # Decisions are passed separately, because they were what got lost
+            # most often when joining notes - the model treated a date as one
+            # point among many and cut it at the limit of five.
+            if decisions:
                 material += ("\n\nUstalenia i terminy wychwycone w fragmentach "
                              "(zachowaj daty i godziny co do słowa):\n"
-                             + "\n".join(f"- {u}" for u in dict.fromkeys(ustalenia)))
-            if imiona:
+                             + "\n".join(f"- {d}" for d in dict.fromkeys(decisions)))
+            if names:
                 material += ("\n\nImiona wychwycone w rozmowie: "
-                             + ", ".join(dict.fromkeys(imiona)))
+                             + ", ".join(dict.fromkeys(names)))
         else:
-            material = f"Transkrypt:\n---\n{fragmenty[0]}\n---"
-            zrodlo = "transkrypt"
+            material = f"Transkrypt:\n---\n{chunks[0]}\n---"
+            source = "transkrypt"
 
-        if anuluj is not None and anuluj.is_set():
+        if cancel is not None and cancel.is_set():
             return {}
         if status:
-            status(t("Składam podsumowanie..."))
+            status(t("Assembling the summary..."))
 
-        wynik = _normalizuj(
-            silnik.generuj_json(
-                PROMPT_PODSUMOWANIA.format(
-                    zrodlo=zrodlo, nota=_NOTA_ETYKIET, material=material
+        result = _normalize(
+            engine.generate_json(
+                SUMMARY_PROMPT.format(
+                    source=source, note=_LABEL_NOTE, material=material
                 ),
-                SCHEMAT_PODSUMOWANIA,
-                MAKS_TOKENOW_FINAL,
-                anuluj,
+                SUMMARY_SCHEMA,
+                MAX_TOKENS_FINAL,
+                cancel,
             ),
-            tekst,
+            text,
         )
-        if anuluj is not None and anuluj.is_set():
+        if cancel is not None and cancel.is_set():
             return {}
-        if not wynik["uczestnicy"] and imiona:
-            wynik["uczestnicy"] = _imiona(imiona, tekst)
-        if not wynik["temat"] and not wynik["tldr"]:
+        if not result["participants"] and names:
+            result["participants"] = _names(names, text)
+        if not result["topic"] and not result["tldr"]:
             return {}
 
-        wynik["model_llm"] = model
-        wynik["device_llm"] = silnik.device
-        wynik["czas_podsumowania_s"] = round(time.monotonic() - start, 1)
-        log.info("Podsumowanie gotowe w %.1fs: %s",
-                 wynik["czas_podsumowania_s"], wynik["temat"])
-        return wynik
+        result["summary_model"] = model
+        result["summary_device"] = engine.device
+        result["summary_time_s"] = round(time.monotonic() - start, 1)
+        log.info("Summary ready in %.1fs: %s",
+                 result["summary_time_s"], result["topic"])
+        return result
     finally:
-        silnik.zwolnij()
+        engine.release()
 
 
-# --- zapis i nazwa katalogu -----------------------------------------------
+# --- saving and folder name -----------------------------------------------
 
 
-def jako_markdown(wynik: dict, meta: dict) -> str:
-    linie = [f"# {wynik.get('temat') or meta.get('nazwa', 'Spotkanie')}", ""]
+def as_markdown(result: dict, meta: dict) -> str:
+    """summary.md. The document stays Polish: the summary content itself is
+    Polish (the prompts ask for it), so English headings would only mix languages."""
+    lines = [f"# {result.get('topic') or meta.get('name', 'Spotkanie')}", ""]
 
-    if meta.get("data"):
-        linie.append(f"- **Data:** {meta['data']}")
-    if meta.get("trwanie_s"):
-        linie.append(f"- **Czas trwania:** {czas_hms(meta['trwanie_s'])}")
-    if wynik.get("uczestnicy"):
-        linie.append(f"- **Uczestnicy:** {', '.join(wynik['uczestnicy'])}")
-    linie += ["", "## W skrócie", "", wynik.get("tldr") or "_Brak._", ""]
+    if meta.get("date"):
+        lines.append(f"- **Data:** {meta['date']}")
+    if meta.get("duration_s"):
+        lines.append(f"- **Czas trwania:** {format_hms(meta['duration_s'])}")
+    if result.get("participants"):
+        lines.append(f"- **Uczestnicy:** {', '.join(result['participants'])}")
+    lines += ["", "## W skrócie", "", result.get("tldr") or "_Brak._", ""]
 
-    if wynik.get("punkty"):
-        linie += ["## Najważniejsze punkty", ""]
-        linie += [f"- {punkt}" for punkt in wynik["punkty"]]
-        linie.append("")
+    if result.get("key_points"):
+        lines += ["## Najważniejsze punkty", ""]
+        lines += [f"- {point}" for point in result["key_points"]]
+        lines.append("")
 
-    if wynik.get("ustalenia"):
-        linie += ["## Ustalenia", ""]
-        linie += [f"- {ustalenie}" for ustalenie in wynik["ustalenia"]]
-        linie.append("")
+    if result.get("decisions"):
+        lines += ["## Ustalenia", ""]
+        lines += [f"- {decision}" for decision in result["decisions"]]
+        lines.append("")
 
-    linie += [
+    lines += [
         "---",
         "",
-        f"_Wygenerowane lokalnie modelem `{wynik.get('model_llm', '')}` "
-        f"na {wynik.get('device_llm', '?')} w {wynik.get('czas_podsumowania_s', 0):.0f}s. "
+        f"_Wygenerowane lokalnie modelem `{result.get('summary_model', '')}` "
+        f"na {result.get('summary_device', '?')} w {result.get('summary_time_s', 0):.0f}s. "
         "Nic nie opuściło tego komputera._",
     ]
-    return "\n".join(linie) + "\n"
+    return "\n".join(lines) + "\n"
 
 
-def znacznik_z_nazwy(nazwa_katalogu: str) -> str | None:
-    """'2026-09-08_09-15_Standup' -> '2026-09-08_09-15'. None, gdy inny format."""
-    czesci = nazwa_katalogu.split("_")
-    if len(czesci) < 2:
+def timestamp_from_name(folder_name: str) -> str | None:
+    """'2026-09-08_09-15_Standup' -> '2026-09-08_09-15'. None for another format."""
+    parts = folder_name.split("_")
+    if len(parts) < 2:
         return None
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", czesci[0]):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[0]):
         return None
-    if not re.fullmatch(r"\d{2}-\d{2}", czesci[1]):
+    if not re.fullmatch(r"\d{2}-\d{2}", parts[1]):
         return None
-    return f"{czesci[0]}_{czesci[1]}"
+    return f"{parts[0]}_{parts[1]}"
 
 
-def _czlon_tematu(temat: str, maks: int = 40) -> str:
-    """Temat -> czlon nazwy katalogu, uciety na granicy slowa.
+def _topic_part(topic: str, max_len: int = 40) -> str:
+    """Topic -> folder name part, cut at a word boundary.
 
-    `slug` tnie po znakach, wiec dlugi temat konczyl sie polowa wyrazu
-    ('architektura-dan'). Ostatnie slowo odrzucamy tylko wtedy, gdy ciecie
-    naprawde wypadlo w jego srodku - inaczej 'Plan na Q4' straciloby 'Q4'.
+    `slug` cuts by characters, so a long topic ended with half a word
+    ('architektura-dan'). The last word is dropped only when the cut really
+    fell in its middle - otherwise 'Plan na Q4' would lose 'Q4'.
     """
-    pelny = slug(temat, maks=200)
-    if len(pelny) <= maks:
-        return pelny
-    if pelny[maks] == "-":          # ciecie trafilo dokladnie miedzy slowa
-        return pelny[:maks]
-    return pelny[:maks].rpartition("-")[0].strip("-") or pelny[:maks]
+    full = slug(topic, max_len=200)
+    if len(full) <= max_len:
+        return full
+    if full[max_len] == "-":          # the cut fell exactly between words
+        return full[:max_len]
+    return full[:max_len].rpartition("-")[0].strip("-") or full[:max_len]
 
 
-def nazwa_katalogu(stara_nazwa: str, wynik: dict) -> str | None:
-    """Sklada '2026-09-08_09-15_Temat_Anna-Marek'. None = nie ma czego zmieniac.
+def folder_name(old_name: str, result: dict) -> str | None:
+    """Builds '2026-09-08_09-15_Topic_Anna-Marek'. None = nothing to change.
 
-    Znacznik czasu bierzemy ze starej nazwy, nie z zegara - inaczej ponowna
-    transkrypcja archiwalnego nagrania przestawilaby jego date.
+    The timestamp comes from the old name, not the clock - otherwise
+    re-transcribing an archived recording would change its date.
     """
-    znacznik = znacznik_z_nazwy(stara_nazwa)
-    temat = _czlon_tematu(wynik.get("temat", ""))
-    if not znacznik or not temat:
+    timestamp = timestamp_from_name(old_name)
+    topic = _topic_part(result.get("topic", ""))
+    if not timestamp or not topic:
         return None
 
-    imiona = slug("-".join(imie.split()[0] for imie in wynik.get("uczestnicy", [])[:3]),
-                  maks=30)
-    nowa = f"{znacznik}_{temat}"
-    if imiona:
-        nowa += f"_{imiona}"
-    return nowa if nowa != stara_nazwa else None
+    names = slug("-".join(name.split()[0] for name in result.get("participants", [])[:3]),
+                 max_len=30)
+    new = f"{timestamp}_{topic}"
+    if names:
+        new += f"_{names}"
+    return new if new != old_name else None

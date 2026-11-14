@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Start aplikacji niezalezny od katalogu roboczego.
+"""App start that does not depend on the working directory.
 
-`pythonw -m ucho` wymaga, zeby biezacym katalogiem byl katalog projektu.
-Pasek zadan uruchamia przypiety kafelek bez takiej gwarancji, wiec skroty i
-polecenie przypiecia wskazuja ten plik: jego katalog trafia na poczatek
-`sys.path`, wiec pakiet `ucho` jest widoczny zawsze.
+`pythonw -m ucho` needs the project folder as the current directory. The
+taskbar starts a pinned tile without that guarantee, so the shortcuts and the
+pin command point to this file: its folder goes first on `sys.path`, so the
+`ucho` package is always found.
 """
 
 from __future__ import annotations
