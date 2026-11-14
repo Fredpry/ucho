@@ -26,6 +26,10 @@ from .theme import C
 log = logging.getLogger(__name__)
 
 PAD = 28  # outer padding of a screen
+# Below this screen height (logical px) the big buttons shrink and the meeting
+# screen lists two recent recordings instead of three. 1366 x 768 at 125 %
+# leaves about 535.
+COMPACT_HEIGHT = 600
 
 
 class Screen(ctk.CTkFrame):
@@ -92,6 +96,7 @@ class MeetingScreen(Screen):
 
         top, slot = header(self, t("Record a meeting"))
         top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=PAD, pady=(PAD - 4, 14))
+        self._top = top
         self.pill = ui.StatusPill(slot)
         self.pill.pack()
 
@@ -107,7 +112,7 @@ class MeetingScreen(Screen):
         self.name = ui.entry(recorder, t("e.g. Team standup"))
         self.name.grid(row=1, column=0, sticky="ew", padx=22)
         compact = app.compact
-        self.button = ui.RecordButton(recorder, self._toggle, diameter=112 if compact else 136,
+        self.button = ui.RecordButton(recorder, self._toggle, diameter=104 if compact else 136,
                                       idle_text="REC", active_text="STOP")
         self.button.grid(row=3, column=0, pady=(4, 0))
         self.timer = ui.label(recorder, "00:00:00", theme.XXL + (4 if compact else 8),
@@ -146,7 +151,7 @@ class MeetingScreen(Screen):
         self.recent.grid_columnconfigure(0, weight=1)
 
         language = ctk.CTkFrame(side, fg_color="transparent")
-        language.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        language.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ui.muted(language, t("Transcription language"), anchor="w").pack(fill="x", pady=(0, 4))
         self.language = ui.segmented(language, list(config.LANGUAGE_LABELS.values()),
                                      config.LANGUAGE_LABELS.get(app.settings["language"], "Auto (PL/EN)"),
@@ -154,7 +159,7 @@ class MeetingScreen(Screen):
         self.language.pack(fill="x")
 
         note = ctk.CTkFrame(side, fg_color=C.info_soft, corner_radius=theme.RADIUS_MD)
-        note.grid(row=3, column=0, sticky="ew", pady=(14, 0))
+        note.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         note.grid_columnconfigure(1, weight=1)
         ctk.CTkLabel(note, text="", image=ui.icon("info", 16, C.info)).grid(
             row=0, column=0, sticky="n", padx=(12, 6), pady=12)
@@ -166,6 +171,18 @@ class MeetingScreen(Screen):
 
         self.meeting.listen(self._event)
         self._recent_shown: list | None = None
+        self._compact: bool | None = None
+        self.bind("<Configure>", self._resize, add="+")
+
+    def _resize(self, event) -> None:
+        compact = ui.logical(self, event.height) < COMPACT_HEIGHT
+        if compact != self._compact:
+            self._compact = compact
+            self.button.set_diameter(104 if compact else 136)
+            self._top.grid_configure(pady=(16, 10) if compact else (PAD - 4, 14))
+            self.timer.configure(font=theme.font(theme.XXL + (2 if compact else 8), family="numeric"))
+            self._recent_shown = None
+            self.refresh_recent()
 
     def _wrap(self, event) -> None:
         self.consent.configure(wraplength=max(160, ui.logical(self, event.width) - 56))
@@ -189,7 +206,7 @@ class MeetingScreen(Screen):
             ui.focus(self.button)
 
     def refresh_recent(self) -> None:
-        sessions = self.app.archive.sessions()[:3]
+        sessions = self.app.archive.sessions()[:2 if self._compact else 3]
         signature = [(s.name, s.stat().st_mtime_ns if s.exists() else 0) for s in sessions]
         if signature == self._recent_shown:
             return
@@ -620,44 +637,66 @@ class DictationPanel(ctk.CTkFrame):
         self._shown_text = None
 
     def _build_full(self) -> None:
-        app = self.app
-        card = ui.card(self, corner_radius=theme.RADIUS_LG)
-        card.grid(row=0, column=0, sticky="nsew")
-        card.grid_columnconfigure(0, weight=1)
-        self.button = ui.RecordButton(card, self.dictation.toggle, diameter=104 if app.compact else 120,
-                                      idle_text="", active_text="", glyph="mic")
-        self.button.grid(row=0, column=0, pady=(14, 0))
-        self.headline = ui.label(card, "", theme.LG, "bold")
-        self.headline.grid(row=1, column=0)
-        self.hint = ui.muted(card, "", wraplength=420)
-        self.hint.grid(row=2, column=0, pady=(2, 10))
-        self.meter = ui.LevelMeter(card, t("Microphone"))
-        self.meter.grid(row=3, column=0, sticky="ew", padx=40, pady=(0, 16))
+        """Two columns: the controls on the left, the last text on the right.
 
-        last = ui.card(self)
-        last.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        Side by side rather than stacked, so it fits a 1366 x 768 screen at
+        125 % (about 1093 x 535 logical pixels for the window content).
+        """
+        app = self.app
+        self.grid_columnconfigure(0, weight=5, uniform="dictation")
+        self.grid_columnconfigure(1, weight=4, uniform="dictation")
+        self.grid_rowconfigure(0, weight=1)
+        card = ui.card(self, corner_radius=theme.RADIUS_LG)
+        card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        card.grid_columnconfigure(0, weight=1)
+        card.grid_rowconfigure((0, 5), weight=1)
+        self.button = ui.RecordButton(card, self.dictation.toggle, diameter=120,
+                                      idle_text="", active_text="", glyph="mic")
+        self.button.grid(row=1, column=0, pady=(10, 0))
+        self.headline = ui.label(card, "", theme.LG, "bold")
+        self.headline.grid(row=2, column=0)
+        self.hint = ui.muted(card, "", wraplength=360, justify="center")
+        self.hint.grid(row=3, column=0, padx=20, pady=(2, 10))
+        self.meter = ui.LevelMeter(card, t("Microphone"))
+        self.meter.grid(row=4, column=0, sticky="ew", padx=28, pady=(0, 6))
+        options = ctk.CTkFrame(card, fg_color="transparent")
+        options.grid(row=6, column=0, sticky="ew", padx=28, pady=(8, 18))
+        options.grid_columnconfigure(1, weight=1)
+        self.language = ui.segmented(options, list(DICTATION_LANGUAGES.values()),
+                                     DICTATION_LANGUAGES.get(app.settings["dictation_language"], "Auto"),
+                                     self._language, width=160)
+        self.language.grid(row=0, column=0, sticky="w")
+        self.enter = ui.switch(options, t("Enter after pasting"), app.settings["dictation_enter"],
+                               self._enter)
+        self.enter.grid(row=0, column=2, sticky="e")
+        card.bind("<Configure>", lambda e: self.hint.configure(
+            wraplength=max(200, ui.logical(self, e.width) - 48)), add="+")
+
+        side = ctk.CTkFrame(self, fg_color="transparent")
+        side.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        side.grid_columnconfigure(0, weight=1)
+        side.grid_rowconfigure(0, weight=1)
+        last = ui.card(side)
+        last.grid(row=0, column=0, sticky="nsew")
         last.grid_columnconfigure(0, weight=1)
+        last.grid_rowconfigure(1, weight=1)
         ui.muted(last, t("Last dictation"), anchor="w").grid(row=0, column=0, sticky="w",
                                                               padx=16, pady=(12, 0))
         self.copy = ui.secondary(last, t("Copy"), self._copy, "copy", width=10, height=30)
         self.copy.grid(row=0, column=1, sticky="e", padx=12, pady=(10, 0))
-        self.text = ui.label(last, "", theme.SM, anchor="w", justify="left", wraplength=520)
-        self.text.grid(row=1, column=0, columnspan=2, sticky="ew", padx=16, pady=(4, 14))
+        self.text = ui.label(last, "", theme.SM, anchor="nw", justify="left", wraplength=320)
+        self.text.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=16, pady=(6, 14))
         last.bind("<Configure>", lambda e: self.text.configure(
-            wraplength=max(200, ui.logical(self, e.width) - 40)), add="+")
+            wraplength=max(180, ui.logical(self, e.width) - 36)), add="+")
+        self.model = ui.muted(side, "", theme.XS, anchor="w", justify="left", wraplength=320)
+        self.model.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        side.bind("<Configure>", lambda e: self.model.configure(
+            wraplength=max(180, ui.logical(self, e.width) - 8)), add="+")
 
-        options = ctk.CTkFrame(self, fg_color="transparent")
-        options.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-        ui.muted(options, t("Language"), anchor="w").pack(side="left", padx=(0, 8))
-        self.language = ui.segmented(options, list(DICTATION_LANGUAGES.values()),
-                                     DICTATION_LANGUAGES.get(app.settings["dictation_language"], "Auto"),
-                                     self._language, width=180)
-        self.language.pack(side="left")
-        self.enter = ui.switch(options, t("Enter after pasting"), app.settings["dictation_enter"],
-                               self._enter)
-        self.enter.pack(side="right")
-        self.model = ui.muted(self, "", theme.XS, anchor="w")
-        self.model.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+    def set_compact(self, compact: bool) -> None:
+        """Smaller button on short windows (1366 x 768 at 125 %)."""
+        if not self.compact:
+            self.button.set_diameter(96 if compact else 120)
 
     def _build_compact(self) -> None:
         app = self.app
@@ -761,7 +800,9 @@ class DictationScreen(Screen):
         self.pill = ui.StatusPill(slot)
         self.pill.pack()
         self.panel = DictationPanel(self, app)
-        self.panel.grid(row=1, column=0, sticky="new", padx=PAD, pady=(0, PAD - 6))
+        self.panel.grid(row=1, column=0, sticky="nsew", padx=PAD, pady=(0, PAD - 6))
+        self.bind("<Configure>", lambda e: self.panel.set_compact(
+            ui.logical(self, e.height) < COMPACT_HEIGHT), add="+")
 
     def tick(self) -> None:
         self.pill.show(*self.app.status_pill())

@@ -12,7 +12,8 @@ reports levels. No model is loaded.
 
     python tools/screenshots.py                    # all shots into docs/screens
     python tools/screenshots.py --only meeting     # shots whose name contains "meeting"
-    python tools/screenshots.py --out C:\\tmp\\shots --size 1093x535
+    python tools/screenshots.py --size 1093x535 --language pl --suffix=-pl-1366x768
+                                # the window content of a 1366 x 768 screen at 125 %
 """
 
 from __future__ import annotations
@@ -106,6 +107,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--only", default="")
     parser.add_argument("--size", default="", help="logical window size, e.g. 1093x535")
     parser.add_argument("--language", default="en")
+    parser.add_argument("--suffix", default="", help="appended to every file name, e.g. -pl-1366")
     args = parser.parse_args(argv)
 
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -137,6 +139,9 @@ def main(argv: list[str]) -> int:
     app.dictation.last_text = ("Hi Marta, thanks for the call. I am sending the second supplier quote "
                                "by Friday, and the training stays in March.")
     app.dictation.model_state, app.dictation.model_device = "ready", "GPU"
+    # Another program (e.g. an older Ucho) may hold a hotkey on the machine that
+    # takes the shots; the docs show the normal state.
+    app.hotkey_errors = {}
     session_dir = recordings / "2026-11-10_14-00_Budzet-Q1"
 
     def recording(on: bool):
@@ -194,7 +199,8 @@ def main(argv: list[str]) -> int:
             time.sleep(0.25)
             target.update()
             box = window_rect(app.window_handle(target))
-            ImageGrab.grab(bbox=box, all_screens=True).save(args.out / f"{name}.png")
+            ImageGrab.grab(bbox=box, all_screens=True).save(args.out / f"{name}{args.suffix}.png",
+                                                            optimize=True)
             target.attributes("-topmost", False)
             print("saved", name, box)
         next_shot()

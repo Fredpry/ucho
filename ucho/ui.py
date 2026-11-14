@@ -353,9 +353,7 @@ class RecordButton(ctk.CTkLabel):
 
     def __init__(self, master, command: Callable[[], None], diameter: int = 136,
                  idle_text: str = "REC", active_text: str = "STOP", glyph: str | None = None):
-        self._d = diameter
-        self._pad = int(diameter * 0.16) + 6
-        self._size = diameter + 2 * self._pad
+        self._geometry(diameter)
         super().__init__(master, text="", width=self._size, height=self._size, fg_color="transparent")
         self._command = command
         self._idle_text, self._active_text, self._glyph = idle_text, active_text, glyph
@@ -378,6 +376,20 @@ class RecordButton(ctk.CTkLabel):
         tkinter.Misc.bind(self, "<Return>", lambda _e: self._click(), add="+")
         tkinter.Misc.bind(self, "<space>", lambda _e: self._click(), add="+")
         self.configure(cursor="hand2")
+        self.render()
+
+    def _geometry(self, diameter: int) -> None:
+        self._d = diameter
+        self._pad = int(diameter * 0.16) + 6
+        self._size = diameter + 2 * self._pad
+
+    def set_diameter(self, diameter: int) -> None:
+        if diameter == self._d:
+            return
+        self._geometry(diameter)
+        self._images.clear()
+        self._shown = None
+        self.configure(width=self._size, height=self._size)
         self.render()
 
     def _release(self, event) -> None:
