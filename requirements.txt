@@ -7,7 +7,7 @@ huggingface_hub==1.30.0
 PyAudioWPatch==0.2.12.8
 soxr==1.1.0
 soundfile==0.14.0
-numpy==2.5.3
+numpy==2.5.4
 customtkinter==6.0.0
 pillow==13.0.0
 pystray==0.19.5
