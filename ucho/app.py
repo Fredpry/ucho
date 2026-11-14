@@ -136,8 +136,14 @@ class App(ctk.CTk):
             self.tray.start()
         self._start_thread(self._load_devices, "devices")
         if not self.smoke:
-            self.dictation.preload()
+            # Describe the window for the taskbar before anything heavy starts:
+            # loading an OpenVINO model holds the GIL for 10+ s, and a window
+            # pinned during that time would become a pythonw.exe tile.
+            self.update_idletasks()
+            self.describe_window()
             self._start_thread(self.dictation_prepare, "portaudio")
+            # Let the window draw itself first; the preload freezes the UI briefly.
+            self.after(1500, self.dictation.preload)
         self.after(TICK_MS, self._tick)
         # The window must exist in the system before it is described for the taskbar.
         self.after(600, self._after_start)

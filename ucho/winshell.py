@@ -156,11 +156,13 @@ def describe_window(hwnd: int, command: str, name: str, icon: str,
         )
         if not store:
             return False
-        if app_id:
-            _set_text(store, _PID_ID, app_id)
+        # The relaunch properties go first and the id last: the shell reads
+        # the relaunch data when the id changes.
         _set_text(store, _PID_RELAUNCH_COMMAND, command)
         _set_text(store, _PID_RELAUNCH_NAME, name)
         _set_text(store, _PID_RELAUNCH_ICON, icon)
+        if app_id:
+            _set_text(store, _PID_ID, app_id)
         _method(store, _IDX_COMMIT)(store)
         return True
     except Exception:
