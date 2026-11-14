@@ -515,6 +515,14 @@ def _ui_font(size: int):
 # --- transcript text ---------------------------------------------------------------------
 
 
+def _tk_column(line: str, offset: int) -> int:
+    """Python string offset -> Tk text column. Tcl 8.6 counts a character above
+    U+FFFF (an emoji) as two."""
+    if tkinter.TkVersion >= 9:
+        return offset
+    return offset + sum(1 for char in line[:offset] if ord(char) > 0xFFFF)
+
+
 class TranscriptText(ctk.CTkTextbox):
     """Read-only transcript: mono timestamps, colored speakers, highlighted search hits."""
 
@@ -574,23 +582,24 @@ class TranscriptText(ctk.CTkTextbox):
         self.write((f"{timestamp}  ", "ts"), (f"{speaker}  ", tag), (text + "\n", "body"))
 
     def highlight(self, words: list[str]) -> str | None:
-        """Marks words (prefix, case-insensitive) and returns the index of the first hit."""
+        """Marks words the way search matches them and returns the index of the first hit.
+
+        Prefix of a word, case- and diacritics-insensitive, "ł" included
+        ("lodz" marks "Łódź"), so every search hit is also highlighted.
+        """
+        from .archive import match_spans
+
         self._text.tag_remove("hit", "1.0", "end")
+        words = [w for w in words if len(w) >= 2]
         first = None
-        for word in words:
-            if len(word) < 2:
-                continue
-            start = "1.0"
-            while True:
-                count = tkinter.IntVar()
-                position = self._text.search(word, start, "end", nocase=True, count=count)
-                if not position:
-                    break
-                end = f"{position}+{count.get()}c"
-                self._text.tag_add("hit", position, end)
-                if first is None or self._text.compare(position, "<", first):
-                    first = position
-                start = end
+        if not words:
+            return None
+        lines = self._text.get("1.0", "end-1c").split("\n")
+        for number, line in enumerate(lines, start=1):
+            for start, end in match_spans(line, words):
+                position = f"{number}.{_tk_column(line, start)}"
+                self._text.tag_add("hit", position, f"{number}.{_tk_column(line, end)}")
+                first = first or position
         if first:
             self._text.see(first)
         return first

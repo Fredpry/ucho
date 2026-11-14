@@ -63,6 +63,7 @@ def archive(tmp_path: Path) -> Archive:
     ], summary="# Summary\nThree candidates.")
     _new_session(tmp_path, NEW_ID_2, "2026-11-13 09:00", [
         (3, "me", "Krótki standup zespołu."),
+        (40, "meeting", "Taksówka z Łodzi kosztowała sto złotych."),
     ])
     return Archive(tmp_path)
 
@@ -158,6 +159,15 @@ def test_search_without_diacritics_and_by_prefix(archive):
     assert "kandydatów" in hit["excerpt"]
     text, _ = _call(archive, "search_transcripts", fraza="srod")
     assert json.loads(text)[0]["id"] == NEW_ID
+
+
+def test_search_finds_l_with_stroke_without_it(archive):
+    for query in ("zlotych", "lodzi", "złotych"):
+        text, error = _call(archive, "search_transcripts", query=query)
+        assert not error
+        hit = json.loads(text)[0]
+        assert hit["id"] == NEW_ID_2
+        assert hit["excerpt"] == "Taksówka z Łodzi kosztowała sto złotych."
 
 
 @pytest.mark.parametrize("bad_id", ["..", "../outside", "a/b", "C:\\Windows", "no-such-meeting"])
