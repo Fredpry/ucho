@@ -198,7 +198,9 @@ def main(argv: list[str]) -> int:
             target.update()
             time.sleep(0.25)
             target.update()
-            box = window_rect(app.window_handle(target))
+            left, top, right, bottom = window_rect(app.window_handle(target))
+            # 2 px inside the frame: the outermost row can show what lies behind the window.
+            box = (left + 2, top + 2, right - 2, bottom - 2)
             ImageGrab.grab(bbox=box, all_screens=True).save(args.out / f"{name}{args.suffix}.png",
                                                             optimize=True)
             target.attributes("-topmost", False)
