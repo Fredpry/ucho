@@ -22,7 +22,7 @@ Thanks for wanting to help. Ucho is maintained by one person, so small, focused 
 .\.venv-dev\Scripts\python.exe -m pytest
 ```
 
-If you changed recording or transcription, also record ~20 seconds of Polish and English speech and check `transcript.md` and `ucho.log`. Say in the pull request what you ran and on which hardware; do not claim checks you did not run. AI-assisted code is fine as long as you understand and have verified it.
+If you changed the UI, also run `python -m ucho --smoke-test` (CI does) and look at the screens with `python tools/screenshots.py`, in both themes. If you changed recording or transcription, also record ~20 seconds of Polish and English speech and check `transcript.md` and `ucho.log`. Say in the pull request what you ran and on which hardware; do not claim checks you did not run. AI-assisted code is fine as long as you understand and have verified it.
 
 ## Developer Certificate of Origin
 

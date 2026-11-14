@@ -1,6 +1,6 @@
 # Hardware detection and model choice
 
-Ucho picks the Whisper model and the device (GPU or CPU) for you. The installer runs `python -m ucho.hardware --save` after installing the packages and downloads the model it recommends. You can always override the choice in Settings.
+Ucho picks the Whisper model and the device (GPU or CPU) for you. The installer runs `python -m ucho.hardware --save` after installing the packages and downloads the model it recommends. The first-run wizard shows the same recommendation with its reasons and can measure it on the spot (*Measure the speed*); Settings → **Hardware** shows the profile, the recommendation, a *Measure again* button and the manual choice of device (GPU, CPU, NPU, AUTO) and model. Choosing the NPU asks first, because its first compile takes about 3 minutes.
 
 Code: `ucho/hardware.py`. Tests: `tests/test_hardware.py`.
 
@@ -35,6 +35,8 @@ Details:
 - **Usable GPU** means a GPU that OpenVINO lists (its GPU plugin drives only Intel GPUs) with micro-architecture 12 or newer (Xe-LP in Iris Xe and 11th gen Core, Xe2 in Arc 140V). Older HD/UHD 6xx graphics are too slow for large-v3 and fall through to the CPU rows. A discrete Arc card is preferred over the integrated one (`GPU.1` instead of `GPU.0`). If the architecture cannot be read, the GPU counts as usable and the measurement decides.
 - **Cores** are physical cores. Hyper-threading adds little to matrix-heavy inference, and a 4-core laptop with 8 threads is clearly too slow for large-v3 on the CPU.
 - **NVIDIA and AMD cards** are listed in the reasons as unsupported: OpenVINO cannot use them.
+
+The dictation model column is a default, not a rule you must follow: Settings → Dictation → *Dictation model* can be "Same as transcription" (one model in memory) or any model. On 20 synthetic Polish dictations INT8 and FP16 gave the same text (see [benchmarks.md](benchmarks.md#int8-vs-fp16-for-dictation-v02)), while FP16 needs about 3 GB more memory and took 37 % longer.
 
 ## Step down after the measurement
 

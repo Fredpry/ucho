@@ -41,6 +41,28 @@ import pyaudiowpatch as pyaudio
 
 log = logging.getLogger(__name__)
 
+# PortAudio's initialization and termination are not thread-safe. Since v0.2
+# the meeting recorder, the device list and dictation live in one process,
+# and two threads creating PyAudio at the same moment crashed it with an
+# access violation (seen at startup: device listing + dictation warm-up).
+PORTAUDIO_LOCK = threading.RLock()
+
+
+def new_pyaudio() -> "pyaudio.PyAudio":
+    with PORTAUDIO_LOCK:
+        return pyaudio.PyAudio()
+
+
+def close_pyaudio(p) -> None:
+    if p is None:
+        return
+    with PORTAUDIO_LOCK:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+
+
 TARGET_RATE = 16_000
 BLOCK = 2048
 # Below this difference we do not align - small fluctuations are normal.
@@ -85,7 +107,7 @@ def _device_map() -> tuple[list[DeviceInfo], list[DeviceInfo],
     default_mic: DeviceInfo | None = None
     default_sys: DeviceInfo | None = None
 
-    p = pyaudio.PyAudio()
+    p = new_pyaudio()
     try:
         loopback_indices = set()
         try:
@@ -117,7 +139,7 @@ def _device_map() -> tuple[list[DeviceInfo], list[DeviceInfo],
         except Exception as error:
             log.warning("No default loopback device: %s", error)
     finally:
-        p.terminate()
+        close_pyaudio(p)
 
     return microphones, loopbacks, default_mic, default_sys
 
@@ -376,7 +398,7 @@ class Recorder:
         if not chosen:
             raise RuntimeError(t("No audio devices available for recording."))
 
-        self._pa = pyaudio.PyAudio()
+        self._pa = new_pyaudio()
         self.start_ts = time.time()
 
         for name, file, dev in chosen:
@@ -391,7 +413,7 @@ class Recorder:
             self._tracks[name] = track
 
         if not self._tracks:
-            self._pa.terminate()
+            close_pyaudio(self._pa)
             self._pa = None
             raise RuntimeError(t("Could not start any recording track."))
 
@@ -409,12 +431,8 @@ class Recorder:
         with self._lock:
             for track in self._tracks.values():
                 track.finish()
-            if self._pa is not None:
-                try:
-                    self._pa.terminate()
-                except Exception:
-                    pass
-                self._pa = None
+            close_pyaudio(self._pa)
+            self._pa = None
 
         result = {
             "folder": self.folder,
@@ -459,13 +477,10 @@ class Recorder:
                 return
             for track in self._tracks.values():
                 track.stop_stream()
-            try:
-                self._pa.terminate()
-            except Exception:
-                pass
+            close_pyaudio(self._pa)
 
             devices = list_devices()
-            self._pa = pyaudio.PyAudio()
+            self._pa = new_pyaudio()
             for name, track in self._tracks.items():
                 if name == "microphone":
                     new = find_device(self._microphone_index, devices["microphones"],

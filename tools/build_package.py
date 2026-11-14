@@ -17,7 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGE_DIR = "Ucho"
 FILES = [
     "install.ps1", "ucho.pyw", "dictate.pyw", "mcp_server.py", "requirements.txt",
-    "dictate.example.json", "LICENSE", "NOTICE", "README.md", "README.pl.md",
+    "design/tokens.json",
+    "LICENSE", "NOTICE", "README.md", "README.pl.md",
     "PRIVACY.md", "THIRD_PARTY.md",
 ]
 DIRS = ["ucho", "ucho_mcp"]

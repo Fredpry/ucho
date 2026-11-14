@@ -26,6 +26,7 @@ $Venv = Join-Path $Root '.venv'
 $VenvPy = Join-Path $Venv 'Scripts\python.exe'
 $VenvPyw = Join-Path $Venv 'Scripts\pythonw.exe'
 $Icon = Join-Path $Root 'ucho\assets\icon.ico'
+$DictateIcon = Join-Path $Root 'ucho\assets\dictate.ico'
 $Settings = Join-Path $Root 'settings.json'
 $LegacySettings = Join-Path $Root 'ustawienia.json'
 $Requirements = Join-Path $Root 'requirements.txt'
@@ -123,7 +124,7 @@ if (Test-Path $optOut) {
 # --- 4. Icon --------------------------------------------------------------
 
 Step (T 'Generuje ikone aplikacji' 'Generating the app icon')
-& $VenvPy -c "from ucho.icon import save_ico; from pathlib import Path; save_ico(Path(r'$Icon'))"
+& $VenvPy -c "from ucho.icon import save_ico, draw_dictate; from pathlib import Path; save_ico(Path(r'$Icon')); save_ico(Path(r'$DictateIcon'), draw_dictate)"
 if ($LASTEXITCODE -eq 0) { Ok $Icon } else { Warn (T 'Nie udalo sie wygenerowac ikony (aplikacja zadziala bez niej)' 'Could not generate the icon (the app works without it)') }
 
 # --- 5. Initial settings --------------------------------------------------
@@ -243,30 +244,40 @@ if ($WithSummary) {
 # --- 8. Shortcuts ---------------------------------------------------------
 
 Step (T 'Tworze skroty' 'Creating shortcuts')
+# One app since v0.2: "Ucho" and "Ucho Dictate" start the same program
+# (ucho.pyw); the second one opens dictation. A second start while Ucho
+# already runs only brings its window forward. Both carry the same
+# AppUserModelID, so a pinned tile, the running window and the Jump List
+# are one taskbar button.
 $shell = New-Object -ComObject WScript.Shell
-$targets = @(
-    (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Ucho.lnk'),
-    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Ucho.lnk')
+$desktop = [Environment]::GetFolderPath('Desktop')
+$startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+$starter = Join-Path $Root 'ucho.pyw'
+$shortcuts = @(
+    @{ Name = 'Ucho.lnk'; Args = "`"$starter`""; Icon = $Icon;
+       Text = (T 'Lokalne nagrywanie i transkrypcja spotkan' 'Local meeting recording and transcription') },
+    @{ Name = 'Ucho Dictate.lnk'; Args = "`"$starter`" --dictate"; Icon = $DictateIcon;
+       Text = (T 'Dyktowanie do dowolnego okna (lokalny Whisper)' 'Voice dictation into any window (local Whisper)') }
 )
-foreach ($target in $targets) {
-    try {
-        $shortcutDir = Split-Path -Parent $target
-        if (-not (Test-Path $shortcutDir)) { New-Item -ItemType Directory -Force -Path $shortcutDir | Out-Null }
-        $shortcut = $shell.CreateShortcut($target)
-        $shortcut.TargetPath = $VenvPyw
-        # ucho.pyw instead of "-m ucho": works also when Windows starts the
-        # shortcut without a working directory (e.g. from a pinned tile).
-        $shortcut.Arguments = "`"$(Join-Path $Root 'ucho.pyw')`""
-        $shortcut.WorkingDirectory = $Root
-        $shortcut.Description = (T 'Lokalne nagrywanie i transkrypcja spotkan' 'Local meeting recording and transcription')
-        if (Test-Path $Icon) { $shortcut.IconLocation = $Icon }
-        $shortcut.Save()
-        # AppUserModelID in the shortcut: the pinned tile merges with the
-        # running window instead of creating a second taskbar button.
-        & $VenvPy -c "from pathlib import Path; from ucho import config, winshell; winshell.set_shortcut_app_id(Path(r'$target'), config.APP_ID)"
-        Ok $target
-    } catch {
-        Warn ((T 'Nie udalo sie utworzyc skrotu: ' 'Could not create shortcut: ') + $target)
+foreach ($folder in @($desktop, $startMenu)) {
+    foreach ($item in $shortcuts) {
+        $target = Join-Path $folder $item.Name
+        try {
+            if (-not (Test-Path $folder)) { New-Item -ItemType Directory -Force -Path $folder | Out-Null }
+            $shortcut = $shell.CreateShortcut($target)
+            $shortcut.TargetPath = $VenvPyw
+            # ucho.pyw instead of "-m ucho": works also when Windows starts the
+            # shortcut without a working directory (e.g. from a pinned tile).
+            $shortcut.Arguments = $item.Args
+            $shortcut.WorkingDirectory = $Root
+            $shortcut.Description = $item.Text
+            if (Test-Path $item.Icon) { $shortcut.IconLocation = $item.Icon }
+            $shortcut.Save()
+            & $VenvPy -c "from pathlib import Path; from ucho import config, winshell; winshell.set_shortcut_app_id(Path(r'$target'), config.APP_ID)"
+            Ok $target
+        } catch {
+            Warn ((T 'Nie udalo sie utworzyc skrotu: ' 'Could not create shortcut: ') + $target)
+        }
     }
 }
 
@@ -281,22 +292,20 @@ pause
 "@ | Out-File -FilePath $cmd -Encoding ascii
 Ok $cmd
 
-# Dictate - a separate dictation window on the same Whisper model.
-try {
-    & $VenvPy (Join-Path $Root 'dictate.pyw') --shortcuts | ForEach-Object { Ok $_ }
-} catch {
-    Warn (T 'Nie udalo sie utworzyc skrotow Dyktuj' 'Could not create the Dictate shortcuts')
-}
-
 # Leftovers of v0.1: the diagnostics file and the Dictate shortcuts had Polish
-# names, and the shortcuts point to a start script that no longer exists.
+# names and point to a start script that no longer exists. The separate
+# dictation log of v0.1 and of early v0.2 builds is no longer written (one
+# log, ucho.log); it is kept, because it may hold the last dictated text.
 $legacy = @(
     (Join-Path $Root 'Ucho (diagnostyka).cmd'),
-    (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Ucho Dyktuj.lnk'),
-    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Ucho Dyktuj.lnk')
+    (Join-Path $desktop 'Ucho Dyktuj.lnk'),
+    (Join-Path $startMenu 'Ucho Dyktuj.lnk')
 )
 foreach ($old in $legacy) {
-    if (Test-Path $old) { Remove-Item -Force $old -ErrorAction SilentlyContinue }
+    if (Test-Path $old) {
+        Remove-Item -Force $old -ErrorAction SilentlyContinue
+        Ok ((T 'Usunieto stary skrot: ' 'Removed old shortcut: ') + $old)
+    }
 }
 
 Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
@@ -304,7 +313,7 @@ Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host (T '  Gotowe.' '  Done.') -ForegroundColor Green
 Write-Host (T "  Uruchom skrotem 'Ucho' z Pulpitu lub Menu Start." "  Start it with the 'Ucho' shortcut on the Desktop or in the Start menu.") -ForegroundColor White
-Write-Host (T '  Skrot globalny start/stop: Ctrl+Alt+R' '  Global start/stop shortcut: Ctrl+Alt+R') -ForegroundColor DarkGray
+Write-Host (T '  Nagrywanie spotkania: Ctrl+Alt+R   Dyktowanie: Ctrl+Shift+Spacja' '  Record a meeting: Ctrl+Alt+R   Dictate: Ctrl+Shift+Space') -ForegroundColor DarkGray
 Write-Host ((T '  Transkrypcja liczona na: ' '  Transcription runs on: ') + $device) -ForegroundColor DarkGray
 Write-Host ''
 Write-Host (T '  Pamietaj o poinformowaniu uczestnikow, ze spotkanie jest nagrywane.' '  Remember to tell participants that the meeting is being recorded.') -ForegroundColor Yellow

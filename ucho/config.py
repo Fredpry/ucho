@@ -145,6 +145,22 @@ TRACK_LABELS = {
     "system": "System audio only",
 }
 
+THEME_LABELS = {
+    "system": "Same as Windows",
+    "light": "Light",
+    "dark": "Dark",
+}
+
+LAYOUT_LABELS = {
+    "single": "One window: Meeting and Dictation",
+    "tray": "Tray icon with separate windows",
+}
+
+DICTATION_MODE_LABELS = {
+    "paste": "Paste (clipboard + Ctrl+V)",
+    "type": "Type (simulated keyboard)",
+}
+
 UI_LANGUAGE_LABELS = {
     "auto": "Auto (same as system)",
     "pl": "Polski",
@@ -166,14 +182,116 @@ DEFAULTS = {
     "summary_enabled": False,
     "summary_model": DEFAULT_LLM_MODEL,
     "rename_folder": False,
-    # Written by `python -m ucho.hardware --save` (the installer runs it). The
-    # dictation window does not read it yet: it still uses dictate.json until
-    # both windows are merged (plan v0.2, W3).
+    # Written by `python -m ucho.hardware --save` (the installer runs it) and
+    # by the first-run wizard. A repo id, or DICTATION_SHARED: dictation then
+    # uses the transcription model (one model in memory instead of two).
     "dictation_model": "OpenVINO/whisper-large-v3-fp16-ov",
     # Short hardware summary with the last automatic recommendation, so that
     # re-running the installer can tell an automatic choice from a manual one.
     "hardware_profile": None,
+    # Window and app behavior (v0.2).
+    "theme": "system",            # system / light / dark
+    "layout": "single",           # single (one window, two modes) / tray (tray hub, separate windows)
+    "start_with_windows": False,
+    "setup_complete": False,      # the first-run wizard was finished
+    # Dictation (before v0.2 in dictate.json, imported on first start).
+    "dictation_hotkey": "<ctrl>+<shift>+space",
+    "dictation_language": "auto",
+    "dictation_enter": False,     # Enter after pasting, i.e. "send" right away
+    "dictation_mode": "paste",    # paste (clipboard + Ctrl+V) / type (simulated keyboard)
+    "dictation_sounds": True,
+    "dictation_max_s": 300,
+    # Keep the dictation model loaded so a dictation starts at once. Off: it
+    # loads on the first dictation (a few seconds) and frees memory otherwise.
+    "dictation_preload": True,
+    # Names that Whisper keeps getting wrong. Key = what it recognized
+    # (case-insensitive, whole words), value = the correct form.
+    "dictation_dictionary": {
+        "Cloud Code": "Claude Code",
+        "Cloud Codem": "Claude Code'em",
+    },
 }
+
+DICTATION_SHARED = "shared"
+THEMES = ("system", "light", "dark")
+LAYOUTS = ("single", "tray")
+# Whisper devices offered in Settings. GPU.0/GPU.1 from the hardware
+# recommendation are kept as they are.
+DEVICES = ("GPU", "CPU", "NPU", "AUTO")
+
+# --- dictation settings, before v0.2 in a separate file -----------------------
+
+# dictate.json (v0.2 development builds) and dyktuj.json (v0.1) next to the
+# settings file. Their content is imported into settings.json on first start.
+DICTATE_FILE_NAME = "dictate.json"
+LEGACY_DICTATE_FILE_NAME = "dyktuj.json"
+DICTATE_DEFAULTS = {
+    "language": "auto",
+    "enter": False,
+    "mode": "paste",
+    "sounds": True,
+    "max_recording_s": 300,
+    "model": "OpenVINO/whisper-large-v3-fp16-ov",
+    "dictionary": dict(DEFAULTS["dictation_dictionary"]),
+}
+# dyktuj.json key -> dictate.json key ("enter" and "model" did not change).
+DICTATE_LEGACY_KEYS = {
+    "jezyk": "language",
+    "tryb": "mode",
+    "dzwieki": "sounds",
+    "maks_nagranie_s": "max_recording_s",
+    "slownik": "dictionary",
+}
+DICTATE_LEGACY_MODES = {"wklej": "paste", "pisz": "type"}
+# dictate.json key -> settings.json key.
+DICTATE_TO_SETTINGS = {
+    "language": "dictation_language",
+    "enter": "dictation_enter",
+    "mode": "dictation_mode",
+    "sounds": "dictation_sounds",
+    "max_recording_s": "dictation_max_s",
+    "dictionary": "dictation_dictionary",
+}
+
+
+def migrate_legacy_dictate_settings(old: dict) -> dict:
+    """v0.1 dyktuj.json content -> dictate.json keys and values. Unknown keys are dropped."""
+    new: dict = {}
+    for key, value in old.items():
+        key = DICTATE_LEGACY_KEYS.get(key, key)
+        if key not in DICTATE_DEFAULTS:
+            continue
+        if key == "mode" and isinstance(value, str):
+            value = DICTATE_LEGACY_MODES.get(value, value)
+        new[key] = value
+    return new
+
+
+def read_dictate_file(folder: Path) -> dict | None:
+    """dictate.json (or v0.1 dyktuj.json) in `folder` with current keys; None when absent."""
+    for name, migrate in ((DICTATE_FILE_NAME, None),
+                          (LEGACY_DICTATE_FILE_NAME, migrate_legacy_dictate_settings)):
+        try:
+            data = json.loads((folder / name).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return migrate(data) if migrate else data
+    return None
+
+
+def dictate_to_settings(dictate: dict) -> dict:
+    """dictate.json content -> settings.json keys.
+
+    The model is taken only when it differs from the old dictate.json default;
+    otherwise the hardware recommendation already in settings.json wins.
+    """
+    new = {DICTATE_TO_SETTINGS[k]: v for k, v in dictate.items() if k in DICTATE_TO_SETTINGS}
+    model = dictate.get("model")
+    if isinstance(model, str) and model in MODELS and model != DICTATE_DEFAULTS["model"]:
+        new["dictation_model"] = model
+    return new
+
 
 # v0.1 key -> current key. Keys that did not change (model, device, hotkey,
 # tray, system_index, dictation_model, hardware_profile) are copied as they are.
@@ -243,10 +361,17 @@ class Settings:
     """
 
     def __init__(self, file: Path = SETTINGS_FILE):
-        self._file = file
+        self._file = Path(file)
         self._data = dict(DEFAULTS)
-        migrate_file(file, file.with_name(LEGACY_SETTINGS_NAME), migrate_legacy_settings)
+        self._stored: set[str] = set()
+        migrate_file(self._file, self._file.with_name(LEGACY_SETTINGS_NAME),
+                     migrate_legacy_settings)
         self.load()
+        self._import_dictate_file()
+
+    @property
+    def file(self) -> Path:
+        return self._file
 
     def load(self) -> None:
         try:
@@ -254,9 +379,36 @@ class Settings:
         except (OSError, ValueError):
             return
         if isinstance(stored, dict):
+            self._stored = set(stored)
             for key, value in stored.items():
                 if key in DEFAULTS:
                     self._data[key] = value
+
+    def _import_dictate_file(self) -> None:
+        """Dictation settings from dictate.json / dyktuj.json, once (W3: one app).
+
+        Runs only while settings.json has no dictation keys yet. The old file
+        is kept, so going back to an older version still works.
+        """
+        if "dictation_language" in self._stored:
+            return
+        dictate = read_dictate_file(self._file.parent)
+        if dictate is None:
+            return
+        self._data.update(dictate_to_settings(dictate))
+        self.save()
+        self._stored |= set(DICTATE_TO_SETTINGS.values())
+        log.info("Imported dictation settings from %s", DICTATE_FILE_NAME)
+
+    def dictation_model(self) -> str:
+        """The model dictation actually uses (resolves DICTATION_SHARED)."""
+        value = self["dictation_model"]
+        if not value or value == DICTATION_SHARED:
+            return self["model"]
+        return value
+
+    def dictation_shared(self) -> bool:
+        return self.dictation_model() == self["model"]
 
     def save(self) -> None:
         try:
@@ -283,7 +435,23 @@ class Settings:
 
 
 def prepare_dirs(settings: "Settings | None" = None) -> None:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    OV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    """Creates the recordings folder.
+
+    The models folder is created by the download or the first compile, so a
+    start without models (or the smoke test) leaves no empty folders behind.
+    """
     folder = settings.recordings_dir if settings else RECORDINGS_DIR
-    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        log.warning("Could not create the recordings folder %s", folder)
+
+
+def onedrive_folder(path: Path) -> bool:
+    """True when `path` lies in a OneDrive-synced folder (recordings would go to the cloud)."""
+    text = str(path).lower()
+    for variable in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
+        root = os.environ.get(variable)
+        if root and text.startswith(root.lower().rstrip("\\/")):
+            return True
+    return "onedrive" in text
