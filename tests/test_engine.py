@@ -192,3 +192,42 @@ def test_cancel_stops_a_transcription_between_chunks(calls, meeting):
     job_box["job"].wait(30)
     eng.stop()
     assert sum(1 for c in calls if c[0] == "chunk") == 1
+
+
+def test_report_tells_a_cancelled_run_from_a_complete_one(calls, meeting):
+    from ucho import transcribe
+
+    job_box = {}
+
+    def on_generate(kind):
+        if sum(1 for c in calls if c[0] == "chunk") == 1:
+            job_box["job"].cancel.set()
+
+    eng, _ = make_engine(calls, on_generate)
+    cancelled = transcribe.new_report()
+    job_box["job"] = eng.transcribe(meeting, "M", "CPU", "auto", report=cancelled)
+    segments, _device = job_box["job"].wait(30)
+    eng.stop()
+    # Stop ends the job normally, with the segments so far: only the report says so.
+    assert segments and cancelled == {"cancelled": True, "errors": 0}
+
+    calls.clear()
+    eng, _ = make_engine(calls)
+    complete = transcribe.new_report()
+    eng.transcribe(meeting, "M", "CPU", "auto", report=complete).wait(30)
+    eng.stop()
+    assert complete == {"cancelled": False, "errors": 0}
+
+
+def test_report_counts_failed_chunks(calls, meeting):
+    from ucho import transcribe
+
+    def on_generate(kind):
+        if sum(1 for c in calls if c[0] == "chunk") == 2:
+            raise RuntimeError("decoder hiccup")
+
+    eng, _ = make_engine(calls, on_generate)
+    report = transcribe.new_report()
+    segments, _device = eng.transcribe(meeting, "M", "CPU", "auto", report=report).wait(30)
+    eng.stop()
+    assert segments and report == {"cancelled": False, "errors": 1}

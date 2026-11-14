@@ -258,14 +258,23 @@ class Engine:
         return keys
 
     def transcribe(self, files: dict, model: str, device: str, language: str,
-                   progress=None, status=None, on_done=None, on_error=None) -> Job:
-        """Meeting transcription in steps. Result: (segments, used_device)."""
+                   progress=None, status=None, on_done=None, on_error=None,
+                   report: dict | None = None) -> Job:
+        """Meeting transcription in steps. Result: (segments, used_device).
+
+        `report` (transcribe.new_report) is filled in on the engine thread
+        before `on_done` runs: cancelled or not, failed chunks.
+        """
         from . import transcribe as tr
 
         def work(job: Job):
             pipe = self.pipeline(model, device)
             segments = yield from tr.iter_transcribe_session(
-                files, pipe, language, progress=progress, cancel=job.cancel, status=status)
+                files, pipe, language, progress=progress, cancel=job.cancel, status=status,
+                report=report)
+            if report is not None and job.cancel.is_set():
+                # Stop pressed after the last chunk check: treated as cancelled too.
+                report["cancelled"] = True
             used = pipe.device
             if (model, device) not in self._keep:
                 self._release(self._keep | (self._busy_keys() - {(model, device)}))

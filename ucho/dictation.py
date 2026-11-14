@@ -18,9 +18,14 @@ A few decisions that are not obvious:
     another window is active at paste time and the target cannot be brought
     back, the text stays on the clipboard instead of landing in the wrong
     window.
+  * A dictation started on the desktop or the taskbar, or with only the
+    desktop or the taskbar active at paste time, stays on the clipboard:
+    Ctrl+V there goes nowhere.
   * Paste mode borrows the clipboard: the dictated text is marked so that
-    clipboard history (Win+V) and cloud clipboard sync skip it, and the
-    previous text is put back once the paste has been delivered.
+    clipboard history (Win+V) and cloud clipboard sync skip it, and is handed
+    over with delayed rendering. The previous text is put back only after the
+    target window's process has taken the dictation (see `DelayedClipboard`);
+    when in doubt the dictation stays on the clipboard instead.
 """
 
 from __future__ import annotations
@@ -82,6 +87,47 @@ _kernel32.GlobalUnlock.argtypes = [c_void_p]
 _kernel32.GlobalUnlock.restype = wintypes.BOOL
 _kernel32.GlobalFree.argtypes = [c_void_p]
 _kernel32.GlobalFree.restype = c_void_p
+_kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+_kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+# The hidden window that owns the clipboard while a dictation is pasted
+# (`DelayedClipboard`). Handles and LRESULT are pointer-sized on 64-bit Python.
+LRESULT = ctypes.c_ssize_t
+WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+
+
+class _WNDCLASSW(ctypes.Structure):
+    _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC),
+                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                ("hCursor", wintypes.HICON), ("hbrBackground", wintypes.HBRUSH),
+                ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
+
+
+_user32.RegisterClassW.argtypes = [ctypes.POINTER(_WNDCLASSW)]
+_user32.RegisterClassW.restype = wintypes.ATOM
+_user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+_user32.CreateWindowExW.restype = wintypes.HWND
+_user32.DestroyWindow.argtypes = [wintypes.HWND]
+_user32.DestroyWindow.restype = wintypes.BOOL
+_user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+_user32.DefWindowProcW.restype = LRESULT
+_user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT,
+                                 wintypes.UINT, wintypes.UINT]
+_user32.PeekMessageW.restype = wintypes.BOOL
+_user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+_user32.TranslateMessage.restype = wintypes.BOOL
+_user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+_user32.DispatchMessageW.restype = LRESULT
+_user32.MsgWaitForMultipleObjects.argtypes = [wintypes.DWORD, c_void_p, wintypes.BOOL,
+                                              wintypes.DWORD, wintypes.DWORD]
+_user32.MsgWaitForMultipleObjects.restype = wintypes.DWORD
+_user32.GetOpenClipboardWindow.argtypes = []
+_user32.GetOpenClipboardWindow.restype = wintypes.HWND
+_user32.GetClipboardOwner.argtypes = []
+_user32.GetClipboardOwner.restype = wintypes.HWND
 
 VK_SPACE = 0x20
 VK_RETURN = 0x0D
@@ -94,6 +140,13 @@ GMEM_MOVEABLE = 0x0002
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
+WM_RENDERFORMAT = 0x0305
+WM_RENDERALLFORMATS = 0x0306
+WM_DESTROYCLIPBOARD = 0x0307
+HWND_MESSAGE = -3
+PM_REMOVE = 0x0001
+QS_ALLINPUT = 0x04FF
+ERROR_CLASS_ALREADY_EXISTS = 1410
 
 
 class _KEYBDINPUT(ctypes.Structure):
@@ -150,14 +203,22 @@ PRIVATE_FORMATS = {
     "CanIncludeInClipboardHistory": 0,
     "CanUploadToCloudClipboard": 0,
 }
-# Time for the target program to read the clipboard after Ctrl+V before the
-# previous text goes back: the target handles the keystroke asynchronously.
-RESTORE_DELAY_S = 0.4
+# How long the target window has to ask for the pasted text after Ctrl+V.
+# A busy Electron app or a remote desktop session can take seconds; without
+# a request in this time the text stays on the clipboard and nothing is restored.
+PASTE_TIMEOUT_S = 5.0
+# After the target has taken the text, before the previous text goes back.
+# Some programs read the clipboard more than once for one paste; the later
+# reads get the cached text only while the clipboard is still ours.
+RESTORE_GRACE_S = 1.0
+# Enter mode: between the target taking the text and Enter (a terminal must
+# digest the paste first, otherwise Enter overtakes it).
+ENTER_DELAY_S = 0.25
 
 
-def _open_clipboard() -> None:
+def _open_clipboard(owner: int | None = None) -> None:
     for _ in range(20):
-        if _user32.OpenClipboard(None):
+        if _user32.OpenClipboard(owner):
             return
         time.sleep(0.05)  # the clipboard is sometimes briefly held by another program
     raise RuntimeError(t("The clipboard is in use by another program"))
@@ -191,19 +252,28 @@ def set_clipboard(text: str | None, private: bool = True) -> int:
     try:
         _user32.EmptyClipboard()
         if text is not None:
-            _put(CF_UNICODETEXT, (text + "\0").encode("utf-16-le"))
+            _put(CF_UNICODETEXT, _utf16(text))
             if private:
-                for name, value in PRIVATE_FORMATS.items():
-                    format_ = _user32.RegisterClipboardFormatW(name)
-                    try:
-                        if not format_:
-                            raise RuntimeError("RegisterClipboardFormatW failed")
-                        _put(format_, value.to_bytes(4, "little"))
-                    except (MemoryError, RuntimeError):
-                        log.warning("Could not set the clipboard format %s", name)
+                _put_private_formats()
     finally:
         _user32.CloseClipboard()
     return clipboard_sequence()
+
+
+def _utf16(text: str) -> bytes:
+    return (text + "\0").encode("utf-16-le")
+
+
+def _put_private_formats() -> None:
+    """The formats that keep the clipboard out of history and cloud sync; the clipboard must be open."""
+    for name, value in PRIVATE_FORMATS.items():
+        format_ = _user32.RegisterClipboardFormatW(name)
+        try:
+            if not format_:
+                raise RuntimeError("RegisterClipboardFormatW failed")
+            _put(format_, value.to_bytes(4, "little"))
+        except (MemoryError, RuntimeError):
+            log.warning("Could not set the clipboard format %s", name)
 
 
 def get_clipboard_text() -> str | None:
@@ -230,25 +300,172 @@ def clipboard_sequence() -> int:
     return int(_user32.GetClipboardSequenceNumber())
 
 
-# What happens to the clipboard after a paste, decided by `restore_action`.
-RESTORE = "restore"  # put the previous text back
-CLEAR = "clear"      # there was no text before: do not leave the dictation there
-KEEP = "keep"        # someone else wrote to the clipboard meanwhile: leave it alone
+# --- delayed rendering: the previous clipboard comes back only after the paste ---------
+#
+# Restoring the previous clipboard a fixed time after Ctrl+V was not safe: a
+# slow target (remote desktop, Citrix, a busy Electron app, a CPU busy with a
+# transcription) reads the clipboard later and pastes the previous text, maybe
+# a password, and in Enter mode sends it. So the dictated text is put on the
+# clipboard with delayed rendering: a hidden window of ours owns the clipboard,
+# Windows asks it for the text (WM_RENDERFORMAT) when a program pastes, and
+# only then do we know the paste happened and who took it. The previous text
+# comes back only when the target window's own process took the dictation and
+# nobody has written to the clipboard since; in every other case (no request
+# in PASTE_TIMEOUT_S, another process asked, the clipboard changed) the
+# dictated text stays and the previous text is not restored.
+
+_CLASS_NAME = "UchoClipboardOwner"
+_owners: dict[int, "DelayedClipboard"] = {}  # hidden window -> its clipboard offer
+_class_lock = threading.Lock()
+_class_registered = False
 
 
-def restore_action(previous: str | None, ours: int, now: int) -> str:
-    """RESTORE, CLEAR or KEEP, from the sequence numbers after our write (`ours`) and now.
+@WNDPROC
+def _wndproc(hwnd, message, wparam, lparam):
+    # Kept alive as a module global: Windows calls it for as long as the class exists.
+    owner = _owners.get(hwnd or 0)
+    if owner is not None and message in (WM_RENDERFORMAT, WM_RENDERALLFORMATS, WM_DESTROYCLIPBOARD):
+        try:
+            if message == WM_RENDERFORMAT:
+                owner._render(int(wparam))
+            elif message == WM_RENDERALLFORMATS:
+                owner._render_all()
+            else:
+                owner.lost = True
+        except Exception:
+            log.warning("Clipboard message %#x failed", message, exc_info=True)
+        return 0
+    return _user32.DefWindowProcW(hwnd, message, wparam, lparam)
 
-    Only text (CF_UNICODETEXT) is saved and restored. When the previous
-    content had no text (an image, copied files), it cannot be put back
-    without the risk of corrupting it; the clipboard is cleared instead, and
-    that old content is lost, as it was before restoring existed. Rich formats
-    next to the text (HTML or RTF of a copy from Word) are lost the same way;
-    their plain text comes back.
+
+def _register_class() -> None:
+    global _class_registered
+    with _class_lock:
+        if _class_registered:
+            return
+        wc = _WNDCLASSW()
+        wc.lpfnWndProc = _wndproc
+        wc.hInstance = _kernel32.GetModuleHandleW(None)
+        wc.lpszClassName = _CLASS_NAME
+        if not _user32.RegisterClassW(ctypes.byref(wc)) and \
+                ctypes.get_last_error() != ERROR_CLASS_ALREADY_EXISTS:
+            raise OSError(ctypes.get_last_error(), "RegisterClassW failed")
+        _class_registered = True
+
+
+class DelayedClipboard:
+    """The dictated text on the clipboard, handed over only when a program asks for it.
+
+    Everything runs on the calling thread, which owns the hidden window: it
+    must call `pump` while it waits, so that Windows can deliver the requests.
+    `close` always follows (try/finally): when nobody has asked for the text
+    yet, it is rendered into the clipboard so it stays there for Ctrl+V.
     """
-    if now != ours:
-        return KEEP
-    return RESTORE if previous is not None else CLEAR
+
+    def __init__(self, text: str, consumer_pid: int | None):
+        self.text = text
+        self.consumer_pid = consumer_pid  # the process expected to paste
+        self.hwnd: int | None = None
+        self.rendered = False   # a program asked for the text
+        self.confirmed = False  # ... and it was the consumer's process
+        self.lost = False       # another program emptied the clipboard
+
+    def offer(self) -> None:
+        """Takes the clipboard: the text in delayed rendering, plus the private formats."""
+        _register_class()
+        hwnd = _user32.CreateWindowExW(0, _CLASS_NAME, None, 0, 0, 0, 0, 0, HWND_MESSAGE, None,
+                                       _kernel32.GetModuleHandleW(None), None)
+        if not hwnd:
+            raise OSError(ctypes.get_last_error(), "CreateWindowExW failed")
+        self.hwnd = hwnd
+        _owners[hwnd] = self
+        _open_clipboard(hwnd)
+        try:
+            if not _user32.EmptyClipboard():  # makes our window the owner
+                raise OSError(ctypes.get_last_error(), "EmptyClipboard failed")
+            # NULL data: Windows sends WM_RENDERFORMAT when a program asks.
+            _user32.SetClipboardData(CF_UNICODETEXT, None)
+            _put_private_formats()
+        finally:
+            _user32.CloseClipboard()
+        if not _user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+            raise OSError("The delayed clipboard format was not registered")
+
+    def _render(self, format_: int) -> None:
+        """WM_RENDERFORMAT: the requester has the clipboard open; just set the data."""
+        if format_ != CF_UNICODETEXT or self.rendered:
+            return
+        opener = _user32.GetOpenClipboardWindow()
+        _put(CF_UNICODETEXT, _utf16(self.text))
+        self.rendered = True
+        # A program that opened the clipboard without a window cannot be
+        # identified: not confirmed, so the previous text is not restored.
+        reader = window_process(opener) if opener else None
+        self.confirmed = self.consumer_pid is not None and reader == self.consumer_pid
+
+    def _render_all(self) -> None:
+        """WM_RENDERALLFORMATS (window closing) or `close`: leave the text on the clipboard."""
+        if self.rendered or self.lost or not self.hwnd:
+            return
+        if not _user32.OpenClipboard(self.hwnd):
+            return
+        try:
+            if _user32.GetClipboardOwner() == self.hwnd:
+                _put(CF_UNICODETEXT, _utf16(self.text))
+                self.rendered = True  # not `confirmed`: nobody pasted it
+        finally:
+            _user32.CloseClipboard()
+
+    def pump(self, seconds: float, until: Callable[[], bool] | None = None) -> bool:
+        """Delivers window messages for up to `seconds`; True as soon as `until()` holds."""
+        message = wintypes.MSG()
+        end = time.monotonic() + seconds
+        while True:
+            while _user32.PeekMessageW(ctypes.byref(message), None, 0, 0, PM_REMOVE):
+                _user32.TranslateMessage(ctypes.byref(message))
+                _user32.DispatchMessageW(ctypes.byref(message))
+            if until is not None and until():
+                return True
+            left = end - time.monotonic()
+            if left <= 0:
+                return False
+            _user32.MsgWaitForMultipleObjects(0, None, False, max(1, min(50, int(left * 1000))),
+                                              QS_ALLINPUT)
+
+    def restore(self, previous: str | None) -> bool:
+        """Puts `previous` back (None empties) if the clipboard is still ours. True when done.
+
+        The ownership check and the write happen with the clipboard open, so
+        a copy made in between cannot be overwritten.
+        """
+        if self.lost or not self.hwnd or not _user32.OpenClipboard(self.hwnd):
+            return False
+        try:
+            if _user32.GetClipboardOwner() != self.hwnd:
+                return False
+            _user32.EmptyClipboard()
+            if previous is not None:
+                _put(CF_UNICODETEXT, _utf16(previous))
+                _put_private_formats()
+            return True
+        finally:
+            _user32.CloseClipboard()
+
+    def close(self) -> None:
+        hwnd = self.hwnd
+        if not hwnd:
+            return
+        try:
+            self._render_all()
+        except Exception:
+            log.warning("Could not leave the dictation on the clipboard", exc_info=True)
+        try:
+            # If the text is still not rendered, DestroyWindow sends
+            # WM_RENDERALLFORMATS once more, while `_owners` still has the window.
+            _user32.DestroyWindow(hwnd)
+        finally:
+            self.hwnd = None
+            _owners.pop(hwnd, None)
 
 
 def press_ctrl_v() -> None:
@@ -279,13 +496,18 @@ def foreground_window() -> int | None:
     return _user32.GetForegroundWindow() or None
 
 
-def window_is_ours(window: int | None) -> bool:
-    """True when the window belongs to this process (any Ucho window)."""
+def window_process(window: int | None) -> int | None:
+    """Process id of a window; None for no window."""
     if not window:
-        return False
+        return None
     pid = wintypes.DWORD(0)
     _user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
-    return pid.value == os.getpid()
+    return pid.value or None
+
+
+def window_is_ours(window: int | None) -> bool:
+    """True when the window belongs to this process (any Ucho window)."""
+    return window_process(window) == os.getpid()
 
 
 def foreground_is_ours() -> bool:
@@ -298,17 +520,23 @@ def window_exists(window: int) -> bool:
 
 
 # The taskbar and the desktop are in front after a click on them, but nobody
-# dictates into them: a dictation started there has no target window.
+# dictates into them: a dictation started there has no target window, and
+# Ctrl+V (or typing) into them goes nowhere.
 _SHELL_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"}
+
+
+def is_shell_window(window: int | None) -> bool:
+    """True for the taskbar or the desktop."""
+    if not window:
+        return False
+    name = ctypes.create_unicode_buffer(64)
+    return bool(_user32.GetClassNameW(window, name, len(name))) and name.value in _SHELL_CLASSES
 
 
 def dictation_target() -> int | None:
     """The foreground window as the target of a dictation; None for the taskbar or desktop."""
     window = foreground_window()
-    if not window:
-        return None
-    name = ctypes.create_unicode_buffer(64)
-    if _user32.GetClassNameW(window, name, len(name)) and name.value in _SHELL_CLASSES:
+    if not window or is_shell_window(window):
         return None
     return window
 
@@ -324,25 +552,36 @@ def activate(window: int) -> bool:
     return False
 
 
-# Where the dictated text goes, decided by `paste_target`.
-PASTE = "paste"            # into the foreground window, which is the right one
+# Where the dictated text goes, decided by `paste_target` and `insert_text`.
+PASTE = "paste"            # pasted into the foreground window, which is the right one
 OWN_WINDOW = "own_window"  # a Ucho window is active: clipboard only
 FOCUS_LOST = "focus_lost"  # the target window is gone or did not come back: clipboard only
+NO_WINDOW = "no_window"    # only the desktop or the taskbar is active: clipboard only
+NOT_TAKEN = "not_taken"    # Ctrl+V sent, but the window did not take the text in time: clipboard only
+
+# Results that leave the text on the clipboard for the user to paste by hand.
+CLIPBOARD_ONLY = (FOCUS_LOST, NO_WINDOW, NOT_TAKEN)
 
 
 def paste_target(target: int | None, foreground: Callable[[], int | None],
                  is_ours: Callable[[int | None], bool], exists: Callable[[int], bool],
-                 activate_window: Callable[[int], bool]) -> str:
-    """PASTE, OWN_WINDOW or FOCUS_LOST for a dictation that started with `target` in front.
+                 activate_window: Callable[[int], bool],
+                 is_shell: Callable[[int | None], bool] = lambda _w: False) -> str:
+    """PASTE, OWN_WINDOW, NO_WINDOW or FOCUS_LOST for a dictation that started with `target` in front.
 
     A target that belongs to Ucho (the dictation started from its own button
     or tray menu) counts as no target: the text goes to whatever window is
-    active, as before. Otherwise the text is pasted only into the target,
-    which gets one attempt to come back to the foreground.
+    active, unless that is Ucho itself or the desktop/taskbar. Otherwise the
+    text is pasted only into the target, which gets one attempt to come back
+    to the foreground.
     """
     current = foreground()
     if not target or is_ours(target) or current == target:
-        return OWN_WINDOW if is_ours(current) else PASTE
+        if is_ours(current):
+            return OWN_WINDOW
+        if not current or is_shell(current):
+            return NO_WINDOW
+        return PASTE
     if not exists(target):
         return FOCUS_LOST
     if activate_window(target) and foreground() == target:
@@ -357,11 +596,11 @@ _insert_lock = threading.Lock()
 
 def insert_text(text: str, mode: str, enter: bool, target: int | None = None,
                 delivered: Callable[[str], None] | None = None) -> str:
-    """Inserts text into the target window; returns PASTE, OWN_WINDOW or FOCUS_LOST.
+    """Inserts text into the target window; returns PASTE, OWN_WINDOW or one of CLIPBOARD_ONLY.
 
-    With OWN_WINDOW and FOCUS_LOST the text is only on the clipboard, and it
-    stays there for the user to paste. `delivered(result)` is called as soon
-    as the text is in place, before the previous clipboard comes back.
+    With anything but PASTE the text is only on the clipboard, and it stays
+    there for the user to paste. `delivered(result)` is called as soon as the
+    outcome is known, before the previous clipboard comes back.
     """
     def report(where: str) -> str:
         if delivered is not None:
@@ -370,33 +609,72 @@ def insert_text(text: str, mode: str, enter: bool, target: int | None = None,
 
     with _insert_lock:
         wait_for_keys_released()
-        where = paste_target(target, foreground_window, window_is_ours, window_exists, activate)
+        where = paste_target(target, foreground_window, window_is_ours, window_exists, activate,
+                             is_shell_window)
         if where != PASTE:
-            if where == FOCUS_LOST:
-                log.info("The dictation target window is not active - the text stays on the clipboard")
+            if where in (FOCUS_LOST, NO_WINDOW):
+                log.info("No window to paste into (%s) - the text stays on the clipboard", where)
             set_clipboard(text)
             return report(where)
-        previous, ours = None, None
         if mode == "type":
             type_text(text)
-        else:
-            previous = get_clipboard_text()
-            ours = set_clipboard(text)
+            if enter:
+                time.sleep(ENTER_DELAY_S)
+                press_enter()
+            return report(PASTE)
+        return _paste(text, enter, report)
+
+
+def _paste(text: str, enter: bool, report: Callable[[str], str]) -> str:
+    """Ctrl+V with the clipboard borrowed; the previous text comes back only after a confirmed paste.
+
+    Only text (CF_UNICODETEXT) is saved and restored. When the previous
+    content had no text (an image, copied files), it cannot be put back
+    without the risk of corrupting it; the clipboard is cleared instead.
+    Rich formats next to the text (HTML or RTF of a copy from Word) are lost
+    the same way; their plain text comes back.
+    """
+    previous = get_clipboard_text()
+    offer = DelayedClipboard(text, window_process(foreground_window()))
+    try:
+        try:
+            offer.offer()
+        except Exception:
+            # Without delayed rendering there is no way to know when the
+            # target has read the text, so the previous text is not restored.
+            log.warning("Delayed clipboard unavailable - the previous clipboard will not be restored",
+                        exc_info=True)
+            offer.close()
+            set_clipboard(text)
             press_ctrl_v()
+            if enter:
+                time.sleep(ENTER_DELAY_S)
+                press_enter()
+            return report(PASTE)
+        press_ctrl_v()
+        if not offer.pump(PASTE_TIMEOUT_S, until=lambda: offer.rendered):
+            # Not taken (yet): no Enter, nothing restored. `close` renders the
+            # text, so a late paste still gets the dictation, never the previous text.
+            log.info("The target did not take the text within %.0f s - it stays on the clipboard",
+                     PASTE_TIMEOUT_S)
+            return report(NOT_TAKEN)
         if enter:
-            # The terminal must digest the paste first, otherwise Enter overtakes it.
-            time.sleep(0.25)
+            offer.pump(ENTER_DELAY_S)
             press_enter()
         report(PASTE)
-        if ours is not None:
-            time.sleep(RESTORE_DELAY_S)
-            try:
-                if restore_action(previous, ours, clipboard_sequence()) != KEEP:
-                    set_clipboard(previous)
-            except Exception:
-                # The text is already pasted; only the old clipboard is not back.
-                log.warning("Could not restore the previous clipboard", exc_info=True)
-        return where
+        if not offer.confirmed:
+            log.info("The text was taken by another process - the previous clipboard is not restored")
+            return PASTE
+        offer.pump(RESTORE_GRACE_S)
+        try:
+            if not offer.restore(previous):
+                log.info("The clipboard changed meanwhile - the previous text is not restored")
+        except Exception:
+            # The text is already pasted; only the old clipboard is not back.
+            log.warning("Could not restore the previous clipboard", exc_info=True)
+        return PASTE
+    finally:
+        offer.close()
 
 
 def beep(frequency: int, ms: int = 70) -> None:
@@ -723,13 +1001,14 @@ class DictationController:
         self._emit("state")
 
     def _recognized(self, text: str, seconds: float, where: str | None) -> None:
-        """`where`: PASTE, OWN_WINDOW, FOCUS_LOST, or None when inserting failed."""
+        """`where`: PASTE, OWN_WINDOW, one of CLIPBOARD_ONLY, or None when inserting failed."""
         self.queued = max(0, self.queued - 1)
         if text:
             self.last_text, self.last_seconds = text, seconds
-            if where == FOCUS_LOST:
-                # The window you dictated into is gone or did not come back:
-                # better on the clipboard than pasted into the wrong window.
+            if where in CLIPBOARD_ONLY:
+                # The window you dictated into is gone, did not come back or
+                # did not take the text, or only the desktop was active: better
+                # on the clipboard than pasted into the wrong window or nowhere.
                 self.show_message(t("Text is on the clipboard, press Ctrl+V"), "warning", 8)
             elif where is None:
                 self.show_message(t("Clipboard busy, try again"), "warning", 6)

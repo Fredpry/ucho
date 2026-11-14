@@ -112,6 +112,13 @@ def delete_recording(app, folder: Path, parent) -> bool:
     app.meeting.dequeue(folder)  # waiting for a transcription: drop it from the queue first
     try:
         retention.delete_session(app.settings.recordings_dir, folder)
+    except retention.PartialDeleteError as error:
+        # The recording is out of the list, but some files are still on the disk.
+        app.show("recordings")
+        app.toast(t("The recording was only partly deleted. The rest is in the folder {folder}. "
+                    "Ucho deletes it at the next start; you can also close the programs that use it "
+                    "and delete the folder yourself.", folder=str(error.rest)), "warning", 15)
+        return True
     except retention.DeleteError as error:
         log.warning("Recording not deleted: %s", error)
         app.toast(t("The recording could not be deleted. Close programs that use its files "
@@ -128,7 +135,7 @@ def transcription_status(meeting, folder: Path) -> str:
         return t("transcribing…") if meeting.transcribing else t("summarizing…")
     position = meeting.queue_position(folder)
     if position:
-        return t("Queued ({n})", n=position)
+        return t("Queued, #{n}", n=position)
     return t("transcript ready") if session.find_file(folder, TRANSCRIPT_MD) else t("no transcript")
 
 
@@ -625,7 +632,7 @@ class TranscriptScreen(Screen):
             self.progress_row.pack(side="left")
         elif position:
             self.progress.set(0)
-            self.progress_label.configure(text=t("Queued ({n})", n=position))
+            self.progress_label.configure(text=t("Queued, #{n}", n=position))
             self.progress_row.pack(side="left")
         else:
             if has_audio:

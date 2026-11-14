@@ -36,7 +36,8 @@ from typing import Callable
 
 from . import config, session, transcribe
 from .i18n import t
-from .merge import Segment, save_results, slug
+from .merge import (TRANSCRIPT_COMPLETE, TRANSCRIPTION_CANCELLED, TRANSCRIPTION_ERRORS, Segment,
+                    save_results, slug)
 
 log = logging.getLogger(__name__)
 
@@ -96,19 +97,21 @@ class MeetingController:
 
     def queue_position(self, folder: Path | None) -> int:
         """1 for the next session to be transcribed, 2 for the one after it; 0 when not queued."""
+        if folder is None:
+            return 0
         for position, (queued, _files, _meta) in enumerate(list(self._queue), start=1):
-            if queued == folder:
+            if same_folder(queued, folder):
                 return position
         return 0
 
     def is_active(self, folder: Path | None) -> bool:
         """True while this session is being transcribed or summarized."""
-        return folder is not None and self.busy and folder == self.session_dir
+        return self.busy and same_folder(folder, self.session_dir)
 
     def dequeue(self, folder: Path) -> bool:
         """Takes a session out of the queue (for example before it is deleted)."""
         for entry in list(self._queue):
-            if entry[0] == folder:
+            if same_folder(entry[0], folder):
                 self._queue.remove(entry)
                 self._emit("state")
                 return True
@@ -118,24 +121,12 @@ class MeetingController:
         """Recorded, transcribed, summarized or waiting in the queue: not to be deleted or trimmed."""
         if folder is None:
             return False
-        try:
-            target = Path(folder).resolve()
-        except OSError:
-            return True  # cannot tell: treat as in use
-
-        def same(other: Path | None) -> bool:
-            if other is None:
-                return False
-            try:
-                return Path(other).resolve() == target
-            except OSError:
-                return True
-
-        if self.recording and same(self.recording_dir):
+        # Unresolvable paths count as the same here: cannot tell, so in use.
+        if self.recording and same_folder(self.recording_dir, folder, unknown=True):
             return True
-        if self.busy and same(self.session_dir):
+        if self.busy and same_folder(self.session_dir, folder, unknown=True):
             return True
-        return any(same(queued) for queued, _files, _meta in list(self._queue))
+        return any(same_folder(queued, folder, unknown=True) for queued, _files, _meta in list(self._queue))
 
     def levels(self) -> dict[str, float]:
         if self.recording and self.recorder is not None:
@@ -281,6 +272,7 @@ class MeetingController:
         self.status_text = t("Loading model...")
         self._emit("state")
         started = time.monotonic()
+        report = transcribe.new_report()
 
         def progress(fraction: float, text: str) -> None:
             self.progress = max(0.0, min(1.0, fraction))
@@ -293,10 +285,33 @@ class MeetingController:
             self._emit("status", text)
 
         def done(result) -> None:
+            # Runs on the engine thread, whose callback wrapper only logs
+            # exceptions: without this, an error between here and the summary
+            # job (settings, imports) would leave `busy` set and the queue stuck.
+            try:
+                finish(result)
+            except Exception:
+                log.exception("Finishing the transcription failed")
+                self.transcribing = False
+                self.summarizing = False
+                self._emit("state")
+                self._finished()
+
+        def finish(result) -> None:
             segments, used_device = result
             full = dict(meta)
             full["device"] = used_device
             full["transcription_time_s"] = round(time.monotonic() - started, 1)
+            # Stop during the transcription ends the job normally with the
+            # segments so far. Audio retention deletes audio only when this
+            # says the transcript is complete (retention.transcript_complete).
+            for key in (TRANSCRIPT_COMPLETE, TRANSCRIPTION_CANCELLED, TRANSCRIPTION_ERRORS):
+                full.pop(key, None)
+            full[TRANSCRIPT_COMPLETE] = not report["cancelled"] and not report["errors"]
+            if report["cancelled"]:
+                full[TRANSCRIPTION_CANCELLED] = True
+            if report["errors"]:
+                full[TRANSCRIPTION_ERRORS] = report["errors"]
             try:
                 save_results(folder, segments, full)
             except Exception as error:
@@ -329,7 +344,7 @@ class MeetingController:
 
         self._job = self.app.engine.transcribe(files, model, device, self.settings["language"],
                                                progress=progress, status=status,
-                                               on_done=done, on_error=failed)
+                                               on_done=done, on_error=failed, report=report)
         return True
 
     def cancel(self) -> None:
@@ -439,6 +454,19 @@ class MeetingController:
             self._queue.clear()
         if self._job is not None:
             self._job.cancel.set()
+
+
+def same_folder(a: Path | None, b: Path | None, unknown: bool = False) -> bool:
+    """True when both paths name the same folder (resolved: case, `..`, relative spellings).
+
+    `unknown` is the answer when a path cannot be resolved.
+    """
+    if a is None or b is None:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except (OSError, RuntimeError):
+        return unknown
 
 
 def rename_session(folder: Path, result: dict) -> Path:

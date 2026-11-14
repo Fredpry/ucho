@@ -213,6 +213,14 @@ def as_text(segments: list[Segment],
     return "\n".join(f"{label(seg.speaker)}: {seg.text}" for seg in segments) + "\n"
 
 
+# meta.json keys written by meeting.py after a transcription run. Only a run
+# that was neither cancelled nor had failed chunks sets TRANSCRIPT_COMPLETE
+# to true; audio retention relies on it (retention.transcript_complete).
+TRANSCRIPT_COMPLETE = "transcript_complete"
+TRANSCRIPTION_CANCELLED = "transcription_cancelled"
+TRANSCRIPTION_ERRORS = "transcription_errors"
+
+
 def save_results(folder: Path, segments: list[Segment], meta: dict) -> dict[str, Path]:
     """Writes the transcript in three formats plus the session metadata."""
     folder.mkdir(parents=True, exist_ok=True)

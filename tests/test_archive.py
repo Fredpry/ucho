@@ -145,3 +145,29 @@ def test_search_without_fts5_matches_the_same(polish):
         assert plain.search("otych", 10) == []
         assert plain.search("100%_", 10) == []
         assert not plain.fts
+
+
+def test_highlight_follows_the_fts5_token_rule(tmp_path):
+    # FTS5 unicode61 splits at "_" and keeps only letters and numbers in a
+    # token; every hit it finds must also be highlighted.
+    folder = tmp_path / "2026-01-01_10-00_Plan"
+    folder.mkdir()
+    text = "Plan budżet_q1 dla Lódź"
+    (folder / "meta.json").write_text(json.dumps({"name": "Plan", "segments": [
+        {"start": 1, "end": 2, "speaker": "me", "text": text}]}, ensure_ascii=False), encoding="utf-8")
+    archive = Archive(tmp_path)
+    assert [h.text for h in archive.search("q1", 10)] == [text]
+    assert [text[s:e] for s, e in match_spans(text, ["q1"])] == ["q1"]
+    assert [text[s:e] for s, e in match_spans(text, ["budzet"])] == ["budżet"]
+    # A trailing combining accent belongs to the highlighted word.
+    assert [text[s:e] for s, e in match_spans(text, ["lodz"])] == ["Lódź"]
+    # Inside a token is still no match, and neither is a separator.
+    assert match_spans(text, ["udzet"]) == [] and match_spans("a_b", ["_b"]) == []
+
+
+def test_search_without_fts5_splits_tokens_like_fts5():
+    from ucho.archive import _matches_words
+
+    assert _matches_words("plan budzet_q1", ["q1"])
+    assert _matches_words("koszt 100% x", ["100"])
+    assert not _matches_words("plan budzet_q1", ["udzet"])
