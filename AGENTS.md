@@ -14,7 +14,8 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 |---|---|
 | `uruchom.pyw`, `dyktuj.pyw` | Start scripts used by shortcuts; work without a working directory |
 | `mcp_serwer.py` | Start script for the MCP server (same trick) |
-| `instaluj.ps1` | Installer: Python, `.venv`, pinned deps, telemetry opt-out, icon, GPU check, model, settings, shortcuts. ASCII only (PowerShell 5.1 reads it as ANSI). Keys written to `ustawienia.json` must match `config.DOMYSLNE` |
+| `instaluj.ps1` | Installer: Python, `.venv`, pinned deps, telemetry opt-out, icon, settings, hardware check and recommended model (`ucho.hardware --save`), shortcuts. ASCII only (PowerShell 5.1 reads it as ANSI). Keys written to `ustawienia.json` must match `config.DOMYSLNE` |
+| `ucho/hardware.py` | Hardware profile (RAM, CPU, OpenVINO devices), rule table for model and device, benchmark on a synthetic signal, `python -m ucho.hardware [--save] [--benchmark]`. See `docs/hardware.md` |
 | `ucho/config.py` | Paths, model lists, pinned model revisions (`REWIZJE`), defaults, `Ustawienia` |
 | `ucho/i18n.py`, `ucho/locale/en.json` | UI translations (Polish source text as key) |
 | `ucho/app.py` | Main window (customtkinter): record, transcription view, recordings list, settings |
