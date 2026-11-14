@@ -13,7 +13,10 @@
         it points here;
       - after a question: .venv, the downloaded models, settings and logs
         (ucho.log holds dictated text).
-    Recordings are deleted only after a separate prompt where you type a word.
+    Recordings are deleted only after a separate prompt where you type a word,
+    only session folders the app created (listed by name first), and never
+    when the recordings folder is the profile, Documents, Desktop, Downloads,
+    a OneDrive root or a drive root.
     Never touched: the program files themselves (delete the folder afterwards)
     and Python 3.12 (remove it in Settings > Apps if nothing else needs it).
 
@@ -38,7 +41,9 @@ $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $Removed = New-Object System.Collections.Generic.List[string]
 
 $PL = (Get-UICulture).TwoLetterISOLanguageName -eq 'pl'
-function T($pl, $en) { if ($PL) { return $pl } else { return $en } }
+# Parameter names differ from $PL on purpose: PowerShell names are case-insensitive,
+# so a parameter called $pl would hide the language flag (always Polish).
+function T($textPl, $textEn) { if ($PL) { return $textPl } else { return $textEn } }
 
 function Step($text) { Write-Host "`n==> $text" -ForegroundColor Cyan }
 function Ok($text)   { Write-Host "    [OK] $text" -ForegroundColor Green }
@@ -71,14 +76,45 @@ function Test-PointsHere([string]$Text) {
     return ($Text -and $Text.IndexOf($RootPrefix, [StringComparison]::OrdinalIgnoreCase) -ge 0)
 }
 
-# "rmdir /s /q" removes junctions and symbolic links without following them;
-# Remove-Item -Recurse in Windows PowerShell 5.1 can follow them into the
-# target folder.
+$ReparsePoint = [System.IO.FileAttributes]::ReparsePoint
+$ReadOnly = [System.IO.FileAttributes]::ReadOnly
+
+# A junction or a symbolic link (to a folder or a file). OneDrive's cloud
+# files are reparse points too, but they are the data itself, not a link to
+# somewhere else; any other reparse point with a target counts as a link.
+function Test-Link([System.IO.FileSystemInfo]$Item) {
+    if (($Item.Attributes -band $ReparsePoint) -eq 0) { return $false }
+    try {
+        if ([string]$Item.LinkType -in @('Junction', 'SymbolicLink')) { return $true }
+        return (@($Item.Target | Where-Object { $_ }).Count -gt 0)
+    } catch { return $true }
+}
+
+# Deletes a file or a folder tree without following junctions or symbolic
+# links: a link is removed as a link and its target is never touched.
+# Remove-Item -Recurse in Windows PowerShell 5.1 can follow a junction into
+# its target, and "cmd /c rmdir" would expand %NAME% inside a path, so the
+# tree is walked here. Errors are skipped; Remove-Folder checks the result.
+function Remove-Tree([System.IO.FileSystemInfo]$Item) {
+    $link = Test-Link $Item
+    try {
+        if ($Item -is [System.IO.DirectoryInfo]) {
+            if (-not $link) {
+                foreach ($child in $Item.GetFileSystemInfos()) { Remove-Tree $child }
+                if (($Item.Attributes -band $ReadOnly) -ne 0) { $Item.Attributes = $Item.Attributes -bxor $ReadOnly }
+            }
+            # Not recursive: on a junction this removes only the junction.
+            [System.IO.Directory]::Delete($Item.FullName, $false)
+        } else {
+            if (-not $link -and (($Item.Attributes -band $ReadOnly) -ne 0)) { $Item.Attributes = $Item.Attributes -bxor $ReadOnly }
+            [System.IO.File]::Delete($Item.FullName)
+        }
+    } catch { }
+}
+
 function Remove-Folder([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { & cmd.exe /d /c "rmdir /s /q `"$Path`"" 2>&1 | Out-Null } finally { $ErrorActionPreference = $previous }
+    Remove-Tree (New-Object System.IO.DirectoryInfo $Path)
     if (Test-Path -LiteralPath $Path) {
         Warn ((T 'Nie udalo sie usunac w calosci: ' 'Could not remove completely: ') + $Path)
         return $false
@@ -86,16 +122,36 @@ function Remove-Folder([string]$Path) {
     return $true
 }
 
+# Size without following links: Get-ChildItem -Recurse in PowerShell 5.1
+# walks into junctions and would count their targets too.
 function Get-FolderSizeGb([string[]]$Paths) {
-    $bytes = 0
+    [long]$bytes = 0
+    $pending = New-Object System.Collections.Generic.Stack[System.IO.DirectoryInfo]
     foreach ($path in $Paths) {
-        if (Test-Path -LiteralPath $path) {
-            $sum = (Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue |
-                    Measure-Object -Property Length -Sum).Sum
-            if ($sum) { $bytes += $sum }
+        if (Test-Path -LiteralPath $path -PathType Container) {
+            $dir = New-Object System.IO.DirectoryInfo $path
+            if (-not (Test-Link $dir)) { $pending.Push($dir) }
+        }
+    }
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Pop()
+        try { $children = $dir.GetFileSystemInfos() } catch { continue }
+        foreach ($child in $children) {
+            if ((($child.Attributes -band $ReparsePoint) -ne 0) -and (Test-Link $child)) { continue }
+            if ($child -is [System.IO.DirectoryInfo]) { $pending.Push($child) } else { $bytes += $child.Length }
         }
     }
     return [math]::Round($bytes / 1GB, 1)
+}
+
+# An absolute path without a trailing backslash, except for a drive root:
+# "C:" alone would mean the current folder on drive C. $null for a relative
+# or drive-relative path ("C:foo"), which this script never guesses at.
+function Get-FullPath([string]$Path) {
+    if ($Path -notmatch '^([A-Za-z]:\\|\\\\)') { return $null }
+    try { $full = [System.IO.Path]::GetFullPath($Path) } catch { return $null }
+    if ($full.Length -gt [System.IO.Path]::GetPathRoot($full).Length) { $full = $full.TrimEnd('\') }
+    return $full
 }
 
 trap {
@@ -146,8 +202,8 @@ foreach ($file in @('settings.json', 'ustawienia.json')) {
 # Default folders of v0.2 and v0.1.
 $recordingFolders.Add((Join-Path $env:USERPROFILE 'Ucho\recordings'))
 $recordingFolders.Add((Join-Path $env:USERPROFILE 'Ucho\nagrania'))
-$recordingFolders = @($recordingFolders | ForEach-Object { $_.TrimEnd('\') } | Sort-Object -Unique |
-                      Where-Object { Test-Path -LiteralPath $_ -PathType Container })
+$recordingFolders = @($recordingFolders | ForEach-Object { Get-FullPath $_ } | Where-Object { $_ } |
+                      Sort-Object -Unique | Where-Object { Test-Path -LiteralPath $_ -PathType Container })
 
 # --- 2. What will happen --------------------------------------------------------
 
@@ -233,35 +289,158 @@ if ($KeepEnvironment) {
 
 # --- 6. Recordings: only after typing a word -------------------------------------
 
-# Only folders that look like Ucho sessions are deleted, never the whole
-# recordings folder blindly: it may have been set to a folder with other files.
-$markers = @('meta.json', 'microphone.flac', 'meeting.flac', 'transcript.md',
-             'mikrofon.flac', 'spotkanie.flac', 'transkrypt.md')
-function Get-Sessions([string]$Folder) {
-    return @(Get-ChildItem -LiteralPath $Folder -Directory -Force -ErrorAction SilentlyContinue | Where-Object {
-        $dir = $_.FullName
-        @($markers | Where-Object { Test-Path -LiteralPath (Join-Path $dir $_) }).Count -gt 0
-    })
+# Only folders that are clearly Ucho sessions are deleted, never the whole
+# recordings folder: it may have been set to a folder with other files. A
+# session folder is named "<yyyy-MM-dd>_<HH-mm>[_<name>]" (meeting.py; a
+# summary keeps the time stamp when it renames the folder) and holds an audio
+# track under a name the app uses or a meta.json the app wrote.
+$SessionName = '^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}(_|$)'
+$AudioTracks = @('microphone.flac', 'meeting.flac', 'mikrofon.flac', 'spotkanie.flac')
+# meta.json keys written by meeting.py (and their v0.1 names): a date stamp
+# plus at least one of the others.
+$MetaDateKeys = @('date', 'data')
+$MetaKeys = @('name', 'nazwa', 'duration_s', 'trwanie_s', 'segments', 'segmenty', 'model')
+
+function Test-UchoMeta([string]$File) {
+    try {
+        $info = New-Object System.IO.FileInfo $File
+        if (-not $info.Exists -or (Test-Link $info) -or $info.Length -gt 64MB) { return $false }
+        $meta = [System.IO.File]::ReadAllText($File, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    } catch { return $false }
+    if ($meta -isnot [System.Management.Automation.PSCustomObject]) { return $false }
+    $keys = @($meta.PSObject.Properties | ForEach-Object { $_.Name })
+    $dated = $false
+    foreach ($key in $MetaDateKeys) {
+        if ($keys -contains $key) {
+            $value = $meta.$key
+            if ($value -is [datetime] -or "$value" -match '^\d{4}-\d{2}-\d{2}') { $dated = $true }
+        }
+    }
+    return ($dated -and @($keys | Where-Object { $MetaKeys -contains $_ }).Count -gt 0)
 }
 
+function Test-Session([System.IO.DirectoryInfo]$Dir) {
+    if ((Test-Link $Dir) -or ($Dir.Name -notmatch $SessionName)) { return $false }
+    foreach ($name in $AudioTracks) {
+        $track = New-Object System.IO.FileInfo (Join-Path $Dir.FullName $name)
+        if ($track.Exists -and -not (Test-Link $track)) { return $true }
+    }
+    return (Test-UchoMeta (Join-Path $Dir.FullName 'meta.json'))
+}
+
+function Get-Sessions([string]$Folder) {
+    $dir = New-Object System.IO.DirectoryInfo $Folder
+    try { $children = @($dir.GetDirectories()) } catch { return @() }
+    return @($children | Where-Object { Test-Session $_ } | Sort-Object Name)
+}
+
+# Folders that hold far more than Ucho recordings. If the recordings folder is
+# one of them (or a drive root, or contains the user profile), the uninstaller
+# deletes nothing there: one typed word must never be able to empty Documents.
+function Get-UserProfiles {
+    return @(@($env:USERPROFILE, [Environment]::GetFolderPath('UserProfile')) |
+             Where-Object { $_ } | ForEach-Object { Get-FullPath $_ } | Where-Object { $_ } | Sort-Object -Unique)
+}
+
+function Get-ProtectedFolders {
+    $list = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @('Desktop', 'DesktopDirectory', 'MyDocuments', 'MyMusic', 'MyPictures', 'MyVideos')) {
+        try { $list.Add([Environment]::GetFolderPath($name)) } catch { }
+    }
+    foreach ($value in @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer)) {
+        if ($value) { $list.Add($value) }
+    }
+    # Explorer's own resolved paths: also Downloads (no .NET name for it) and
+    # folders moved to another drive or into OneDrive.
+    try {
+        $shellFolders = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders' -ErrorAction Stop
+        foreach ($name in @('Desktop', 'Personal', 'My Music', 'My Pictures', 'My Video', '{374DE290-123F-4565-9164-39C4925E467B}')) {
+            $value = $shellFolders.$name
+            if ($value) { $list.Add([string]$value) }
+        }
+    } catch { }
+    foreach ($userDir in Get-UserProfiles) {
+        $list.Add($userDir)
+        foreach ($name in @('Desktop', 'Documents', 'Downloads', 'Music', 'Pictures', 'Videos', 'OneDrive')) {
+            $list.Add((Join-Path $userDir $name))
+        }
+    }
+    return @($list | Where-Object { $_ } | ForEach-Object { Get-FullPath $_ } | Where-Object { $_ } | Sort-Object -Unique)
+}
+
+# Returns the reason to keep everything in $Folder, or $null when its Ucho
+# sessions may be deleted. A recordings folder that is itself a link (moved to
+# another drive) is checked by its target as well.
+function Get-ProtectedReason([string]$Folder) {
+    $full = Get-FullPath $Folder
+    if (-not $full) { return (T 'nie da sie ustalic jego sciezki' 'its path cannot be resolved') }
+    $paths = @($full)
+    if ([System.IO.Path]::GetPathRoot($full) -ine $full) {
+        try {
+            $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+            if (Test-Link $item) {
+                $target = [string](@($item.Target) | Select-Object -First 1)
+                if ($target -and $target -notmatch '^([A-Za-z]:\\|\\\\)') {
+                    $target = Join-Path (Split-Path -Parent $full) $target  # relative symbolic link
+                }
+                $resolved = $null
+                if ($target) { $resolved = Get-FullPath $target }
+                if (-not $resolved) { return (T 'to link, ktorego celu nie da sie ustalic' 'it is a link whose target cannot be read') }
+                $paths += $resolved
+            }
+        } catch { return (T 'nie da sie go odczytac' 'it cannot be read') }
+    }
+    $protected = Get-ProtectedFolders
+    $profiles = Get-UserProfiles
+    foreach ($path in $paths) {
+        if ([System.IO.Path]::GetPathRoot($path) -ieq $path) {
+            return (T 'to katalog glowny dysku' 'it is the root of a drive')
+        }
+        foreach ($folder in $protected) {
+            if ($path -ieq $folder) { return (T 'to folder osobisty (profil uzytkownika, Dokumenty, Pulpit, Pobrane, OneDrive itp.)' 'it is a personal folder (user profile, Documents, Desktop, Downloads, OneDrive and the like)') }
+        }
+        foreach ($userDir in $profiles) {
+            if ($userDir.StartsWith($path + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                return (T 'zawiera folder uzytkownika' 'it contains the user profile')
+            }
+        }
+    }
+    return $null
+}
+
+$ListLimit = 20
 $keptRecordings = @()
 foreach ($folder in $recordingFolders) {
-    $sessions = Get-Sessions $folder
     Step ((T 'Nagrania: ' 'Recordings: ') + $folder)
+    $reason = Get-ProtectedReason $folder
+    if ($reason) {
+        Warn ((T 'Nie usuwam stad niczego: ' 'Not deleting anything here: ') + $reason + '.')
+        Warn (T 'Nagrania Ucho (foldery z data, np. 2026-01-31_10-00_...) usun samodzielnie, jesli chcesz.' 'Delete the Ucho recordings (folders named by date, e.g. 2026-01-31_10-00_...) yourself if you want.')
+        $keptRecordings += $folder
+        continue
+    }
+    $sessions = @(Get-Sessions $folder)
     if ($sessions.Count -eq 0) {
         Ok (T 'Brak nagran Ucho w tym folderze - nic nie usuwam' 'No Ucho recordings in this folder - nothing to delete')
         continue
     }
-    Write-Host ((T '    Liczba nagran: ' '    Recordings: ') + $sessions.Count) -ForegroundColor White
+    Write-Host ((T '    Nagrania Ucho w tym folderze: ' '    Ucho recordings in this folder: ') + $sessions.Count) -ForegroundColor White
+    foreach ($session in ($sessions | Select-Object -First $ListLimit)) { Write-Host "      $($session.Name)" }
+    if ($sessions.Count -gt $ListLimit) {
+        $more = $sessions.Count - $ListLimit
+        Write-Host (T "      ... i jeszcze $more" "      ... and $more more")
+    }
     $deleted = $false
     if (Test-Interactive) {
-        Write-Host (T '    Nagrania ZOSTAJA na dysku. Aby je trwale usunac (bez Kosza), wpisz USUN i nacisnij Enter.' '    Recordings STAY on the disk. To delete them for good (no Recycle Bin), type DELETE and press Enter.') -ForegroundColor Yellow
+        Write-Host (T '    Nagrania ZOSTAJA na dysku. Aby trwale usunac te foldery (bez Kosza), wpisz USUN i nacisnij Enter.' '    Recordings STAY on the disk. To delete these folders for good (no Recycle Bin), type DELETE and press Enter.') -ForegroundColor Yellow
+        Write-Host (T '    Inne pliki i foldery w tym folderze zostaja.' '    Other files and folders in this folder stay.') -ForegroundColor Yellow
         $answer = Read-Host (T '    Cokolwiek innego je zostawia' '    Anything else keeps them')
         if ("$answer".Trim() -in @('USUN', 'DELETE')) {
             foreach ($session in $sessions) { [void](Remove-Folder $session.FullName) }
             $left = @(Get-ChildItem -LiteralPath $folder -Force -ErrorAction SilentlyContinue)
             if ($left.Count -eq 0) {
-                Remove-Item -LiteralPath $folder -Force -ErrorAction SilentlyContinue
+                # Not recursive: an empty folder, or only the link if it is one.
+                try { [System.IO.Directory]::Delete($folder, $false) } catch { }
                 Removed $folder
             } else {
                 Removed ((T 'nagrania z ' 'recordings in ') + $folder)
