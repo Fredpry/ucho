@@ -760,7 +760,9 @@ class Microphone:
                     self._pa = audio.new_pyaudio()
                 device, found = self._device(self._pa)
                 choice = self._name or self._legacy_index
-                if not found and self._reported_missing != choice:
+                if found:
+                    self._reported_missing = None
+                elif self._reported_missing != choice:
                     self._reported_missing = choice
                     log.warning("Chosen microphone %r is not connected - using the default", choice)
                 self._channels, self._rate = device.channels, device.rate
