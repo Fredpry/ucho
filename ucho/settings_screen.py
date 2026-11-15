@@ -381,9 +381,9 @@ class SettingsScreen(Screen):
     def _build_audio(self) -> None:
         s = self._section(t("Audio devices"))
         self.microphone = s.row(t("Microphone"), lambda m: ui.option_menu(
-            m, [t("(default)")], t("(default)"), lambda _v: self._save_devices(), width=340))
+            m, [t("(default)")], t("(default)"), lambda _v: self._save_device("microphone"), width=340))
         self.system = s.row(t("System audio (loopback)"), lambda m: ui.option_menu(
-            m, [t("(default)")], t("(default)"), lambda _v: self._save_devices(), width=340))
+            m, [t("(default)")], t("(default)"), lambda _v: self._save_device("system"), width=340))
         tracks = {t(v): k for k, v in config.TRACK_LABELS.items()}
         s.row(t("What to record"), lambda m: ui.option_menu(
             m, list(tracks), t(config.TRACK_LABELS.get(self.settings["tracks"], "Microphone + system audio")),
@@ -398,29 +398,18 @@ class SettingsScreen(Screen):
     def _fill_devices(self, devices: dict) -> None:
         from . import audio
 
-        def fill(menu, items, name_key, index_key) -> dict[str, str | None]:
-            """Fills a menu; returns {label: device name} (None = the Windows default)."""
-            name = self.settings[name_key]
-            chosen = audio.find_device(name, items, None, self.settings[index_key],
-                                       devices.get("names_by_index"))
-            labels: dict[str, str | None] = {t("(default)"): None}
-            for dev in items:
-                labels.setdefault(dev.label, dev.name)
-            selected = chosen.label if chosen else t("(default)")
-            if chosen is None and name:
-                # Chosen earlier but not plugged in now: keep the choice visible, so
-                # that changing the other menu does not quietly reset it.
-                selected = t("{device} (not connected)", device=name)
-                labels[selected] = name
+        self._device_labels = {}
+        for key, menu, list_key in (("microphone", self.microphone, "microphones"),
+                                    ("system", self.system, "system")):
+            labels, selected = audio.menu_choices(
+                devices.get(list_key, []), self.settings[f"{key}_name"],
+                self.settings[f"{key}_index"], devices.get("names_by_index"))
             menu.configure(values=list(labels))
             menu.set(selected)
-            return labels
-
-        self._device_labels = {
-            "microphone": fill(self.microphone, devices.get("microphones", []),
-                               "microphone_name", "microphone_index"),
-            "system": fill(self.system, devices.get("system", []), "system_name", "system_index"),
-        }
+            if not devices.get("error"):
+                # After a failed listing the menu shows only "(default)": choosing it
+                # must not erase a choice we could not show.
+                self._device_labels[key] = labels
         if devices.get("error"):
             self.audio_label.configure(text=t("Audio device error: {error}", error=devices["error"]),
                                        text_color=C.warning)
@@ -434,14 +423,15 @@ class SettingsScreen(Screen):
                                               n=len(devices["microphones"]), m=len(devices["system"])),
                                        text_color=C.text_muted)
 
-    def _save_devices(self) -> None:
-        labels = getattr(self, "_device_labels", None)
-        if not labels:  # the device list has not arrived yet
+    def _save_device(self, key: str) -> None:
+        """Saves the menu the user changed ("microphone" or "system") by device name."""
+        labels = getattr(self, "_device_labels", {}).get(key)
+        if labels is None:  # the device list has not arrived, or listing failed
             return
-        for key, menu in (("microphone", self.microphone), ("system", self.system)):
-            self.settings[f"{key}_name"] = labels[key].get(menu.get())
-            # A name replaces the index saved by Ucho 0.2.0.
-            self.settings[f"{key}_index"] = None
+        menu = self.microphone if key == "microphone" else self.system
+        self.settings[f"{key}_name"] = labels.get(menu.get())
+        # A name replaces the index saved by an earlier version.
+        self.settings[f"{key}_index"] = None
         self.settings.save()
 
     # --- summary ------------------------------------------------------------------------

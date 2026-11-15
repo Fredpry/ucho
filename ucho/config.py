@@ -211,7 +211,7 @@ DEFAULTS = {
     "language": "auto",
     "ui_language": "auto",
     "tracks": "both",
-    # Chosen devices by name; None = the Windows default. Ucho 0.2.0 and older
+    # Chosen devices by name; None = the Windows default. Earlier versions
     # saved a PortAudio index instead, which shifts when devices are plugged in
     # or out; audio.migrate_device_choices() turns it into a name.
     "microphone_name": None,

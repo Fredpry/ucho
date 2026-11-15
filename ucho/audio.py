@@ -113,7 +113,7 @@ def _input_api(p) -> int:
 def microphones(p) -> tuple[list[DeviceInfo], DeviceInfo | None, dict[int, str]]:
     """(microphones, default microphone, names of all input devices by index).
 
-    The names by index resolve a choice saved by Ucho 0.2.0 and older, which
+    The names by index resolve a choice saved by earlier versions, which
     stored a PortAudio index (see `find_device`).
     """
     api = _input_api(p)
@@ -199,8 +199,8 @@ def find_device(name: str | None, candidates: list[DeviceInfo], default: DeviceI
     """The device chosen by name; `default` when none is chosen or it is not connected.
 
     A choice is kept by name, because PortAudio indices shift whenever a device
-    is plugged in or out. `legacy_index` is a choice saved by Ucho 0.2.0 and
-    older: an index into the full PortAudio list, possibly of an MME entry
+    is plugged in or out. `legacy_index` is a choice saved by earlier
+    versions: an index into the full PortAudio list, possibly of an MME entry
     with a cut name, which then matches the one device whose name starts with it.
     """
     if not name and legacy_index is not None:
@@ -217,13 +217,31 @@ def find_device(name: str | None, candidates: list[DeviceInfo], default: DeviceI
     return default
 
 
-# (setting with the device name, setting with a 0.2.0 index, key in list_devices())
+def menu_choices(items: list[DeviceInfo], name: str | None, legacy_index: int | None = None,
+                 names_by_index: dict[int, str] | None = None) -> tuple[dict[str, str | None], str]:
+    """({menu label: device name, None = the Windows default}, selected label) for Settings.
+
+    A chosen device that is not in `items` stays in the menu as "(not connected)",
+    so the choice is visible and is not reset by saving the menu.
+    """
+    chosen = find_device(name, items, None, legacy_index, names_by_index)
+    labels: dict[str, str | None] = {t("(default)"): None}
+    for dev in items:
+        labels.setdefault(dev.label, dev.name)
+    selected = chosen.label if chosen else t("(default)")
+    if chosen is None and name:
+        selected = t("{device} (not connected)", device=name)
+        labels[selected] = name
+    return labels, selected
+
+
+# (setting with the device name, setting with an earlier index, key in list_devices())
 DEVICE_SETTINGS = (("microphone_name", "microphone_index", "microphones"),
                    ("system_name", "system_index", "system"))
 
 
 def migrate_device_choices(settings, devices: dict) -> bool:
-    """Turns a device index saved by Ucho 0.2.0 and older into a device name.
+    """Turns a device index saved by an earlier version into a device name.
 
     Returns True when `settings` changed (the caller saves it). An index that
     no longer points at a listed device (e.g. the MME "Sound Mapper", which
@@ -234,7 +252,8 @@ def migrate_device_choices(settings, devices: dict) -> bool:
     changed = False
     for name_key, index_key, list_key in DEVICE_SETTINGS:
         index = settings[index_key]
-        if index is None:
+        if index is None or not devices.get(list_key):
+            # Nothing to compare with (e.g. listing loopbacks failed): keep the index.
             continue
         if not settings[name_key]:
             dev = find_device(None, devices.get(list_key, []), None, index,
@@ -439,7 +458,7 @@ class Recorder:
                  system: str | None = None, microphone_index: int | None = None,
                  system_index: int | None = None):
         self.tracks = tracks
-        # Chosen devices by name; the indices are a choice saved by Ucho 0.2.0.
+        # Chosen devices by name; the indices are a choice saved by an earlier version.
         self._microphone = microphone
         self._system = system
         self._microphone_index = microphone_index

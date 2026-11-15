@@ -203,11 +203,11 @@ PRIVATE_FORMATS = {
     "CanIncludeInClipboardHistory": 0,
     "CanUploadToCloudClipboard": 0,
 }
+# How long model_key() trusts its last look at the model folder.
+MODEL_CHECK_S = 5.0
 # How long the target window has to ask for the pasted text after Ctrl+V.
 # A busy Electron app or a remote desktop session can take seconds; without
 # a request in this time the text stays on the clipboard and nothing is restored.
-# How long model_key() trusts its last look at the model folder.
-MODEL_CHECK_S = 5.0
 PASTE_TIMEOUT_S = 5.0
 # After the target has taken the text, before the previous text goes back.
 # Some programs read the clipboard more than once for one paste; the later
@@ -699,9 +699,10 @@ class Microphone:
 
     def __init__(self, name: str | None, legacy_index: int | None = None):
         # The chosen microphone by name (None = the Windows default); the index
-        # is a choice saved by Ucho 0.2.0, see audio.find_device().
+        # is a choice saved by an earlier version, see audio.find_device().
         self._name = name
         self._legacy_index = legacy_index
+        self._reported_missing: str | int | None = None
         self._pa = None
         self._stream = None
         self._blocks: list[bytes] = []
@@ -747,23 +748,21 @@ class Microphone:
 
         from . import audio
 
-        # We keep the PyAudio instance, because creating it takes time and would
-        # cut off the start of the utterance. When the device disappeared
-        # (headphones changed), it is rebuilt.
+        # PortAudio lists the devices (and the Windows default) present when it
+        # starts, so every dictation gets a fresh one: it then sees a headset
+        # plugged in since and a default changed in Windows. Only the first start
+        # in the process is slow (about 0.25 s, the DLL loads; prepare() pays it
+        # up front), later ones take about 15 ms.
+        self._close_pa()
         for attempt in range(2):
             try:
                 if self._pa is None:
                     self._pa = audio.new_pyaudio()
                 device, found = self._device(self._pa)
-                if not found and attempt == 0:
-                    # PortAudio lists the devices present when it started: the
-                    # chosen microphone may have been plugged in since.
-                    self._close_pa()
-                    self._pa = audio.new_pyaudio()
-                    device, found = self._device(self._pa)
-                    if not found:
-                        log.warning("Chosen microphone %r is not connected - using the default",
-                                    self._name or self._legacy_index)
+                choice = self._name or self._legacy_index
+                if not found and self._reported_missing != choice:
+                    self._reported_missing = choice
+                    log.warning("Chosen microphone %r is not connected - using the default", choice)
                 self._channels, self._rate = device.channels, device.rate
                 self._blocks = []
                 self.level = 0.0
@@ -925,6 +924,9 @@ class DictationController:
 
     def preload(self) -> None:
         """Loads the dictation model in the background, if the setting says so."""
+        # Settings may have changed (or a model was downloaded): look at the disk again.
+        self._downloaded.clear()
+        self._reported_missing = None
         key = self.model_key()
         preload = bool(self.settings["dictation_preload"])
         if not transcribe.model_downloaded(key[0]):

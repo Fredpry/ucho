@@ -200,3 +200,66 @@ def test_dictation_rereads_devices_when_the_choice_is_missing(monkeypatch):
     mic._pa = stale
     mic.start()
     assert opened == [7] and mic.name == HEADSET
+
+
+def _start_with(monkeypatch, mic, stale, fresh):
+    """Starts `mic` whose PortAudio is `stale`, while a new PortAudio would be `fresh`."""
+    opened = []
+
+    class Stream:
+        def start_stream(self):
+            pass
+
+        stop_stream = close = start_stream
+
+    def open_(**kwargs):
+        opened.append(kwargs["input_device_index"])
+        return Stream()
+
+    fresh.open = open_
+    monkeypatch.setattr(audio, "new_pyaudio", lambda: fresh)
+    monkeypatch.setattr(audio, "close_pyaudio", lambda p: None)
+    mic._pa = stale
+    mic.start()
+    return opened
+
+
+def test_dictation_follows_a_default_changed_in_windows(monkeypatch):
+    """No microphone chosen: the default of a fresh PortAudio, not of the one from startup."""
+    opened = _start_with(monkeypatch, dictation.Microphone(None),
+                         FakePyAudio(), FakePyAudio(wasapi_default=7))
+    assert opened == [7]
+
+
+def test_missing_choice_is_logged_once(monkeypatch, caplog):
+    mic = dictation.Microphone("Bluetooth headset")
+    for _ in range(3):
+        _start_with(monkeypatch, mic, FakePyAudio(), FakePyAudio())
+        mic.stop()
+    assert sum("is not connected" in r.getMessage() for r in caplog.records) == 1
+
+
+def test_migration_keeps_an_index_when_its_list_is_empty():
+    devices = _devices()
+    devices["system"] = []   # listing loopbacks failed
+    settings = {"microphone_name": None, "microphone_index": None,
+                "system_name": None, "system_index": 9}
+    assert audio.migrate_device_choices(settings, devices) is False
+    assert settings["system_index"] == 9
+
+
+def test_menu_lists_default_devices_and_a_missing_choice():
+    mics = _devices()["microphones"]
+    labels, selected = audio.menu_choices(mics, None)
+    assert list(labels.values()) == [None, HEADSET, ARRAY] and labels[selected] is None
+    labels, selected = audio.menu_choices(mics, HEADSET)
+    assert selected == HEADSET and labels[selected] == HEADSET
+    labels, selected = audio.menu_choices(mics, "Bluetooth headset")
+    assert "Bluetooth headset" in selected and labels[selected] == "Bluetooth headset"
+    assert len(labels) == 4
+
+
+def test_menu_shows_a_legacy_index_as_its_device():
+    devices = _devices()
+    labels, selected = audio.menu_choices(devices["microphones"], None, 2, devices["names_by_index"])
+    assert labels[selected] == HEADSET
