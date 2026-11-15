@@ -95,44 +95,78 @@ def _from_info(info: dict, loopback: bool) -> DeviceInfo:
     )
 
 
+def _input_api(p) -> int:
+    """The PortAudio host API microphones are listed from.
+
+    PortAudio lists every microphone once per Windows audio API: MME (names cut
+    to 31 characters, plus the "Microsoft Sound Mapper"), DirectSound (plus the
+    "Primary Sound Capture Driver") and WASAPI. We list WASAPI only, the API the
+    system-audio loopback uses too, so each device appears once with its full
+    name. Without WASAPI we fall back to the default API.
+    """
+    try:
+        return int(p.get_host_api_info_by_type(pyaudio.paWASAPI)["index"])
+    except Exception:
+        return int(p.get_default_host_api_info()["index"])
+
+
+def microphones(p) -> tuple[list[DeviceInfo], DeviceInfo | None, dict[int, str]]:
+    """(microphones, default microphone, names of all input devices by index).
+
+    The names by index resolve a choice saved by Ucho 0.2.0 and older, which
+    stored a PortAudio index (see `find_device`).
+    """
+    api = _input_api(p)
+    found: list[DeviceInfo] = []
+    names: dict[int, str] = {}
+    for i in range(p.get_device_count()):
+        try:
+            info = p.get_device_info_by_index(i)
+        except Exception:
+            continue
+        if int(info.get("maxInputChannels", 0)) <= 0:
+            continue
+        names[i] = str(info["name"])
+        if info.get("isLoopbackDevice") or int(info.get("hostApi", -1)) != api:
+            continue
+        found.append(_from_info(info, loopback=False))
+
+    default: DeviceInfo | None = None
+    try:
+        index = int(p.get_host_api_info_by_index(api)["defaultInputDevice"])
+        default = next((d for d in found if d.index == index), None)
+    except Exception:
+        pass
+    if default is None:
+        try:
+            default = _from_info(p.get_default_input_device_info(), loopback=False)
+        except Exception as error:
+            log.warning("No default microphone: %s", error)
+    return found, default, names
+
+
 def _device_map() -> tuple[list[DeviceInfo], list[DeviceInfo],
-                           DeviceInfo | None, DeviceInfo | None]:
-    """Returns (microphones, loopback_outputs, default_microphone, default_output).
+                           DeviceInfo | None, DeviceInfo | None, dict[int, str]]:
+    """Returns (microphones, loopback_outputs, default_microphone, default_output, names).
 
     PortAudio caches the device list at initialization, so each time we create
     a fresh PyAudio object and close it right away.
     """
-    microphones: list[DeviceInfo] = []
     loopbacks: list[DeviceInfo] = []
-    default_mic: DeviceInfo | None = None
     default_sys: DeviceInfo | None = None
 
     p = new_pyaudio()
     try:
-        loopback_indices = set()
         try:
             for info in p.get_loopback_device_info_generator():
-                dev = _from_info(info, loopback=True)
-                loopbacks.append(dev)
-                loopback_indices.add(dev.index)
+                loopbacks.append(_from_info(info, loopback=True))
         except Exception as error:  # no WASAPI or no output devices
             log.warning("Could not list loopback devices: %s", error)
 
-        for i in range(p.get_device_count()):
-            try:
-                info = p.get_device_info_by_index(i)
-            except Exception:
-                continue
-            if int(info.get("maxInputChannels", 0)) <= 0:
-                continue
-            if i in loopback_indices:
-                continue
-            microphones.append(_from_info(info, loopback=False))
-
-        try:
-            default_mic = _from_info(p.get_default_input_device_info(), loopback=False)
-        except Exception as error:
-            log.warning("No default microphone: %s", error)
+        mics, default_mic, names = microphones(p)
+        # A loopback is never offered as a microphone.
+        loopback_indices = {d.index for d in loopbacks}
+        mics = [d for d in mics if d.index not in loopback_indices]
 
         try:
             default_sys = _from_info(p.get_default_wasapi_loopback(), loopback=True)
@@ -141,26 +175,74 @@ def _device_map() -> tuple[list[DeviceInfo], list[DeviceInfo],
     finally:
         close_pyaudio(p)
 
-    return microphones, loopbacks, default_mic, default_sys
+    return mics, loopbacks, default_mic, default_sys, names
 
 
 def list_devices() -> dict:
-    microphones, loopbacks, default_mic, default_sys = _device_map()
+    mics, loopbacks, default_mic, default_sys, names = _device_map()
     return {
-        "microphones": microphones,
+        "microphones": mics,
         "system": loopbacks,
         "default_microphone": default_mic,
         "default_system": default_sys,
+        "names_by_index": names,
     }
 
 
-def find_device(index: int | None, candidates: list[DeviceInfo],
-                default: DeviceInfo | None) -> DeviceInfo | None:
-    if index is not None:
-        for dev in candidates:
-            if dev.index == index:
-                return dev
+# MME, the oldest Windows audio API, cuts device names to this many characters.
+MME_NAME_LIMIT = 31
+
+
+def find_device(name: str | None, candidates: list[DeviceInfo], default: DeviceInfo | None,
+                legacy_index: int | None = None,
+                names_by_index: dict[int, str] | None = None) -> DeviceInfo | None:
+    """The device chosen by name; `default` when none is chosen or it is not connected.
+
+    A choice is kept by name, because PortAudio indices shift whenever a device
+    is plugged in or out. `legacy_index` is a choice saved by Ucho 0.2.0 and
+    older: an index into the full PortAudio list, possibly of an MME entry
+    with a cut name, which then matches the one device whose name starts with it.
+    """
+    if not name and legacy_index is not None:
+        name = (names_by_index or {}).get(legacy_index)
+    if not name:
+        return default
+    for dev in candidates:
+        if dev.name == name:
+            return dev
+    if len(name) >= MME_NAME_LIMIT:
+        prefixed = [dev for dev in candidates if dev.name.startswith(name)]
+        if len(prefixed) == 1:
+            return prefixed[0]
     return default
+
+
+# (setting with the device name, setting with a 0.2.0 index, key in list_devices())
+DEVICE_SETTINGS = (("microphone_name", "microphone_index", "microphones"),
+                   ("system_name", "system_index", "system"))
+
+
+def migrate_device_choices(settings, devices: dict) -> bool:
+    """Turns a device index saved by Ucho 0.2.0 and older into a device name.
+
+    Returns True when `settings` changed (the caller saves it). An index that
+    no longer points at a listed device (e.g. the MME "Sound Mapper", which
+    is the default anyway) becomes the default.
+    """
+    if not devices.get("names_by_index"):  # listing failed: keep the old choice for now
+        return False
+    changed = False
+    for name_key, index_key, list_key in DEVICE_SETTINGS:
+        index = settings[index_key]
+        if index is None:
+            continue
+        if not settings[name_key]:
+            dev = find_device(None, devices.get(list_key, []), None, index,
+                              devices.get("names_by_index"))
+            settings[name_key] = dev.name if dev else None
+        settings[index_key] = None
+        changed = True
+    return changed
 
 
 class _Track:
@@ -353,9 +435,13 @@ class _Track:
 class Recorder:
     """Manages both tracks and makes sure they survive a device change."""
 
-    def __init__(self, tracks: str = "both", microphone_index: int | None = None,
+    def __init__(self, tracks: str = "both", microphone: str | None = None,
+                 system: str | None = None, microphone_index: int | None = None,
                  system_index: int | None = None):
         self.tracks = tracks
+        # Chosen devices by name; the indices are a choice saved by Ucho 0.2.0.
+        self._microphone = microphone
+        self._system = system
         self._microphone_index = microphone_index
         self._system_index = system_index
         self._pa: "pyaudio.PyAudio | None" = None
@@ -378,16 +464,14 @@ class Recorder:
         chosen: list[tuple[str, str, DeviceInfo]] = []
 
         if self.tracks in ("both", "microphone"):
-            mic = find_device(self._microphone_index, devices["microphones"],
-                              devices["default_microphone"])
+            mic = self._pick("microphone", devices)
             if mic is None:
                 self.warnings.append(t("No microphone found."))
             else:
                 chosen.append(("microphone", MICROPHONE_FILE, mic))
 
         if self.tracks in ("both", "system"):
-            sys_dev = find_device(self._system_index, devices["system"],
-                                  devices["default_system"])
+            sys_dev = self._pick("system", devices)
             if sys_dev is None:
                 self.warnings.append(
                     t("No loopback device found — system audio will not be recorded.")
@@ -461,6 +545,14 @@ class Recorder:
             return 0.0
         return time.time() - self.start_ts
 
+    def _pick(self, track: str, devices: dict) -> DeviceInfo | None:
+        if track == "microphone":
+            return find_device(self._microphone, devices["microphones"],
+                               devices["default_microphone"], self._microphone_index,
+                               devices.get("names_by_index"))
+        return find_device(self._system, devices["system"], devices["default_system"],
+                           self._system_index, devices.get("names_by_index"))
+
     # --- surviving a device change --------------------------------------
 
     def _watchdog_loop(self) -> None:
@@ -482,12 +574,7 @@ class Recorder:
             devices = list_devices()
             self._pa = new_pyaudio()
             for name, track in self._tracks.items():
-                if name == "microphone":
-                    new = find_device(self._microphone_index, devices["microphones"],
-                                      devices["default_microphone"])
-                else:
-                    new = find_device(self._system_index, devices["system"],
-                                      devices["default_system"])
+                new = self._pick(name, devices)
                 if new is None:
                     continue
                 try:

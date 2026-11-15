@@ -311,5 +311,6 @@
   "Space": "Spacja",
   "The recording was only partly deleted. The rest is in the folder {folder}. Ucho deletes it at the next start; you can also close the programs that use it and delete the folder yourself.": "Nagranie usunięto tylko częściowo. Reszta jest w folderze {folder}. Ucho usunie go przy następnym uruchomieniu. Możesz też zamknąć programy, które go używają, i usunąć folder samodzielnie.",
   "The recordings folder could not be read. The setting was not changed.": "Nie udało się odczytać folderu z nagraniami. Ustawienie się nie zmieniło.",
-  "The window has not taken the text yet. If it does not appear, press Ctrl+V.": "Okno jeszcze nie przyjęło tekstu. Jeśli się nie pojawi, wklej go Ctrl+V."
+  "The window has not taken the text yet. If it does not appear, press Ctrl+V.": "Okno jeszcze nie przyjęło tekstu. Jeśli się nie pojawi, wklej go Ctrl+V.",
+  "{device} (not connected)": "{device} (niepodłączony)"
 }

@@ -154,6 +154,8 @@ class MeetingController:
         folder = self.settings.recordings_dir / f"{stamp}_{slug(name) or 'Meeting'}"
         recorder = audio.Recorder(
             tracks=self.settings["tracks"],
+            microphone=self.settings["microphone_name"],
+            system=self.settings["system_name"],
             microphone_index=self.settings["microphone_index"],
             system_index=self.settings["system_index"],
         )

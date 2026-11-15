@@ -206,6 +206,8 @@ PRIVATE_FORMATS = {
 # How long the target window has to ask for the pasted text after Ctrl+V.
 # A busy Electron app or a remote desktop session can take seconds; without
 # a request in this time the text stays on the clipboard and nothing is restored.
+# How long model_key() trusts its last look at the model folder.
+MODEL_CHECK_S = 5.0
 PASTE_TIMEOUT_S = 5.0
 # After the target has taken the text, before the previous text goes back.
 # Some programs read the clipboard more than once for one paste; the later
@@ -695,8 +697,11 @@ def beep(frequency: int, ms: int = 70) -> None:
 class Microphone:
     """Records into memory. Dictation lasts seconds, no file is needed."""
 
-    def __init__(self, index: int | None):
-        self._index = index
+    def __init__(self, name: str | None, legacy_index: int | None = None):
+        # The chosen microphone by name (None = the Windows default); the index
+        # is a choice saved by Ucho 0.2.0, see audio.find_device().
+        self._name = name
+        self._legacy_index = legacy_index
         self._pa = None
         self._stream = None
         self._blocks: list[bytes] = []
@@ -708,8 +713,8 @@ class Microphone:
         # so the "speak" signal is given only then; otherwise the first word is lost.
         self.ready = threading.Event()
 
-    def set_index(self, index: int | None) -> None:
-        self._index = index
+    def choose(self, name: str | None, legacy_index: int | None = None) -> None:
+        self._name, self._legacy_index = name, legacy_index
 
     def prepare(self) -> None:
         """Initializes PortAudio up front; at the first recording it would cost another 0.5 s."""
@@ -718,15 +723,18 @@ class Microphone:
         if self._pa is None:
             self._pa = audio.new_pyaudio()
 
-    def _device(self, p):
+    def _device(self, p) -> tuple[object, bool]:
+        """(device, found): `found` is False when the chosen microphone is not in `p`'s list."""
         from . import audio
 
-        if self._index is not None:
-            try:
-                return audio._from_info(p.get_device_info_by_index(self._index), loopback=False)
-            except Exception:
-                log.warning("Microphone with index %s unavailable - using the default", self._index)
-        return audio._from_info(p.get_default_input_device_info(), loopback=False)
+        mics, default, names = audio.microphones(p)
+        chosen = bool(self._name) or self._legacy_index is not None
+        device = audio.find_device(self._name, mics, None, self._legacy_index, names)
+        found = device is not None or not chosen
+        device = device or default
+        if device is None:
+            raise RuntimeError(t("No microphone found."))
+        return device, found
 
     def _close_pa(self) -> None:
         from . import audio
@@ -746,7 +754,16 @@ class Microphone:
             try:
                 if self._pa is None:
                     self._pa = audio.new_pyaudio()
-                device = self._device(self._pa)
+                device, found = self._device(self._pa)
+                if not found and attempt == 0:
+                    # PortAudio lists the devices present when it started: the
+                    # chosen microphone may have been plugged in since.
+                    self._close_pa()
+                    self._pa = audio.new_pyaudio()
+                    device, found = self._device(self._pa)
+                    if not found:
+                        log.warning("Chosen microphone %r is not connected - using the default",
+                                    self._name or self._legacy_index)
                 self._channels, self._rate = device.channels, device.rate
                 self._blocks = []
                 self.level = 0.0
@@ -815,7 +832,9 @@ class DictationController:
 
     def __init__(self, app):
         self.app = app
-        self.microphone = Microphone(app.settings["microphone_index"])
+        self.microphone = Microphone(app.settings["microphone_name"], app.settings["microphone_index"])
+        self._downloaded: dict[str, tuple[bool, float]] = {}
+        self._reported_missing: str | None = None
         self.recording = False
         self.finishing = False
         self.recording_start = 0.0
@@ -858,10 +877,25 @@ class DictationController:
     def model_key(self) -> tuple[str, str]:
         """(model, device) dictation uses; the transcription model when its own is missing."""
         model = self.settings.dictation_model()
-        if model != self.settings["model"] and not transcribe.model_downloaded(model):
-            log.warning("Dictation model %s is not downloaded - using %s", model, self.settings["model"])
+        if model != self.settings["model"] and not self._model_downloaded(model):
+            if self._reported_missing != model:
+                self._reported_missing = model
+                log.warning("Dictation model %s is not downloaded - using %s", model,
+                            self.settings["model"])
             model = self.settings["model"]
         return model, self.settings["device"]
+
+    def _model_downloaded(self, model: str) -> bool:
+        """transcribe.model_downloaded, checked on disk at most every MODEL_CHECK_S.
+
+        The Dictation screen asks for model_key() on every refresh (many times a second).
+        """
+        now = time.monotonic()
+        cached = self._downloaded.get(model)
+        if cached is None or now - cached[1] > MODEL_CHECK_S:
+            cached = (transcribe.model_downloaded(model), now)
+            self._downloaded[model] = cached
+        return cached[0]
 
     def status(self) -> tuple[str, str, str]:
         """(headline, pill style, hint) for the UI."""
@@ -929,7 +963,7 @@ class DictationController:
             self.target_window = dictation_target()
         except Exception:
             self.target_window = None
-        self.microphone.set_index(self.settings["microphone_index"])
+        self.microphone.choose(self.settings["microphone_name"], self.settings["microphone_index"])
         try:
             self.microphone.start()
         except Exception as error:

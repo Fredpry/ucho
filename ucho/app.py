@@ -681,6 +681,15 @@ class App(ctk.CTk):
 
     def _apply_devices(self, devices: dict) -> None:
         self.devices = devices
+        try:
+            from . import audio
+
+            if audio.migrate_device_choices(self.settings, devices):
+                self.settings.save()
+                log.info("Audio device choice saved by name: microphone %r, system %r",
+                         self.settings["microphone_name"], self.settings["system_name"])
+        except Exception:
+            log.exception("Could not convert the saved audio device choice")
         self.audio_ok = bool(devices.get("microphones") or devices.get("system"))
         if not self.audio_ok:
             log.warning("No audio devices found")

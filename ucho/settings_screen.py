@@ -396,15 +396,31 @@ class SettingsScreen(Screen):
         self.app.on_devices(self._fill_devices)
 
     def _fill_devices(self, devices: dict) -> None:
-        self._devices = devices
+        from . import audio
 
-        def fill(menu, items, selected_index):
-            labels = [t("(default)")] + [d.label for d in items]
-            menu.configure(values=labels)
-            menu.set(next((d.label for d in items if d.index == selected_index), t("(default)")))
+        def fill(menu, items, name_key, index_key) -> dict[str, str | None]:
+            """Fills a menu; returns {label: device name} (None = the Windows default)."""
+            name = self.settings[name_key]
+            chosen = audio.find_device(name, items, None, self.settings[index_key],
+                                       devices.get("names_by_index"))
+            labels: dict[str, str | None] = {t("(default)"): None}
+            for dev in items:
+                labels.setdefault(dev.label, dev.name)
+            selected = chosen.label if chosen else t("(default)")
+            if chosen is None and name:
+                # Chosen earlier but not plugged in now: keep the choice visible, so
+                # that changing the other menu does not quietly reset it.
+                selected = t("{device} (not connected)", device=name)
+                labels[selected] = name
+            menu.configure(values=list(labels))
+            menu.set(selected)
+            return labels
 
-        fill(self.microphone, devices.get("microphones", []), self.settings["microphone_index"])
-        fill(self.system, devices.get("system", []), self.settings["system_index"])
+        self._device_labels = {
+            "microphone": fill(self.microphone, devices.get("microphones", []),
+                               "microphone_name", "microphone_index"),
+            "system": fill(self.system, devices.get("system", []), "system_name", "system_index"),
+        }
         if devices.get("error"):
             self.audio_label.configure(text=t("Audio device error: {error}", error=devices["error"]),
                                        text_color=C.warning)
@@ -419,14 +435,13 @@ class SettingsScreen(Screen):
                                        text_color=C.text_muted)
 
     def _save_devices(self) -> None:
-        devices = getattr(self, "_devices", {})
-
-        def index_for(menu, items):
-            selected = menu.get()
-            return next((d.index for d in items if d.label == selected), None)
-
-        self.settings["microphone_index"] = index_for(self.microphone, devices.get("microphones", []))
-        self.settings["system_index"] = index_for(self.system, devices.get("system", []))
+        labels = getattr(self, "_device_labels", None)
+        if not labels:  # the device list has not arrived yet
+            return
+        for key, menu in (("microphone", self.microphone), ("system", self.system)):
+            self.settings[f"{key}_name"] = labels[key].get(menu.get())
+            # A name replaces the index saved by Ucho 0.2.0.
+            self.settings[f"{key}_index"] = None
         self.settings.save()
 
     # --- summary ------------------------------------------------------------------------
