@@ -88,7 +88,7 @@ class SettingsScreen(Screen):
         self.grid_rowconfigure(1, weight=1)
         top, _slot = header(self, t("Settings"))
         top.grid(row=0, column=0, sticky="ew", padx=PAD, pady=(PAD - 4, 10))
-        self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        self.scroll = ui.scrollable(self)
         self.scroll.grid(row=1, column=0, sticky="nsew", padx=(PAD - 8, 8), pady=(0, 8))
         self.scroll.grid_columnconfigure(0, weight=1)
         self._sections = 0

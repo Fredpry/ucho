@@ -37,7 +37,10 @@ META_FILE = "meta.json"
 # On silence and noise Whisper produces stock phrases from film subtitles.
 # We drop the most common ones so they do not litter the transcript. The
 # patterns match Polish and English speech, so they stay in both languages.
-_HALLUCINATIONS = [
+# The closing lines of subtitles and videos (`_OUTROS`) also get appended after
+# the last real sentence, so they are cut from the end of a text as well
+# (`strip_outro`).
+_OUTROS = [
     r"^napisy (stworzone przez|robione przez|wykonane przez)",
     r"amara\.?org",
     r"^zapraszam(y)? (do subskrypcji|na kolejny)",
@@ -49,14 +52,18 @@ _HALLUCINATIONS = [
     r"^transcri(pt|ption) by",
     r"^thanks? for watching",
     r"^please subscribe",
+    r"^napisy:",
+]
+_HALLUCINATIONS = _OUTROS + [
     # Whisper puts these phrases in place of silence, also in Polish recordings.
     r"^(thank you|thanks|you|bye)[.!]?$",
     # A lone filler with no sentence around it is almost always a noise artifact.
     r"^(so|um|uh+|hmm+|mm+|ah+|oh+|eh+|yeah|no|tak|no tak)[.,!?]?$",
-    r"^napisy:",
     r"^\W*$",
 ]
 _HALLUCINATION_RES = [re.compile(p, re.IGNORECASE) for p in _HALLUCINATIONS]
+_OUTRO_RES = [re.compile(p, re.IGNORECASE) for p in _OUTROS]
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?…])\s+")
 
 # Minimum segment duration; shorter ones are usually artifacts.
 _MIN_DURATION = 0.15
@@ -91,11 +98,27 @@ def is_hallucination(text: str) -> bool:
     return any(pattern.search(clean_text) for pattern in _HALLUCINATION_RES)
 
 
+def strip_outro(text: str) -> str:
+    """Cuts subtitle closing lines ("Dziękuję za uwagę.") from the end of a text.
+
+    `is_hallucination` catches them only as a whole utterance. A dictation is
+    one text for the whole recording, so "Spotkanie jutro o dziesiątej.
+    Dziękuję za uwagę." went through with the invented ending. Only `_OUTROS`
+    are cut here: a final "Dziękuję." or "Tak." can be what the user said.
+    """
+    text = text.rstrip()
+    while True:
+        breaks = [m.end() for m in _SENTENCE_BREAK.finditer(text)]
+        if not breaks or not any(p.search(text[breaks[-1]:]) for p in _OUTRO_RES):
+            return text
+        text = text[: breaks[-1]].rstrip()
+
+
 def clean(segments: list[Segment]) -> list[Segment]:
     """Drops empty segments, known hallucinations and direct repetitions."""
     result: list[Segment] = []
     for seg in segments:
-        text = " ".join(seg.text.split())
+        text = strip_outro(" ".join(seg.text.split()))
         if not text or is_hallucination(text):
             continue
         if seg.end - seg.start < _MIN_DURATION:

@@ -4,7 +4,7 @@ import json
 
 from ucho import i18n
 from ucho.merge import (Segment, as_markdown, as_srt, as_text, clean, format_hms, merge_tracks,
-                        save_results, slug)
+                        save_results, slug, strip_outro)
 
 
 def test_clean_drops_whisper_hallucinations():
@@ -16,6 +16,25 @@ def test_clean_drops_whisper_hallucinations():
     ]
     result = clean(segments)
     assert [s.text for s in result] == ["Zaczynamy od budżetu na czwarty kwartał."]
+
+
+def test_strip_outro_cuts_closing_lines_from_the_end():
+    assert strip_outro("Spotkanie jutro o dziesiątej. Dziękuję za uwagę.") ==         "Spotkanie jutro o dziesiątej."
+    assert strip_outro("Wyślij raport! Dziekuje za uwage. Napisy stworzone przez Amara.org ") ==         "Wyślij raport!"
+    assert strip_outro("Send the report. Thanks for watching!") == "Send the report."
+
+
+def test_strip_outro_keeps_what_the_user_could_have_said():
+    # A final plain "Dziękuję." or "Tak." can be real, and so can the phrase
+    # inside a sentence or as the whole text (that case is is_hallucination's).
+    for text in ("Prześlij to do piątku. Dziękuję.", "Czy jutro? Tak.",
+                 "Powiedział: dziękuję za uwagę, i wyszedł.", "Dziękuję za uwagę."):
+        assert strip_outro(text) == text
+
+
+def test_clean_strips_an_outro_appended_to_a_segment():
+    result = clean([Segment(0.0, 5.0, "Budżet zamykamy w piątek. Dziękuję za uwagę.", "me")])
+    assert [s.text for s in result] == ["Budżet zamykamy w piątek."]
 
 
 def test_clean_drops_too_short_and_repeated():

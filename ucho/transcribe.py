@@ -26,7 +26,8 @@ import soundfile as sf
 
 from . import config
 from .i18n import t
-from .merge import SPEAKER_ME, SPEAKER_MEETING, Segment, is_hallucination, merge_tracks
+from .merge import (SPEAKER_ME, SPEAKER_MEETING, Segment, is_hallucination, merge_tracks,
+                    strip_outro)
 
 log = logging.getLogger(__name__)
 
@@ -711,7 +712,7 @@ def recognize_dictation(engine: Engine, recording: np.ndarray, language_code: st
         chunks = _chunks(result)
         text = " ".join(str(getattr(c, "text", "")) for c in chunks) if chunks else str(result)
 
-    text = re.sub(r"\s+", " ", text).strip()
+    text = strip_outro(re.sub(r"\s+", " ", text).strip())
     if is_hallucination(text):
         return ""
     return apply_dictionary(text, dictionary)

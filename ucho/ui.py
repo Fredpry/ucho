@@ -11,6 +11,7 @@ focus color shows where you are (design/README.md, "Focus").
 from __future__ import annotations
 
 import logging
+import sys
 import time
 import tkinter
 from pathlib import Path
@@ -188,6 +189,22 @@ def segmented_focus(segmented: ctk.CTkSegmentedButton, command: Callable[[str], 
 def logical(widget, pixels: float) -> int:
     """Physical pixels (e.g. from a <Configure> event) -> customtkinter's logical pixels."""
     return int(pixels / ctk.ScalingTracker.get_widget_scaling(widget))
+
+
+# customtkinter scrolls by `delta / 6` units on Windows with a 1 px unit, so
+# one wheel notch (delta 120) moved a page by 20 px, under one line of
+# settings. Windows apps move about three lines (~100 px at 100 %); 5 px per
+# unit gives that, scaled with the DPI like the rest of the window.
+_WHEEL_UNIT_PX = 5
+
+
+def scrollable(master, **kwargs) -> ctk.CTkScrollableFrame:
+    """A transparent `CTkScrollableFrame` that scrolls at the usual wheel speed."""
+    frame = ctk.CTkScrollableFrame(master, fg_color="transparent", corner_radius=0, **kwargs)
+    if sys.platform == "win32":
+        unit = max(1, round(_WHEEL_UNIT_PX * ctk.ScalingTracker.get_widget_scaling(frame)))
+        frame._parent_canvas.configure(yscrollincrement=unit)  # noqa: SLF001
+    return frame
 
 
 def label(master, text: str = "", size: int = theme.SM, weight: str = "normal",

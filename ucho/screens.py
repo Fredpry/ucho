@@ -424,7 +424,7 @@ class RecordingsScreen(Screen):
         self.query.bind("<KeyRelease>", lambda _e: self._schedule(), add=True)
         self.query.bind("<Escape>", lambda _e: (self.query.delete(0, "end"), self._schedule()), add=True)
 
-        self.list = ctk.CTkScrollableFrame(self, fg_color="transparent", corner_radius=0)
+        self.list = ui.scrollable(self)
         self.list.grid(row=2, column=0, sticky="nsew", padx=(PAD - 6, PAD - 12), pady=(0, PAD - 10))
         self.list.grid_columnconfigure(0, weight=1)
         self._after = None
