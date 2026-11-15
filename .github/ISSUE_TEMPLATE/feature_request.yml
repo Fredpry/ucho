@@ -1,0 +1,19 @@
+name: Feature request
+description: An idea for something Ucho could do
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        You can write in English or Polish. Ucho stays offline: ideas that send audio, transcripts or usage data anywhere are out of scope (see `PRIVACY.md`).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would it solve
+      description: When do you run into it, and what do you do today instead?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind

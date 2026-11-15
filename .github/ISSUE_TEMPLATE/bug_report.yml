@@ -1,0 +1,41 @@
+name: Bug report
+description: Something in Ucho does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! You can write in English or Polish.
+
+        **Do not attach real recordings, transcripts or names of people from meetings.** Describe what happened in your own words, or reproduce it on a test recording of your own voice.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open Settings
+        2. ...
+  - type: input
+    id: version
+    attributes:
+      label: Ucho version
+      placeholder: v0.2.0
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Hardware and model
+      description: Output of `.\.venv\Scripts\python.exe -m ucho.hardware` in the app folder, plus the model and device chosen in Settings → Hardware.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The last lines of `ucho.log` in the app folder around the problem. The log holds no transcript text, but read it before pasting.
+      render: text
