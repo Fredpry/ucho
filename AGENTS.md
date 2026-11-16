@@ -37,6 +37,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/audio.py` | Two-track recording (PyAudioWPatch WASAPI loopback), resampling to 16 kHz, incremental FLAC |
 | `ucho/transcribe.py` | Whisper via OpenVINO GenAI: silence cutting, per-chunk language detection restricted to `config.LANGUAGES`, GPU to CPU fallback; `create_engine` picks Whisper or Parakeet for a model id |
 | `ucho/parakeet.py` | Optional Parakeet backend (sherpa-onnx, CPU only, `install.ps1 -WithParakeet`): same surface as `transcribe.Engine`, Whisper-shaped results, splits long chunks into 20 s pieces. Offered only when `sherpa_onnx` is installed |
+| `ucho/diarize.py` | Optional speaker detection inside a track (`install.ps1 -WithSpeakers`): sherpa-onnx diarization in a short-lived worker process, largest-overlap assignment to Whisper segments, codes `meeting:N`/`me:N`; off by default |
 | `ucho/merge.py` | `Segment`, speaker codes and labels, merging tracks, hallucination filter, `transcript.md/.srt/.txt`, `meta.json` |
 | `ucho/session.py` | The one reader of session folders, for the app and the MCP server; maps v0.1 Polish file names and `meta.json` keys to the current ones |
 | `ucho/summary.py` | Optional LLM summary: JSON schema output, map-reduce for long meetings, name and date filters, folder naming |
@@ -44,7 +45,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/tray.py`, `ucho/winshell.py`, `ucho/icon.py` | Tray icon; taskbar AppUserModelID, Jump List, progress and autostart via COM/registry; the ear icon drawn from the design mark |
 | `ucho_mcp/server.py` | Read-only stdio MCP server, standard library only |
 | `tests/` | pytest, no models or audio needed |
-| `tools/screenshots.py`, `tools/benchmark_engine.py` | Screenshots of the real windows on synthetic data (`docs/screens`); dictation latency during a transcription and the TTS set for WER, on synthetic speech |
+| `tools/screenshots.py`, `tools/benchmark_engine.py`, `tools/benchmark_diarization.py` | Screenshots of the real windows on synthetic data (`docs/screens`); dictation latency during a transcription and the TTS set for WER, on synthetic speech; speaker-detection benchmark (DER and per-utterance speaker accuracy) on synthetic multi-voice TTS meetings |
 
 ## Change freely
 
@@ -57,6 +58,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 
 - `transcribe.py` silence thresholds and language detection. Restricting `lang_to_id` fixed 8 of 8 bad chunks; `suppress_tokens` fixed 1 of 8. Change only after testing on a real recording. Live meeting transcription (`live_meeting.py`) cuts with the same functions (`split_into_chunks`, `ranges_at_boundaries`, `boundaries_from_energy`); keep its tests green so live results stay reusable.
 - `summary.py` filters `_names`, `_name_in_text`, `_without_invented_dates`. They exist because prompts alone did not work. Whole-word comparison is deliberate.
+- `diarize.py` and speaker names: diarization only relabels speaker codes (`meeting:N`, `me:N`) and never changes segment text or start/end times; names of numbered speakers are dropped on "Transcribe again" because a new run may number voices differently.
 - Model memory order: Whisper is released before the LLM loads; both must never sit on the iGPU at once. `engine.exclusive()` enforces it; run anything that loads a model through the engine.
 - `engine.py`: every OpenVINO call runs on the engine thread. Long work must be a step generator, or a dictation waits for all of it.
 - PortAudio init and terminate go through `audio.new_pyaudio()` / `audio.close_pyaudio()` (one lock): two threads creating PyAudio at once crashed the process.

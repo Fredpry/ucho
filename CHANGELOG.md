@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Speaker detection inside a track** (#15): optional, experimental and off by default (`ucho/diarize.py`). After the transcription, one pass per track in a short-lived worker process tells the voices inside each track apart with `sherpa-onnx` (`pyannote/segmentation-3.0` + 3D-Speaker `ERes2Net` on VoxCeleb, CPU only) and relabels each Whisper segment to the voice with the largest time overlap (`meeting:1`, `meeting:2`, … shown as "Speaker 1", "Speaker 2", or `me:1`, `me:2`, … as "Microphone 1", "Microphone 2") without changing text or timestamps. Needs `install.ps1 -WithSpeakers`; turning it on in Settings → Transcription → *Speakers* (new key `speaker_detection`) downloads the two models (~33 MB, pinned revisions). On the transcript screen, clicking a speaker button or a speaker label in the text renames that speaker (new `meta.json` key `speaker_names`), rewrites `transcript.md/.srt/.txt`, and passes user-given names to search, the MCP server (`list_meetings`, `get_transcript`, `search_transcripts`) and the optional summary as known participants; *Transcribe again* drops names of numbered speakers and keeps names of Me/Meeting. Measured on 6-minute synthetic multi-voice meetings: 96 to 100 % of utterances get the right speaker with 2 to 3 distinct voices, about 90 % with 4 to 5 voices or two very similar ones, and 69 % for two similar voices in a noisy narrow-band call. Runtime is about 4 to 6 minutes of CPU time per hour of a track (the transcript is saved after this pass), and no voice profiles or embeddings are kept after the pass. Details in `docs/benchmarks.md`.
+- `tools/benchmark_diarization.py`: reproducible offline speaker-detection benchmark on synthetic multi-voice meetings built from Windows TTS voices (DER with and without a 0.25 s collar, per-utterance speaker attribution accuracy, narrow-band noisy call variant).
+
 ## v0.3.0 (2026-11-16)
 
 ### Added

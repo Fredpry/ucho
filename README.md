@@ -21,6 +21,7 @@ Records Teams, Zoom and Meet calls and your dictation, and turns them into text 
 |---|---|
 | <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>R</kbd> | record a meeting, from any app |
 | <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Space</kbd> | dictate wherever your cursor is |
+| **Speakers** | "Me" and "Meeting" from two tracks; optional experimental speaker detection inside a track ("Speaker 1", "Speaker 2"…) and naming speakers by clicking them on the transcript |
 | **MCP** | Claude Code, Cursor or Codex read your transcripts |
 | **1 h → 4–7 min** | to transcribe an hour of talk on Intel Arc graphics ([measured](docs/benchmarks.md)) |
 
@@ -47,6 +48,7 @@ Windows 10 or 11, 16 GB RAM recommended, about 3 GB of disk (8 GB with summaries
 - From PowerShell instead of a double-click, in the app folder: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
 - `-WithSummary`: local summaries (Qwen model, about 5 GB). Off by default.
 - `-WithParakeet`: an extra NVIDIA Parakeet engine, fast on the CPU alone. Weaker with English phrases inside Polish sentences. Choose it in Settings → Hardware.
+- `-WithSpeakers`: the optional `sherpa-onnx` package for speaker detection inside a track (Settings → Transcription → Speakers; two small models, ~33 MB, downloaded when you turn it on).
 - `-Force`: install inside a OneDrive folder without asking. Not recommended: models, settings and the log with your dictated text would sync to the cloud.
 - Options also work with the double-click file: `install.cmd -WithSummary`.
 - Every run is logged to `install.log` in the app folder. Ucho is not code-signed yet, so Windows may warn before running `Ucho-Setup.exe` or `install.cmd`.
