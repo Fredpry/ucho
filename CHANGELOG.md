@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Live dictation** (#19): a dictation is recognized while you speak. The audio is cut at pauses (0.6 s, pieces of 2 to 20 s) and each piece goes to the engine at once, so after the hotkey only the last piece is left: a 60 s dictation is pasted about 0.8 s after the stop instead of about 8 s (Arc GPU, synthetic speech). The text recognized so far shows in the dictation window. The language of the first piece is kept for the whole dictation, and the text so far is passed to Whisper as the prompt. The closing-line cut and the hallucination filter run once on the joined text; pasting, the target window and the clipboard rules are unchanged. If a piece fails, the whole recording is recognized the old way. WER on the synthetic dictation set: 1.9 % live vs 2.7 % whole. On by default; Settings → Dictation → *Recognize while speaking* (new key `dictation_live`). Numbers in `docs/benchmarks.md`.
+- `tools/benchmark_engine.py --live [--live-model M] [--live-runs N] [--live-during-meeting]`: WER whole vs live, and the time from the stop to the text.
+
 ## v0.2.1 (2026-11-16)
 
 ### Added

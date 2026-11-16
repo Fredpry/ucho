@@ -14,6 +14,8 @@ Whisper invents text on silence and noise: Polish recordings produce "Napisy stw
 
 Dictation additionally shortens pauses longer than one second, because a long pause in the middle of a sentence is the main source of an invented "Dziękuję." at the end.
 
+Live dictation (`ucho/live.py`, on by default) recognizes a dictation while it is spoken. Every 250 ms the new microphone audio goes to a cutter that ends a piece at a 0.6 s pause (pieces of at least 2 s, so a lone "Tak." stays with the next sentence; at most 20 s, then the cut goes to the quietest spot). Each piece is a short dictation-priority job on the engine, so it also fits between meeting chunks. The language detected on the first piece is kept for the rest, and the end of the text so far goes to Whisper as the prompt (`initial_prompt`). After the hotkey only the last piece is left to recognize. The closing-line cut and the hallucination filter run once, on the joined text: per piece they would drop a real "Tak." or the end of a piece. If a piece fails, the whole recording is recognized in one call as before.
+
 ## 3. Language detection on short chunks, restricted to your languages
 
 Whisper detects the language once per processed chunk. Feed it a whole bilingual meeting and the second language gets translated into the first or dropped. So in `Auto` mode the recording is cut at silences into ~12 s chunks, each with its own detection. With a forced language, chunks are up to 5 minutes long, which gives the model more context and slightly better results.

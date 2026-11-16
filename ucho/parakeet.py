@@ -149,8 +149,9 @@ class Engine:
         gc.collect()
         log.info("Parakeet released")
 
-    def generate(self, audio: np.ndarray, language: str | None = None) -> Result:
-        """Recognizes `audio` (16 kHz mono float32). `language` is ignored (see module docstring)."""
+    def generate(self, audio: np.ndarray, language: str | None = None,
+                 prompt: str | None = None) -> Result:
+        """Recognizes `audio` (16 kHz mono float32). `language` (see module docstring) and `prompt` are ignored."""
         from .transcribe import split_at_silence
 
         self.load()

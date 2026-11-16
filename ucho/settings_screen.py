@@ -359,6 +359,11 @@ class SettingsScreen(Screen):
             m, t("Keep the dictation model loaded"), self.settings["dictation_preload"],
             self._preload), t("Off: the model loads at the first dictation and frees memory "
                               "after two idle minutes."))
+        s.row(t("While speaking"), lambda m: ui.switch(
+            m, t("Recognize while speaking"), self.settings["dictation_live"],
+            lambda v: self._save("dictation_live", v)),
+            t("The text is recognized in pieces during the dictation, so it is pasted right after "
+              "you stop. Off: the whole dictation is recognized after the stop."))
         modes = {t(v): k for k, v in MODE_LABELS.items()}
         s.row(t("Insert text by"), lambda m: ui.option_menu(
             m, list(modes), t(MODE_LABELS.get(self.settings["dictation_mode"], MODE_LABELS["paste"])),

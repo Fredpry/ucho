@@ -77,6 +77,33 @@ Checked before accepting the Dependabot update, same laptop, GPU, same 20 synthe
 
 The text is identical, so the update was accepted (with numpy 2.5.4).
 
+## Live dictation (#19)
+
+Recognizing a dictation in pieces while it is spoken (`ucho/live.py`), compared with the old way (the whole recording in one call after the hotkey). `tools/benchmark_engine.py --live` on synthetic Polish speech from *Microsoft Paulina*: the 20 dictation sentences as one 62.8 s dictation (13 sentences) and as four dictations of 5 sentences, with the voice's 0.7 s pause between sentences. Language "auto", as in the app. Core Ultra 7 258V, Arc 140V GPU, OpenVINO GenAI 2026.4.1, 16.11.2026.
+
+| Model | WER whole (old) | WER live | WER live without prompt | Pieces (62.8 s) |
+|---|---|---|---|---|
+| large-v3 FP16 | 2.7 % | 1.9 % | 1.9 % | 13 + empty tail |
+| large-v3 INT8 | 2.7 % | 1.9 % | 1.9 % | 13 + empty tail |
+
+262 reference words in all. The only difference: "o dziesiątej" stays words in a piece and becomes "o 10" in the whole recording; the rest of the text is identical. Each sentence alone (the 20-sentence set) is shorter than the first cut, so live and whole give the same text there by construction. The prompt (`initial_prompt`, the end of the text so far) changed nothing on this clean speech; it stays on for real speech, where a cut can fall inside a sentence.
+
+Time from the stop to the text for the 62.8 s dictation, stopped 0.25 s after the last word (3 runs, the model loaded):
+
+| Model | Old (whole after the stop) | Live |
+|---|---|---|
+| large-v3 FP16 | 7.9 s median, 8.6 s max | 0.83 s median, 1.20 s max |
+| large-v3 INT8 | 8.4 s median, 10.2 s max | 0.83 s median, 0.84 s max |
+
+After the stop only the last sentence is left (about 1 s of work). With a meeting being transcribed at the same time (8 minutes of synthetic speech, INT8, Auto mode), the live dictation was ready 1.03 s after the stop, and the meeting took 87.3 s instead of 81.3 s: it waits only for the pieces, each about 1 s of work. A first run on the same day measured 18 to 25 s for the old way on 62.8 s of audio (live 0.4 to 1.7 s); the GPU was probably busy with something else then, and the numbers above are from a repeat.
+
+Limits: the synthetic voice pauses clearly between sentences, so every cut fell between sentences. Real speech has shorter or no pauses (then a piece is cut at 20 s, at the quietest spot), hesitations and background noise. Check a few real dictations before relying on these numbers.
+
+```powershell
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --live --live-during-meeting --meeting-min 8
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --live --live-model OpenVINO/whisper-large-v3-int8-ov
+```
+
 ## Parakeet TDT 0.6B v3 as an optional backend (v0.2)
 
 Plan v0.2, W6: is NVIDIA's Parakeet TDT 0.6B v3 (25 European languages, Polish among them), run through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), good enough to offer as an alternative to Whisper? Measure first; Whisper stays the default whatever the result.

@@ -187,6 +187,7 @@ class Engine:
         self.device = device
         self._pipe = None
         self._lang_to_id: dict[str, int] | None = None
+        self._supports_prompt = True
 
     def load(self) -> None:
         if self._pipe is not None:
@@ -257,24 +258,32 @@ class Engine:
         gc.collect()
         log.info("Whisper pipeline released")
 
-    def generate(self, audio: np.ndarray, language: str | None):
+    def generate(self, audio: np.ndarray, language: str | None, prompt: str | None = None):
         kwargs = {"task": "transcribe", "return_timestamps": True}
         if language:
             kwargs["language"] = language
         elif self._lang_to_id:
             kwargs["lang_to_id"] = self._lang_to_id
+        if prompt and self._supports_prompt:
+            kwargs["initial_prompt"] = prompt
 
-        try:
-            return self._call(audio, kwargs)
-        except TypeError:
-            if "lang_to_id" not in kwargs:
+        while True:
+            try:
+                return self._call(audio, kwargs)
+            except TypeError:
+                if "initial_prompt" in kwargs:
+                    log.warning("openvino-genai does not accept initial_prompt - running without prompt")
+                    self._supports_prompt = False
+                    del kwargs["initial_prompt"]
+                    continue
+                if "lang_to_id" in kwargs:
+                    # An older GenAI release does not know this parameter - carry on
+                    # without narrowing instead of failing the whole transcription.
+                    log.warning("openvino-genai does not accept lang_to_id - auto-detection without narrowing")
+                    self._lang_to_id = None
+                    del kwargs["lang_to_id"]
+                    continue
                 raise
-            # An older GenAI release does not know this parameter - carry on
-            # without narrowing instead of failing the whole transcription.
-            log.warning("openvino-genai does not accept lang_to_id - auto-detection without narrowing")
-            self._lang_to_id = None
-            del kwargs["lang_to_id"]
-            return self._call(audio, kwargs)
 
     def _call(self, audio: np.ndarray, kwargs: dict):
         # Newer releases accept an ndarray, older ones need a list of floats.
@@ -682,28 +691,53 @@ def apply_dictionary(text: str, dictionary: dict | None) -> str:
     return text
 
 
-def recognize_dictation(engine: Engine, recording: np.ndarray, language_code: str,
-                        dictionary: dict | None = None) -> str:
-    """One short in-memory recording -> text, in a single model call."""
-    if recording.size < DICTATION_MIN_S * SAMPLE_RATE:
-        return ""
+def _detected_language(result) -> str | None:
+    """Extracts a forced language code from `result.languages`, or None."""
+    try:
+        languages = getattr(result, "languages", None)
+        if not languages:
+            return None
+        first = str(languages[0]).strip()
+    except Exception:
+        return None
+    for code, token in config.LANGUAGES.items():
+        if token is not None and first in (code, token):
+            return code
+    return None
+
+
+def recognize_piece(engine: Engine, audio: np.ndarray, language_code: str,
+                    prompt: str | None = None) -> tuple[str, str | None]:
+    """Recognizes one dictation piece -> (raw text, detected language code or None).
+
+    Applies the silence/length gates and pause shortening without loading the
+    model on silence, and returns collapsed text without outro stripping,
+    hallucination filtering or dictionary replacement (those run once on the
+    joined dictation text via `finish_text`).
+    """
+    if audio.size < DICTATION_MIN_S * SAMPLE_RATE:
+        return "", None
     # On silence Whisper invents sentences; better to insert nothing.
-    if peak_rms(recording) < SPEECH_RMS_THRESHOLD:
+    if peak_rms(audio) < SPEECH_RMS_THRESHOLD:
         log.info("Recording skipped - silence only")
-        return ""
+        return "", None
 
     # Pauses for thinking are the main source of invented "Dziękuję." and of
     # lost fragments; see shorten_pauses.
-    before = recording.size
-    recording = shorten_pauses(recording)
-    if recording.size < before:
+    before = audio.size
+    audio = shorten_pauses(audio)
+    if audio.size < before:
         log.info("Pauses shortened: %.1f s -> %.1f s",
-                 before / SAMPLE_RATE, recording.size / SAMPLE_RATE)
-    if recording.size < DICTATION_MIN_S * SAMPLE_RATE:
-        return ""
+                 before / SAMPLE_RATE, audio.size / SAMPLE_RATE)
+    if audio.size < DICTATION_MIN_S * SAMPLE_RATE:
+        return "", None
 
     engine.load()
-    result = engine.generate(recording, config.LANGUAGES.get(language_code))
+    language = config.LANGUAGES.get(language_code)
+    if prompt:
+        result = engine.generate(audio, language, prompt=prompt)
+    else:
+        result = engine.generate(audio, language)
 
     texts = getattr(result, "texts", None)
     if texts:
@@ -712,7 +746,21 @@ def recognize_dictation(engine: Engine, recording: np.ndarray, language_code: st
         chunks = _chunks(result)
         text = " ".join(str(getattr(c, "text", "")) for c in chunks) if chunks else str(result)
 
-    text = strip_outro(re.sub(r"\s+", " ", text).strip())
-    if is_hallucination(text):
+    text = re.sub(r"\s+", " ", text).strip()
+    detected = language_code if language is not None else _detected_language(result)
+    return text, detected
+
+
+def finish_text(text: str, dictionary: dict | None = None) -> str:
+    """Applies final dictation cleanup: outro removal, hallucination filter, dictionary."""
+    clean = strip_outro(re.sub(r"\s+", " ", text).strip())
+    if is_hallucination(clean):
         return ""
-    return apply_dictionary(text, dictionary)
+    return apply_dictionary(clean, dictionary)
+
+
+def recognize_dictation(engine: Engine, recording: np.ndarray, language_code: str,
+                        dictionary: dict | None = None) -> str:
+    """One short in-memory recording -> text, in a single model call."""
+    text, _language = recognize_piece(engine, recording, language_code)
+    return finish_text(text, dictionary)

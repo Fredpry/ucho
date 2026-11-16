@@ -249,6 +249,8 @@ DEFAULTS = {
     # Keep the dictation model loaded so a dictation starts at once. Off: it
     # loads on the first dictation (a few seconds) and frees memory otherwise.
     "dictation_preload": True,
+    # Recognize a dictation in pieces while it is spoken (ucho/live.py), so the text is ready right after the stop.
+    "dictation_live": True,
     # Names that Whisper keeps getting wrong. Key = what it recognized
     # (case-insensitive, whole words), value = the correct form.
     "dictation_dictionary": {

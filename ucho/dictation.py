@@ -40,7 +40,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import config, transcribe
+from . import config, live, transcribe
 from .i18n import t
 
 log = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ SAMPLE_RATE = 16_000
 # People press the hotkey just as they finish the last word; without this
 # tail the end of the utterance is sometimes cut off.
 TAIL_S = 0.25
+LIVE_TICK_MS = 250
 
 
 # --- WinAPI: clipboard and keyboard -------------------------------------------------
@@ -713,6 +714,18 @@ class Microphone:
         # Set at the first audio block. Opening the stream takes about 0.35 s,
         # so the "speak" signal is given only then; otherwise the first word is lost.
         self.ready = threading.Event()
+        self._reset_take()
+
+    def _reset_take(self) -> None:
+        self._taken_blocks = 0
+        self._resampler = None
+        self._taken_parts: list[np.ndarray] = []
+        self._taken_samples = 0
+        self._take_used = False
+
+    @property
+    def taken_samples(self) -> int:
+        return self._taken_samples
 
     def choose(self, name: str | None, legacy_index: int | None = None) -> None:
         self._name, self._legacy_index = name, legacy_index
@@ -767,6 +780,7 @@ class Microphone:
                     log.warning("Chosen microphone %r is not connected - using the default", choice)
                 self._channels, self._rate = device.channels, device.rate
                 self._blocks = []
+                self._reset_take()
                 self.level = 0.0
                 self.ready.clear()
                 self._stream = self._pa.open(
@@ -796,6 +810,40 @@ class Microphone:
             pass
         return (None, pyaudio.paContinue)
 
+    def _blocks_to_mono(self, blocks: list[bytes]) -> np.ndarray:
+        if not blocks:
+            return np.zeros(0, dtype=np.float32)
+        data = b"".join(blocks)
+        if not data:
+            return np.zeros(0, dtype=np.float32)
+        signal = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+        if self._channels > 1:
+            n = len(signal) // self._channels * self._channels
+            signal = signal[:n].reshape(-1, self._channels).mean(axis=1)
+        return np.ascontiguousarray(signal, dtype=np.float32)
+
+    def take(self) -> np.ndarray:
+        """Returns 16 kHz mono float32 audio recorded since the previous take()."""
+        self._take_used = True
+        end = len(self._blocks)
+        if end <= self._taken_blocks:
+            return np.zeros(0, dtype=np.float32)
+        new_blocks = self._blocks[self._taken_blocks:end]
+        self._taken_blocks = end
+        signal = self._blocks_to_mono(new_blocks)
+        if self._rate != SAMPLE_RATE and signal.size:
+            if self._resampler is None:
+                import soxr
+
+                self._resampler = soxr.ResampleStream(
+                    self._rate, SAMPLE_RATE, 1, dtype="float32", quality="HQ")
+            signal = np.ascontiguousarray(
+                self._resampler.resample_chunk(signal, last=False), dtype=np.float32)
+        if signal.size:
+            self._taken_parts.append(signal)
+            self._taken_samples += signal.size
+        return signal
+
     def stop(self) -> np.ndarray:
         stream, self._stream = self._stream, None
         if stream is not None:
@@ -804,16 +852,36 @@ class Microphone:
                     method()
                 except Exception:
                     pass
-        data, self._blocks = b"".join(self._blocks), []
-        signal = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
-        if self._channels > 1:
-            n = len(signal) // self._channels * self._channels
-            signal = signal[:n].reshape(-1, self._channels).mean(axis=1)
-        if self._rate != SAMPLE_RATE and signal.size:
-            import soxr
+        if not self._take_used:
+            data, self._blocks = b"".join(self._blocks), []
+            signal = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+            if self._channels > 1:
+                n = len(signal) // self._channels * self._channels
+                signal = signal[:n].reshape(-1, self._channels).mean(axis=1)
+            if self._rate != SAMPLE_RATE and signal.size:
+                import soxr
 
-            signal = soxr.resample(signal, self._rate, SAMPLE_RATE, quality="HQ")
-        return np.ascontiguousarray(signal, dtype=np.float32)
+                signal = soxr.resample(signal, self._rate, SAMPLE_RATE, quality="HQ")
+            self._reset_take()
+            return np.ascontiguousarray(signal, dtype=np.float32)
+
+        rest_blocks = self._blocks[self._taken_blocks:]
+        self._blocks = []
+        rest = self._blocks_to_mono(rest_blocks)
+        if self._rate != SAMPLE_RATE and (rest.size or self._resampler is not None):
+            if self._resampler is None:
+                import soxr
+
+                self._resampler = soxr.ResampleStream(
+                    self._rate, SAMPLE_RATE, 1, dtype="float32", quality="HQ")
+            rest = np.ascontiguousarray(
+                self._resampler.resample_chunk(rest, last=True), dtype=np.float32)
+        parts = [*self._taken_parts, rest]
+        self._reset_take()
+        non_empty = [p for p in parts if p.size]
+        if not non_empty:
+            return np.zeros(0, dtype=np.float32)
+        return np.ascontiguousarray(np.concatenate(non_empty), dtype=np.float32)
 
     @property
     def recording(self) -> bool:
@@ -844,8 +912,11 @@ class DictationController:
         self.model_error = ""
         self.model_device = ""
         self.last_text = ""
+        self.live_text = ""  # text recognized so far in the current live dictation
         self.last_seconds = 0.0
         self.target_window: int | None = None  # foreground window when the dictation started
+        self._live: live.LiveDictation | None = None
+        self._shown: live.LiveDictation | None = None
         self._message: tuple[str, str] | None = None
         self._message_until = 0.0
         self._listeners: list[Callable[[str, object], None]] = []
@@ -979,12 +1050,55 @@ class DictationController:
         log.info("Dictation from: %s", self.microphone.name)
         self.recording = True
         self.recording_start = time.monotonic()
+        self.live_text = ""
+        self._live = self._shown = None
+        if self.settings["dictation_live"]:
+            try:
+                self._start_live()
+            except Exception:
+                log.exception("Live dictation could not start - recognizing after the stop")
+                self._live = self._shown = None
         self.app.hotkeys.escape(True)
         if self.settings["dictation_sounds"]:
             ready = self.microphone.ready
             threading.Thread(target=lambda: ready.wait(2.0) and beep(1046), daemon=True).start()
         self._emit("state")
         return True
+
+    def _start_live(self) -> None:
+        model, device = self.model_key()
+        session = live.LiveDictation(
+            self.app.engine, model, device, self.settings["dictation_language"],
+            self.settings["dictation_dictionary"],
+            on_text=lambda text: self.app.post(lambda: self._on_live_text(session, text)))
+        # `_live` is fed until the stop; `_shown` keeps showing its text until
+        # the result arrives (its last pieces may finish after the stop).
+        self._live = self._shown = session
+        self._schedule_live_tick(session)
+
+    def _on_live_text(self, session: live.LiveDictation, text: str) -> None:
+        if session is self._shown and (self.recording or self.queued):
+            self.live_text = text
+
+    def _schedule_live_tick(self, session: live.LiveDictation) -> None:
+        # Bound to its session: a tick still pending from a dictation that just
+        # ended must not start a second polling loop for the next one.
+        self.app.after(LIVE_TICK_MS, lambda: self._live_tick(session))
+
+    def _live_tick(self, session: live.LiveDictation) -> None:
+        """Feeds the audio recorded since the last tick to the live session (UI thread)."""
+        if not self.recording or session is not self._live:
+            return
+        try:
+            session.feed(self.microphone.take())
+        except Exception:
+            # This dictation then finishes the old way, from the whole recording.
+            log.exception("Live dictation failed - falling back to full recognition")
+            session.cancel()
+            self._live = None
+            self.live_text = ""
+            return
+        self._schedule_live_tick(session)
 
     def stop(self) -> None:
         if not self.recording or self.finishing:
@@ -993,6 +1107,7 @@ class DictationController:
         self.app.after(int(TAIL_S * 1000), self._finish)
 
     def _finish(self) -> None:
+        taken = self.microphone.taken_samples
         recording = self.microphone.stop()
         self.recording = self.finishing = False
         self.app.hotkeys.escape(False)
@@ -1035,13 +1150,29 @@ class DictationController:
         def failed(error):
             self.app.post(lambda: self._failed(str(error)))
 
-        self.app.engine.dictate(recording, model, device, language,
-                                self.settings["dictation_dictionary"], on_done=done, on_error=failed)
+        session, self._live = self._live, None
+        if session is not None:
+            try:
+                session.feed(recording[taken:])
+                pieces = session.submitted
+                session.finish(recording, on_done=done, on_error=failed)
+                log.info("Live dictation finished (%d piece(s) submitted)", pieces)
+            except Exception:
+                log.exception("Live dictation finish failed - falling back to full recognition")
+                session.cancel()
+                self.app.engine.dictate(recording, model, device, language,
+                                        self.settings["dictation_dictionary"],
+                                        on_done=done, on_error=failed)
+        else:
+            self.app.engine.dictate(recording, model, device, language,
+                                    self.settings["dictation_dictionary"],
+                                    on_done=done, on_error=failed)
         self._emit("state")
 
     def _recognized(self, text: str, seconds: float, where: str | None) -> None:
         """`where`: PASTE, OWN_WINDOW, one of CLIPBOARD_ONLY, or None when inserting failed."""
         self.queued = max(0, self.queued - 1)
+        self.live_text = ""
         if text:
             self.last_text, self.last_seconds = text, seconds
             if where == NOT_TAKEN:
@@ -1064,6 +1195,7 @@ class DictationController:
 
     def _failed(self, error: str) -> None:
         self.queued = max(0, self.queued - 1)
+        self.live_text = ""
         self.show_message(t("Recognition error"), "warning", 6)
         self.last_text = error[:200]
         self._emit("state")
@@ -1071,6 +1203,10 @@ class DictationController:
     def cancel(self) -> None:
         if not self.recording:
             return
+        if self._live is not None:
+            self._live.cancel()
+        self._live = self._shown = None
+        self.live_text = ""
         self.microphone.stop()
         self.recording = self.finishing = False
         self.app.hotkeys.escape(False)
@@ -1104,6 +1240,9 @@ class DictationController:
         if thread is not None and thread.is_alive():
             thread.join(PASTE_TIMEOUT_S + 1.0)
         if self.recording:
+            if self._live is not None:
+                self._live.cancel()
+                self._live = None
             self.microphone.stop()
             self.recording = False
         self.microphone.close()

@@ -920,12 +920,19 @@ class DictationPanel(ctk.CTkFrame):
         self.button.set_state(d.recording)
         self.button.render()
         self.meter.set(d.level())
-        text = d.last_text or t("Nothing dictated yet. Put the cursor where the text should go "
+        showing_live = bool((d.recording or d.queued) and d.live_text)
+        active_text = d.live_text if showing_live else d.last_text
+        text = active_text or t("Nothing dictated yet. Put the cursor where the text should go "
                                 "and press the shortcut.")
-        if text != self._shown_text:
-            self._shown_text = text
-            shown = text if len(text) < 600 else text[:597] + "…"
-            self.text.configure(text=shown, text_color=C.text if d.last_text else C.text_muted)
+        if (text, showing_live) != self._shown_text:
+            self._shown_text = (text, showing_live)
+            if len(text) < 600:
+                shown = text
+            elif showing_live:
+                shown = "…" + text[-597:]
+            else:
+                shown = text[:597] + "…"
+            self.text.configure(text=shown, text_color=C.text if active_text else C.text_muted)
             self.copy.configure(state="normal" if d.last_text else "disabled")
         if self.model is not None:
             model, device = d.model_key()
