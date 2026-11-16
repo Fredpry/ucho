@@ -552,7 +552,7 @@ class MeetingController:
             return summary_mod.summarize(
                 segments, model, self.settings["device"],
                 status=lambda text: (setattr(self, "status_text", text), self._emit("status", text)),
-                cancel=job.cancel)
+                cancel=job.cancel, speaker_names=session.speaker_names(meta))
 
         def done(result) -> None:
             # `summarizing` stays set until the summary is saved and the folder

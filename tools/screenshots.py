@@ -47,15 +47,15 @@ MEETINGS = [
 
 TRANSCRIPT = [
     (4, "me", "Dzień dobry, zaczynamy od budżetu na pierwszy kwartał."),
-    (11, "meeting", "Dobrze. Dostawca stali podniósł cenę o dziesięć procent od stycznia."),
+    (11, "meeting:1", "Dobrze. Dostawca stali podniósł cenę o dziesięć procent od stycznia."),
     (24, "me", "To znaczy, że potrzebujemy drugiej oferty. Kto może ją zebrać do piątku?"),
-    (31, "meeting", "Zajmę się tym, mam kontakt do dwóch hurtowni."),
+    (31, "meeting:2", "Zajmę się tym, mam kontakt do dwóch hurtowni."),
     (45, "me", "Świetnie. Then let us keep the rest of the budget as it is."),
-    (52, "meeting", "Agreed. One more thing: the training for the new line is scheduled for March."),
+    (52, "meeting:1", "Agreed. One more thing: the training for the new line is scheduled for March."),
     (68, "me", "Dopiszmy to do planu. Czy szkolenie mieści się w budżecie?"),
-    (75, "meeting", "Tak, było zaplanowane już w zeszłym roku, kwota się nie zmienia."),
+    (75, "meeting:2", "Tak, było zaplanowane już w zeszłym roku, kwota się nie zmienia."),
     (90, "me", "W takim razie budżet zatwierdzamy, a ofertę porównamy w przyszłym tygodniu."),
-    (104, "meeting", "Wyślę podsumowanie mailem jeszcze dzisiaj."),
+    (104, "meeting:1", "Wyślę podsumowanie mailem jeszcze dzisiaj."),
 ]
 
 
@@ -72,6 +72,7 @@ def synthetic_archive(folder: Path) -> None:
         if name.endswith("Budzet-Q1"):
             meta["segments"] = [{"start": s, "end": s + 6, "text": text, "speaker": who}
                                 for s, who, text in TRANSCRIPT]
+            meta["speaker_names"] = {"meeting:1": "Anna"}
             meta["key_points"] = ["Cena stali wzrosła o 10% od stycznia.",
                                   "Szkolenie dla nowej linii w marcu, w ramach budżetu."]
             meta["decisions"] = ["Budżet zatwierdzony bez zmian.",

@@ -330,5 +330,19 @@
   "Microphone {n}": "Mikrofon {n}",
   "Detecting speakers...": "Rozpoznawanie mówców...",
   "Could not save the speaker name: {error}": "Nie udało się zapisać nazwy mówcy: {error}",
-  "Speaker detection needs the optional sherpa-onnx package. Run the installer again with -WithSpeakers.": "Rozpoznawanie mówców wymaga opcjonalnego pakietu sherpa-onnx. Uruchom instalator ponownie z opcją -WithSpeakers."
+  "Speaker detection needs the optional sherpa-onnx package. Run the installer again with -WithSpeakers.": "Rozpoznawanie mówców wymaga opcjonalnego pakietu sherpa-onnx. Uruchom instalator ponownie z opcją -WithSpeakers.",
+  "Speakers:": "Mówcy:",
+  "Speakers": "Mówcy",
+  "Detect speakers (experimental)": "Rozpoznawaj mówców (eksperymentalnie)",
+  "After the transcription, the voices inside each track are told apart (“Speaker 1”, “Speaker 2”…); click a speaker on the transcript to give it a name. Experimental: similar voices get mixed up, so check the result. Runs on the CPU after the text is ready and does not change the text. Voice data is not kept.": "Po transkrypcji głosy w obrębie każdej ścieżki są rozróżniane („Mówca 1”, „Mówca 2”…); kliknij mówcę na transkrypcie, aby nadać mu imię. Opcja eksperymentalna: podobne głosy mogą się pomylić, więc sprawdź wynik. Działa na procesorze po przygotowaniu tekstu i nie zmienia samego tekstu. Dane głosowe nie są zachowywane.",
+  "Needs the optional sherpa-onnx package: run the installer again with -WithSpeakers.": "Wymaga opcjonalnego pakietu sherpa-onnx: uruchom instalator ponownie z opcją -WithSpeakers.",
+  "Models downloaded ({size})": "Modele pobrane ({size})",
+  "Models not downloaded ({size})": "Modele nie są pobrane ({size})",
+  "Download models ({size})": "Pobierz modele ({size})",
+  "Speaker model download failed: {error}": "Pobieranie modeli rozpoznawania mówców nie powiodło się: {error}",
+  "This recording is busy. Try again when it is finished.": "To nagranie jest teraz w użyciu. Spróbuj ponownie, gdy zostanie ukończone.",
+  "Rename speaker": "Zmień nazwę mówcy",
+  "Name for “{label}” in this recording. Leave it empty to go back to “{default}”.": "Nazwa dla „{label}” w tym nagraniu. Zostaw puste, aby wrócić do „{default}”.",
+  "Speaker renamed": "Zmieniono nazwę mówcy",
+  "Could not rename the speaker.": "Nie udało się zmienić nazwy mówcy."
 }

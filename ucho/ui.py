@@ -21,6 +21,7 @@ import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFont
 
 from . import theme
+from .merge import speaker_track
 from .theme import C, font
 
 log = logging.getLogger(__name__)
@@ -562,6 +563,7 @@ class TranscriptText(ctk.CTkTextbox):
         self._text = self._textbox
         self._text.configure(padx=18, pady=14, spacing1=2, spacing3=8, cursor="arrow")
         self.configure(state="disabled")
+        self._speaker_tags: dict[str, str] = {}
         self._mode = None
         self.retheme()
 
@@ -597,9 +599,13 @@ class TranscriptText(ctk.CTkTextbox):
     def clear(self) -> None:
         self.configure(state="normal")
         self.delete("1.0", "end")
+        for tag in self._speaker_tags.values():
+            self._text.tag_delete(tag)
+        self._speaker_tags.clear()
+        self._text.configure(cursor="arrow")
         self.configure(state="disabled")
 
-    def write(self, *parts: tuple[str, str]) -> None:
+    def write(self, *parts: tuple[str, str | tuple[str, ...]]) -> None:
         """Appends (text, tag) pairs."""
         self.retheme()
         self.configure(state="normal")
@@ -607,9 +613,24 @@ class TranscriptText(ctk.CTkTextbox):
             self._text.insert("end", text, tag)
         self.configure(state="disabled")
 
-    def line(self, timestamp: str, speaker_code: str, speaker: str, text: str) -> None:
-        tag = speaker_code if speaker_code in ("me", "meeting") else "other"
-        self.write((f"{timestamp}  ", "ts"), (f"{speaker}  ", tag), (text + "\n", "body"))
+    def _speaker_tag(self, code: str, on_click: Callable[[str], None]) -> str:
+        tag = self._speaker_tags.get(code)
+        if tag is None:
+            tag = f"speaker-{len(self._speaker_tags)}"
+            self._speaker_tags[code] = tag
+            self._text.tag_bind(tag, "<Button-1>", lambda _e, c=code: on_click(c))
+            self._text.tag_bind(tag, "<Enter>", lambda _e: self._text.configure(cursor="hand2"))
+            self._text.tag_bind(tag, "<Leave>", lambda _e: self._text.configure(cursor="arrow"))
+        return tag
+
+    def line(self, timestamp: str, speaker_code: str, speaker: str, text: str,
+             on_click: Callable[[str], None] | None = None) -> None:
+        track = speaker_track(speaker_code)
+        tag = track if track in ("me", "meeting") else "other"
+        speaker_tags: str | tuple[str, str] = (
+            (tag, self._speaker_tag(speaker_code, on_click)) if on_click is not None else tag
+        )
+        self.write((f"{timestamp}  ", "ts"), (f"{speaker}  ", speaker_tags), (text + "\n", "body"))
 
     def highlight(self, words: list[str]) -> str | None:
         """Marks words the way search matches them and returns the index of the first hit.
@@ -680,3 +701,44 @@ def confirm(parent, title: str, message: str, ok_text: str, destructive: bool = 
     dialog.after(50, lambda: (dialog.grab_set(), cancel.focus_set()))
     root.wait_window(dialog)
     return result["ok"]
+
+
+def ask_text(parent, title: str, message: str, initial: str, ok_text: str) -> str | None:
+    """Modal dialog with a text entry. Returns the entered text, or None when cancelled."""
+    from .i18n import t
+
+    root = parent.winfo_toplevel()
+    dialog = ctk.CTkToplevel(root)
+    dialog.title(title)
+    dialog.configure(fg_color=C.surface)
+    dialog.resizable(False, False)
+    dialog.transient(root)
+    result: dict[str, str | None] = {"value": None}
+    ui_label = label(dialog, title, theme.LG, "bold", anchor="w")
+    ui_label.pack(fill="x", padx=24, pady=(20, 6))
+    label(dialog, message, theme.SM - 1, anchor="w", justify="left", wraplength=380).pack(
+        fill="x", padx=24)
+    field = entry(dialog)
+    if initial:
+        field.insert(0, initial)
+        field.select_range(0, "end")
+    field.pack(fill="x", padx=24, pady=(12, 0))
+    buttons = ctk.CTkFrame(dialog, fg_color="transparent")
+    buttons.pack(fill="x", padx=24, pady=(18, 20))
+
+    def close(save: bool) -> None:
+        if save:
+            result["value"] = field.get()
+        dialog.grab_release()
+        dialog.destroy()
+
+    ok = primary(buttons, ok_text, lambda: close(True), width=10)
+    ok.pack(side="right")
+    cancel = secondary(buttons, t("Cancel"), lambda: close(False), width=10, height=38)
+    cancel.pack(side="right", padx=(0, 8))
+    field.bind("<Return>", lambda _e: close(True), add=True)
+    dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
+    dialog.bind("<Escape>", lambda _e: close(False))
+    dialog.after(50, lambda: (dialog.grab_set(), field.focus_set(), field.select_range(0, "end")))
+    root.wait_window(dialog)
+    return result["value"]

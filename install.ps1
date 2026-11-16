@@ -19,6 +19,7 @@ param(
     [switch]$SkipModel,            # skip the Whisper model / nie pobieraj modelu Whisper
     [switch]$WithSummary,          # also download the summary model / pobierz tez model podsumowan
     [switch]$WithParakeet,         # optional Parakeet backend (CPU) / opcjonalny silnik Parakeet (CPU)
+    [switch]$WithSpeakers,         # optional speaker detection (CPU) / opcjonalne rozpoznawanie mowcow (CPU)
     [switch]$ReinstallPackages,    # force reinstall of packages / wymus ponowna instalacje
     [switch]$Force,                # install inside OneDrive without asking / instaluj w OneDrive bez pytania
     [switch]$Pause                 # wait for Enter before closing (install.cmd) / czekaj na Enter przed zamknieciem
@@ -276,17 +277,22 @@ $code = Invoke-Logged $VenvPy $pipArgs
 if ($code -ne 0) { Fail (T 'Instalacja zaleznosci nie powiodla sie' 'Dependency installation failed'); Exit-Installer 1 }
 Ok (T 'Zaleznosci zainstalowane' 'Dependencies installed')
 
-# Optional second speech-to-text backend (NVIDIA Parakeet via sherpa-onnx,
-# CPU only). Not installed by default; Whisper stays the default model. The
-# model itself (~2.5 GB) is downloaded later from Settings -> Hardware.
-if ($WithParakeet) {
+# Optional sherpa-onnx package (CPU only): used by the Parakeet speech-to-text
+# backend (-WithParakeet) and by speaker detection (-WithSpeakers). Not
+# installed by default; models are downloaded later in Settings.
+if ($WithParakeet -or $WithSpeakers) {
     $pipArgs = @('-m', 'pip', 'install', '-r', $ParakeetRequirements)
     if ($ReinstallPackages) { $pipArgs += '--force-reinstall' }
     $code = Invoke-Logged $VenvPy $pipArgs
     if ($code -ne 0) {
-        Warn (T 'Instalacja Parakeet nie powiodla sie - Whisper dziala bez zmian' 'Parakeet installation failed - Whisper works as before')
+        Warn (T 'Instalacja sherpa-onnx nie powiodla sie - transkrypcja dziala bez zmian' 'sherpa-onnx installation failed - transcription works as before')
     } else {
-        Ok (T 'Parakeet zainstalowany - wybierz go w Ustawieniach > Sprzet' 'Parakeet installed - choose it in Settings > Hardware')
+        if ($WithParakeet) {
+            Ok (T 'Parakeet zainstalowany - wybierz go w Ustawieniach > Sprzet' 'Parakeet installed - choose it in Settings > Hardware')
+        }
+        if ($WithSpeakers) {
+            Ok (T 'Rozpoznawanie mowcow zainstalowane - wlacz je w Ustawieniach > Transkrypcja' 'Speaker detection installed - turn it on in Settings > Transcription')
+        }
     }
 }
 
