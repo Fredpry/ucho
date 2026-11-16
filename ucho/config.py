@@ -122,6 +122,20 @@ LLM_MODELS = {
 
 DEFAULT_LLM_MODEL = "OpenVINO/Qwen3-8B-int4-ov"
 
+# Speaker detection models (ucho/diarize.py, sherpa-onnx, CPU only).
+SPEAKER_MODELS = {
+    "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0": {
+        "file": "model.onnx",
+        "size": "~6 MB",
+    },
+    "csukuangfj/speaker-embedding-models": {
+        "file": "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
+        "size": "~27 MB",
+    },
+}
+
+SPEAKER_MODELS_SIZE = "~33 MB"
+
 # Pinned model revisions (Hugging Face commit, checked 14.11.2026). We download
 # exactly these, so a model swapped in the source repository does not reach
 # users without a change to this dict.
@@ -146,6 +160,15 @@ REVISIONS = {
     # both: tokens.txt        d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d
     "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3": "5fcc0122fe87e8365e339e467af90c67b746218f",
     "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8": "ed5d745623472f97cfc2e6c2916ee248798fc5a8",
+    # Speaker detection (ucho/diarize.py); pyannote segmentation-3.0 (MIT, CNRS)
+    # exported to ONNX by the sherpa-onnx project; ERes2Net speaker embeddings
+    # trained on VoxCeleb by the 3D-Speaker project (ModelScope
+    # iic/speech_eres2net_sv_en_voxceleb_16k, Apache-2.0), ONNX by sherpa-onnx.
+    # SHA-256: model.onnx 220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079,
+    #   3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx
+    #   c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5
+    "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0": "9403a6902bb58e3d5ae8c7e77c3422de279db2e0",
+    "csukuangfj/speaker-embedding-models": "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
 }
 
 # Repos of which only some files are downloaded (the Parakeet repos also hold
@@ -157,6 +180,13 @@ DOWNLOAD_PATTERNS = {
     ],
     "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8": [
         "encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt", "README.md",
+    ],
+    "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0": [
+        "model.onnx", "LICENSE", "README.md",
+    ],
+    # That repo also holds 20+ other models and test recordings; only this one file is downloaded.
+    "csukuangfj/speaker-embedding-models": [
+        "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
     ],
 }
 
@@ -225,6 +255,9 @@ DEFAULTS = {
     # transcript is ready soon after the stop. None = automatic: on in Auto
     # language mode unless the transcription runs on the CPU (Settings.meeting_live).
     "meeting_live": None,
+    # Detect speakers inside a track (ucho/diarize.py). Experimental, off by
+    # default: needs the optional sherpa-onnx package and two small models.
+    "speaker_detection": False,
     "summary_enabled": False,
     "summary_model": DEFAULT_LLM_MODEL,
     "rename_folder": False,

@@ -325,5 +325,10 @@
   "Transcribe while recording": "Transkrybuj w trakcie nagrywania",
   "The meeting is transcribed during the recording, so the transcript is ready soon after the stop and the Meeting screen shows the text so far. The final transcript is the same. Needs the automatic transcription after stopping. On by default in Auto language mode on a GPU; with a forced language a dictation may wait for a 5-minute piece. It stops by itself when the computer cannot keep up.": "Spotkanie jest transkrybowane już w trakcie nagrywania, więc transkrypt jest gotowy chwilę po zatrzymaniu, a ekran Spotkanie pokazuje dotychczasowy tekst. Ostateczny transkrypt jest taki sam. Wymaga automatycznej transkrypcji po zatrzymaniu. Domyślnie włączone w trybie Auto na karcie graficznej; przy wybranym języku dyktowanie może czekać na 5-minutowy fragment. Wyłącza się samo, gdy komputer nie nadąża.",
   "partial transcript": "transkrypt częściowy",
-  "recording…": "nagrywanie…"
+  "recording…": "nagrywanie…",
+  "Speaker {n}": "Mówca {n}",
+  "Microphone {n}": "Mikrofon {n}",
+  "Detecting speakers...": "Rozpoznawanie mówców...",
+  "Could not save the speaker name: {error}": "Nie udało się zapisać nazwy mówcy: {error}",
+  "Speaker detection needs the optional sherpa-onnx package. Run the installer again with -WithSpeakers.": "Rozpoznawanie mówców wymaga opcjonalnego pakietu sherpa-onnx. Uruchom instalator ponownie z opcją -WithSpeakers."
 }

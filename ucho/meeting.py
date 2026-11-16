@@ -21,6 +21,7 @@ Events (name, data):
     status         text
     transcribed    (folder, segments, meta, summary_expected)
     summary        (folder, result)
+    speakers       folder (speaker names updated)
     error          text
     live           segments recognized so far in the recording (live transcription)
 
@@ -46,7 +47,8 @@ from typing import Callable
 from . import config, session, transcribe
 from .i18n import t
 from .merge import (TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
-                    TRANSCRIPTION_ERRORS, Segment, save_results, slug)
+                    TRANSCRIPTION_ERRORS, Segment, clean_speaker_name, save_results, slug,
+                    speaker_label, split_speaker)
 
 log = logging.getLogger(__name__)
 
@@ -298,6 +300,19 @@ class MeetingController:
 
     # --- transcription ----------------------------------------------------------
 
+    def _speaker_pass(self):
+        if not self.settings.get("speaker_detection"):
+            return None
+        from . import diarize
+
+        if diarize.ready():
+            return diarize.track_pass(diarize.Diarizer())
+        if not diarize.available():
+            log.info("Speaker detection skipped: sherpa-onnx is not installed")
+        else:
+            log.info("Speaker detection skipped: speaker models are not downloaded")
+        return None
+
     def transcribe_again(self, folder: Path) -> bool:
         files = session.audio_tracks(folder)
         if not files:
@@ -305,8 +320,46 @@ class MeetingController:
             return False
         meta = session.read_meta(folder)
         meta.pop("segments", None)
+        # A new diarization run may number the voices differently, so a name
+        # given to "meeting:2" could land on another person.
+        names = {k: v for k, v in session.speaker_names(meta).items()
+                 if split_speaker(k)[1] is None}
+        if names:
+            meta["speaker_names"] = names
+        else:
+            meta.pop("speaker_names", None)
         meta.setdefault("name", folder.name)
         return self.transcribe(folder, files, meta)
+
+    def rename_speaker(self, folder: Path, code: str, name: str) -> bool:
+        """Sets or clears the user-given name for `code` in `folder` and rewrites its files."""
+        if self.in_use(folder):
+            return False
+        meta = session.read_meta(folder)
+        segments = session.segments(meta)
+        if not segments or code not in session.speaker_codes(segments):
+            return False
+        names = session.speaker_names(meta)
+        cleaned = clean_speaker_name(name)
+        if not cleaned or cleaned in (speaker_label(code), speaker_label(code, translate=False)):
+            names.pop(code, None)
+        else:
+            names[code] = cleaned
+        meta.pop("segments", None)
+        if names:
+            meta["speaker_names"] = names
+        else:
+            meta.pop("speaker_names", None)
+        try:
+            save_results(folder, segments, meta)
+        except OSError as error:
+            log.warning("Could not save speaker name: %s", type(error).__name__)
+            self._emit("error", t("Could not save the speaker name: {error}", error=error))
+            return False
+        if same_folder(folder, self.session_dir):
+            self.last_meta = dict(meta)
+        self._emit("speakers", folder)
+        return True
 
     def transcribe(self, folder: Path, files: dict, meta: dict, cache=None) -> bool:
         """Transcribes the session now, or queues it while another one is being worked on.
@@ -441,10 +494,13 @@ class MeetingController:
             self._emit("state")
             self._finished()
 
-        self._job = self.app.engine.transcribe(files, model, device, self.settings["language"],
-                                               progress=progress, status=status,
-                                               on_done=done, on_error=failed, report=report,
-                                               **({"cache": cache} if cache is not None else {}))
+        speakers = self._speaker_pass()
+        self._job = self.app.engine.transcribe(
+            files, model, device, self.settings["language"],
+            progress=progress, status=status, on_done=done, on_error=failed, report=report,
+            **({"cache": cache} if cache is not None else {}),
+            **({"speakers": speakers} if speakers is not None else {}),
+        )
         return True
 
     def cancel(self) -> None:
