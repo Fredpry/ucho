@@ -462,7 +462,9 @@ class RecordingsScreen(Screen):
             except Exception:
                 log.exception("Search failed")
                 metas, total = [], 0
-            self.app.post(lambda: generation == self._generation and self._show(query, metas, total))
+            # A layout switch destroys the old screens while a search may still run.
+            self.app.post(lambda: generation == self._generation and self.winfo_exists()
+                          and self._show(query, metas, total))
 
         threading.Thread(target=work, name="search", daemon=True).start()
 
