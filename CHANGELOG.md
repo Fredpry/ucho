@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.2.0 (first public release, date set at tagging)
+## v0.2.0 (2026-11-16, first public release)
 
 ### Upgrading from v0.1
 
