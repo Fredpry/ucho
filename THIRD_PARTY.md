@@ -47,6 +47,10 @@ Whisper was created by OpenAI; the OpenVINO conversions are published by Intel. 
 
 **Parakeet attribution (CC BY 4.0).** The Parakeet models are [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) ("ready for commercial/non-commercial use" per the model card). The ONNX exports Ucho downloads were made by the sherpa-onnx project, unmodified by Ucho. NVIDIA does not endorse Ucho. CC BY 4.0 lets anyone use and redistribute the weights, also commercially, as long as this credit and the license link are kept.
 
+## Installer
+
+`Ucho-Setup.exe` is built with [Inno Setup](https://jrsoftware.org/isinfo.php) 6.7.3 (Inno Setup License, a permissive license that allows redistributing the setup and uninstaller it produces). The setup program contains Inno Setup's runtime, not modified by Ucho.
+
 ## Runtime
 
 Python 3.12 (PSF License), installed by the installer through `winget` when missing.

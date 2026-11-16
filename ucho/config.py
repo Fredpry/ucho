@@ -57,7 +57,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 os.environ.setdefault("DO_NOT_TRACK", "1")
 
 APP_NAME = "Ucho"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 # AppUserModelID: Windows groups taskbar windows by it. Without our own id the
 # window inherits the pythonw.exe icon instead of ours.

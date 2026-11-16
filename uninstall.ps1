@@ -27,7 +27,8 @@
 [CmdletBinding()]
 param(
     [switch]$Yes,              # no questions for shortcuts and app data (never recordings) / bez pytan (nigdy o nagrania)
-    [switch]$KeepEnvironment   # keep .venv, models, settings and logs / zostaw .venv, modele, ustawienia i logi
+    [switch]$KeepEnvironment,  # keep .venv, models, settings and logs / zostaw .venv, modele, ustawienia i logi
+    [switch]$FromSetup         # run by the Ucho-Setup.exe uninstaller / uruchomiony przez deinstalator Ucho-Setup.exe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -465,11 +466,19 @@ if ($Removed.Count -eq 0) { Write-Host (T '    nic' '    nothing') }
 foreach ($item in $Removed) { Write-Host "    $item" }
 Write-Host ''
 Write-Host (T '  Zostalo (usun samodzielnie, jesli chcesz):' '  Left in place (remove yourself if you want):') -ForegroundColor White
-Write-Host ((T '    Pliki programu: ' '    Program files: ') + $Root + (T ' (zamknij to okno i usun folder)' ' (close this window, then delete the folder)'))
+# The Setup uninstaller deletes the program files itself once this script ends.
+if (-not $FromSetup) {
+    Write-Host ((T '    Pliki programu: ' '    Program files: ') + $Root + (T ' (zamknij to okno i usun folder)' ' (close this window, then delete the folder)'))
+}
 foreach ($folder in $keptRecordings) { Write-Host ((T '    Nagrania: ' '    Recordings: ') + $folder) }
 Write-Host (T '    Python 3.12: Ustawienia > Aplikacje, jesli nic innego go nie uzywa' '    Python 3.12: Settings > Apps, if nothing else uses it')
 Write-Host (T '    Przypiete Ucho na pasku zadan: prawy przycisk > Odepnij' '    Ucho pinned to the taskbar: right click > Unpin')
 Write-Host (T '    Serwer MCP w agencie AI: claude mcp remove -s user ucho' '    MCP server in your AI agent: claude mcp remove -s user ucho')
 Write-Host $bar -ForegroundColor Green
 Write-Host ''
+# uninstall.cmd pauses after this script; the console window the Setup
+# uninstaller opens would close before the summary could be read.
+if ($FromSetup -and -not $Yes) {
+    try { [void](Read-Host (T 'Nacisnij Enter, aby zamknac to okno' 'Press Enter to close this window')) } catch { }
+}
 exit 0

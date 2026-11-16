@@ -4,17 +4,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
 import shutil
 import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
 
 import pytest
 
-from ucho import config
+from ucho import config, instance
 from ucho_mcp import server
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,3 +82,73 @@ def test_one_version_everywhere():
     assert server.VERSION == config.VERSION
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert f"## v{config.VERSION} " in changelog
+
+
+def test_build_package_version():
+    assert build_package.version() == config.VERSION
+
+
+def test_stage_copies_contents_and_removes_stale_files():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dest = Path(tmpdir) / "stage"
+        dest.mkdir()
+        stale = dest / "stale.txt"
+        stale.write_text("stale", encoding="utf-8")
+
+        result = build_package.stage(dest)
+
+        assert result == dest
+        assert not stale.exists()
+        expected = {p.relative_to(ROOT).as_posix() for p in build_package.contents()}
+        actual = {p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file()}
+        assert actual == expected
+
+
+def test_find_iscc_from_env(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_iscc = Path(tmpdir) / "ISCC.exe"
+        fake_iscc.write_bytes(b"")
+        monkeypatch.setenv("ISCC", str(fake_iscc))
+        assert build_package.find_iscc() == fake_iscc
+
+        monkeypatch.setenv("ISCC", str(Path(tmpdir) / "missing.exe"))
+        monkeypatch.setattr(build_package.shutil, "which", lambda _name: None)
+        for var in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+            monkeypatch.delenv(var, raising=False)
+        assert build_package.find_iscc() is None
+
+
+def test_inno_setup_script_metadata_and_format():
+    data = (ROOT / "installer" / "ucho.iss").read_bytes()
+    # Inno Setup 6 reads a UTF-8 file as Unicode only with a BOM; without it the
+    # Polish messages would turn into mojibake.
+    assert data.startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b"")
+
+    text = data.decode("utf-8-sig")
+    assert "AppId={{8E0B6C2A-5A7D-4F1E-9C3B-2D6A1F4E7B90}" in text
+    assert "PrivilegesRequired=lowest" in text
+    assert re.search(rf"^AppMutex={re.escape(instance.MUTEX_NAME)}\r?$", text, re.MULTILINE)
+    assert r"DefaultDirName={%USERPROFILE}\Ucho\app" in text
+    assert "OutputBaseFilename=Ucho-Setup" in text
+    assert r'Name: "pl"; MessagesFile: "compiler:Languages\Polish.isl"' in text
+    assert r'Name: "en"; MessagesFile: "compiler:Default.isl"' in text
+    assert "install.ps1" in text and "-ExecutionPolicy Bypass" in text
+    assert "uninstall.ps1" in text
+
+
+def test_main_builds_zip_and_sha256sums_without_exe(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        dist = Path(tmpdir) / "dist"
+        dist.mkdir()
+        (dist / "Ucho-Setup.exe").write_bytes(b"stale")
+        monkeypatch.setattr(build_package, "DIST", dist)
+
+        assert build_package.main([]) == 0
+
+        zip_path = dist / "Ucho-Windows.zip"
+        sums_path = dist / "SHA256SUMS.txt"
+        assert zip_path.is_file()
+        assert not (dist / "Ucho-Setup.exe").exists()
+        digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+        assert sums_path.read_text(encoding="utf-8") == f"{digest}  Ucho-Windows.zip\n"

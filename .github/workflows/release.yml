@@ -19,11 +19,26 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          python -m pip install pytest numpy==2.5.3 soundfile==0.14.0
+          python -m pip install pytest numpy==2.5.3 soundfile==0.14.0 pillow==13.0.0
           python -m pytest -q
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe"
+          $expected = "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+          $exe = Join-Path $env:RUNNER_TEMP "innosetup-6.7.3.exe"
+          Invoke-WebRequest -Uri $url -OutFile $exe
+          $actual = (Get-FileHash -Path $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "SHA256 mismatch for Inno Setup: expected $expected, got $actual"
+          }
+          $proc = Start-Process -FilePath $exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            throw "Inno Setup installer exited with code $($proc.ExitCode)"
+          }
       - name: Build package
-        run: python tools/build_package.py
+        run: python tools/build_package.py --installer
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/Ucho-Windows.zip dist/SHA256SUMS.txt --title "Ucho ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/Ucho-Windows.zip dist/Ucho-Setup.exe dist/SHA256SUMS.txt --title "Ucho ${{ github.ref_name }}" --generate-notes

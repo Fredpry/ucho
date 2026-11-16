@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.1 (2026-11-16)
+
+### Added
+
+- **`Ucho-Setup.exe`**: a one-click installer (Inno Setup 6.7.3, about 2.5 MB). It installs for the current user without admin rights into `C:\Users\<you>\Ucho\app`, then runs `install.ps1` in a console window (Python, libraries, model), adds Ucho to Settings → Apps with an uninstaller that runs `uninstall.ps1` first, and offers to start Ucho at the end. It refuses to run while Ucho is open. Running it again, or a newer version, updates the program files and keeps settings, models, `.venv` and recordings. `Ucho-Setup.exe /VERYSILENT` installs without questions. The zip with `install.cmd` stays for computers that block `.exe` files. Not code-signed yet: Windows SmartScreen asks for *More info → Run anyway*, and Smart App Control may block it outright (then use the zip).
+- `tools/build_package.py --installer` builds the installer next to the zip from the same staged files; `SHA256SUMS.txt` lists both. CI compiles the installer on every push.
+
 ## v0.2.0 (2026-11-16, first public release)
 
 ### Upgrading from v0.1

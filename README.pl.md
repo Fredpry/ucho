@@ -33,9 +33,11 @@ Nagrywa spotkania w Teams, Zoomie czy Meet oraz dyktowanie i zamienia je w tekst
 
 ## Instalacja
 
-1. Pobierz `Ucho-Windows.zip` z [Releases](../../releases). Kliknij plik prawym przyciskiem, wybierz **Wyodrębnij wszystkie…**, zmień folder docelowy na `C:\Users\<Ty>` i kliknij **Wyodrębnij**. Ucho trafi do `C:\Users\<Ty>\Ucho\app`, poza OneDrive, obok Twoich nagrań.
-2. Otwórz ten folder i kliknij dwukrotnie **`install.cmd`**. Uprawnienia administratora nie są potrzebne. Instalator pobiera ok. 2 GB (Python, biblioteki, model mowy), więc trwa to od 10 do 20 minut, a przy wolnym łączu dłużej. Na koniec wypisze polecenie, które podłącza Ucho do Twojego agenta AI.
-3. Otwórz **Ucho** z Menu Start. Kreator dobierze model do Twojego sprzętu.
+1. Pobierz **`Ucho-Setup.exe`** z [Releases](../../releases/latest/download/Ucho-Setup.exe) i uruchom go. Uprawnienia administratora nie są potrzebne. Ucho nie ma jeszcze podpisu cyfrowego, więc Windows może pokazać komunikat „System Windows ochronił ten komputer”: kliknij **Więcej informacji**, a potem **Uruchom mimo to**. Instalator umieści Ucho w `C:\Users\<Ty>\Ucho\app`, poza OneDrive, obok Twoich nagrań.
+2. Potem otworzy okno konsoli, które pobiera ok. 2 GB (Python, biblioteki, model mowy). Trwa to od 10 do 20 minut, a przy wolnym łączu dłużej. Na koniec okno wypisze polecenie, które podłącza Ucho do Twojego agenta AI; zamkniesz je Enterem.
+3. Otwórz **Ucho** z Menu Start (albo zaznacz *Uruchom Ucho* na ostatniej stronie instalatora). Kreator dobierze model do Twojego sprzętu.
+
+Jeśli firma blokuje pliki `.exe` albo instalator zablokuje Smart App Control, użyj wersji zip: pobierz `Ucho-Windows.zip`, kliknij prawym przyciskiem, **Wyodrębnij wszystkie…** do `C:\Users\<Ty>` (Ucho trafi do `C:\Users\<Ty>\Ucho\app`) i kliknij dwukrotnie **`install.cmd`** w tym folderze. Ponowne uruchomienie instalatora albo nowszej wersji aktualizuje Ucho, a ustawienia, modele i nagrania zostają.
 
 Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami). Karta NVIDIA nie jest potrzebna. **Używaj słuchawek**, bo inaczej mikrofon nagra rozmówców drugi raz.
 
@@ -47,7 +49,8 @@ Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami)
 - `-WithParakeet`: dodatkowy silnik NVIDIA Parakeet, szybki na samym procesorze. Słabiej radzi sobie z angielskimi wtrąceniami. Wybierasz go w Ustawieniach → Sprzęt.
 - `-Force`: instalacja w folderze OneDrive bez pytania. Odradzamy: modele, ustawienia i log z podyktowanym tekstem trafiłyby do chmury.
 - Opcje działają też z plikiem do dwukliku: `install.cmd -WithSummary`.
-- Przebieg każdej instalacji trafia do `install.log` w folderze programu. Ucho nie ma jeszcze podpisu cyfrowego, więc Windows może ostrzec przed uruchomieniem `install.cmd`.
+- Przebieg każdej instalacji trafia do `install.log` w folderze programu. Ucho nie ma jeszcze podpisu cyfrowego, więc Windows może ostrzec przed uruchomieniem `Ucho-Setup.exe` albo `install.cmd`.
+- Cicha instalacja dla działu IT: `Ucho-Setup.exe /VERYSILENT` (bez pytań; instalator czeka na `install.ps1`, przebieg trafia do `install.log`).
 
 </details>
 
@@ -91,7 +94,7 @@ Potem uruchom klienta ponownie.
 
 ## Odinstalowanie
 
-Zamknij Ucho (ikona w zasobniku → Zakończ) i kliknij dwukrotnie **`uninstall.cmd`** w folderze programu. Usunie skróty *Ucho* i *Ucho Dictate* z Pulpitu i Menu Start, wpis autostartu, a po pytaniu także `.venv`, pobrane modele, ustawienia i logi. Nagrania w `C:\Users\<Ty>\Ucho\recordings` zostają, chyba że osobno potwierdzisz ich usunięcie: deinstalator najpierw je wypisze i usunie tylko foldery nagrań utworzone przez Ucho. Jeśli folder nagrań to Twój folder użytkownika, Dokumenty, Pulpit, Pobrane, główny folder OneDrive albo główny katalog dysku, niczego z niego nie usunie. Na koniec usuń sam folder programu, a Pythona 3.12 odinstaluj w Ustawieniach → Aplikacje, jeśli nic innego go nie używa. Połączenie z agentem usuniesz poleceniem `claude mcp remove -s user ucho`.
+Zamknij Ucho (ikona w zasobniku → Zakończ). Po instalacji instalatorem: Ustawienia → Aplikacje → **Ucho** → Odinstaluj. Po instalacji z zip: kliknij dwukrotnie **`uninstall.cmd`** w folderze programu. W obu przypadkach działa ten sam deinstalator, który usunie skróty *Ucho* i *Ucho Dictate* z Pulpitu i Menu Start, wpis autostartu, a po pytaniu także `.venv`, pobrane modele, ustawienia i logi. Nagrania w `C:\Users\<Ty>\Ucho\recordings` zostają, chyba że osobno potwierdzisz ich usunięcie: deinstalator najpierw je wypisze i usunie tylko foldery nagrań utworzone przez Ucho. Jeśli folder nagrań to Twój folder użytkownika, Dokumenty, Pulpit, Pobrane, główny folder OneDrive albo główny katalog dysku, niczego z niego nie usunie. Deinstalator z „Aplikacji” usunie potem pliki programu; po instalacji z zip usuń folder programu sam. Pythona 3.12 odinstaluj w Ustawieniach → Aplikacje, jeśli nic innego go nie używa. Połączenie z agentem usuniesz poleceniem `claude mcp remove -s user ucho`.
 
 ## Więcej
 
