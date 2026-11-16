@@ -335,6 +335,14 @@ class SettingsScreen(Screen):
         s.row(t("After stopping"), lambda m: ui.switch(
             m, t("Transcribe automatically after stopping"), self.settings["transcribe_after_stop"],
             lambda v: self._save("transcribe_after_stop", v)))
+        s.row(t("While recording"), lambda m: ui.switch(
+            m, t("Transcribe while recording"), self.settings.meeting_live(),
+            lambda v: self._save("meeting_live", v)),
+            t("The meeting is transcribed during the recording, so the transcript is ready soon "
+              "after the stop and the Meeting screen shows the text so far. The final transcript "
+              "is the same. Needs the automatic transcription after stopping. On by default in "
+              "Auto language mode on a GPU; with a forced language a dictation may wait for a "
+              "5-minute piece. It stops by itself when the computer cannot keep up."))
         s.end()
 
     # --- dictation --------------------------------------------------------------------

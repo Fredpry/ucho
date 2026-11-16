@@ -221,6 +221,10 @@ DEFAULTS = {
     "hotkey": "<ctrl>+<alt>+r",
     "tray": True,
     "transcribe_after_stop": True,
+    # Transcribe a meeting while it is recorded (ucho/live_meeting.py), so the
+    # transcript is ready soon after the stop. None = automatic: on in Auto
+    # language mode unless the transcription runs on the CPU (Settings.meeting_live).
+    "meeting_live": None,
     "summary_enabled": False,
     "summary_model": DEFAULT_LLM_MODEL,
     "rename_folder": False,
@@ -453,6 +457,20 @@ class Settings:
         if not value or value == DICTATION_SHARED:
             return self["model"]
         return value
+
+    def meeting_live(self) -> bool:
+        """Live meeting transcription: the user's choice, else automatic.
+
+        Automatic is on in Auto language mode on a GPU or NPU. On the CPU the
+        live work would compete with the call itself (video, screen sharing)
+        for the same cores. With a forced language the chunks are up to 5
+        minutes long and cannot be interrupted, so a dictation spoken while
+        one is being recognized would wait for it (#12; docs/benchmarks.md).
+        """
+        value = self["meeting_live"]
+        if isinstance(value, bool):
+            return value
+        return str(self["device"] or "").upper() != "CPU" and self["language"] == "auto"
 
     def dictation_shared(self) -> bool:
         return self.dictation_model() == self["model"]

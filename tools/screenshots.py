@@ -155,6 +155,20 @@ def main(argv: list[str]) -> int:
         else:
             m.recorder, m.recording = None, False
 
+    def live(on: bool):
+        # Live transcription while recording (ucho/live_meeting.py), without a model.
+        from types import SimpleNamespace
+
+        from ucho.merge import Segment
+
+        m = app.meeting
+        recording(on)
+        m.live = SimpleNamespace(gave_up=False) if on else None
+        m.live_segments = [Segment(start, start + 5, text, who)
+                           for start, who, text in TRANSCRIPT[:6]] if on else []
+        if on:
+            m._emit("live", m.live_segments)
+
     def dictating(on: bool):
         d = app.dictation
         d.recording = on
@@ -179,7 +193,8 @@ def main(argv: list[str]) -> int:
     for mode in ("light", "dark"):
         shot(f"meeting-{mode}", lambda m=mode: (app.set_theme(m), recording(False), app.show("meeting")))
         shot(f"meeting-recording-{mode}", lambda: (recording(True), app.show("meeting")))
-        shot(f"dictation-{mode}", lambda: (recording(False), app.show("dictation")))
+        shot(f"meeting-live-{mode}", lambda: (live(True), app.show("meeting")))
+        shot(f"dictation-{mode}", lambda: (live(False), recording(False), app.show("dictation")))
         shot(f"recordings-search-{mode}", lambda: app.show("recordings", query="budżet"))
         shot(f"transcript-{mode}", lambda: app.show("transcript", folder=session_dir, query=""))
         shot(f"transcript-transcribing-{mode}",

@@ -28,6 +28,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/engine.py` | Shared Whisper engine: one worker thread, priority queue (dictation first), meeting transcription as step jobs between chunks, pipelines cached by (model, device), `exclusive()` for summary and benchmark |
 | `ucho/meeting.py`, `ucho/dictation.py` | Controllers without widgets: meeting recording/transcription/summary; dictation (microphone, paste/type into the active window) |
 | `ucho/live.py` | Live dictation: cuts the microphone stream at pauses (`PieceCutter`) and recognizes each piece on the engine while you speak (`LiveDictation`); language pinned after the first piece, the previous text as Whisper's prompt, filters only on the joined text |
+| `ucho/live_meeting.py` | Live meeting transcription: cuts the growing tracks with the same functions as the transcription after the stop (`TrackChunker`), recognizes final chunks on the engine while recording (`LiveMeeting`, one chunk at a time, waits while a dictation is spoken, gives up when it falls behind), keeps them in a `ChunkCache` that the transcription after the stop uses only for chunks with the same range and samples |
 | `ucho/screens.py`, `ucho/settings_screen.py`, `ucho/wizard.py` | Screens: Meeting, Dictation (+ small window), Recordings with search, Transcript; Settings with the Hardware panel; first-run wizard |
 | `ucho/theme.py`, `ucho/ui.py` | Theme from `design/tokens.json` (light/dark pairs), fonts, WCAG checks; components (buttons, status pill, PIL-drawn record button, transcript text) and keyboard focus (`ui.focusable`) |
 | `ucho/archive.py` | Archive listing and full-text search (SQLite FTS5), shared by the recordings list and the MCP server |
@@ -54,7 +55,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 
 ## Change carefully (read the comments first)
 
-- `transcribe.py` silence thresholds and language detection. Restricting `lang_to_id` fixed 8 of 8 bad chunks; `suppress_tokens` fixed 1 of 8. Change only after testing on a real recording.
+- `transcribe.py` silence thresholds and language detection. Restricting `lang_to_id` fixed 8 of 8 bad chunks; `suppress_tokens` fixed 1 of 8. Change only after testing on a real recording. Live meeting transcription (`live_meeting.py`) cuts with the same functions (`split_into_chunks`, `ranges_at_boundaries`, `boundaries_from_energy`); keep its tests green so live results stay reusable.
 - `summary.py` filters `_names`, `_name_in_text`, `_without_invented_dates`. They exist because prompts alone did not work. Whole-word comparison is deliberate.
 - Model memory order: Whisper is released before the LLM loads; both must never sit on the iGPU at once. `engine.exclusive()` enforces it; run anything that loads a model through the engine.
 - `engine.py`: every OpenVINO call runs on the engine thread. Long work must be a step generator, or a dictation waits for all of it.

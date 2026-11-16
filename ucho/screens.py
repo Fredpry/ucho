@@ -21,7 +21,8 @@ from . import config, retention, session, theme, ui
 from .archive import Match, fold, hms, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
-from .merge import TRANSCRIPT_MD, format_hms, speaker_label
+from .meeting import same_folder
+from .merge import TRANSCRIPT_MD, TRANSCRIPT_PARTIAL, format_hms, speaker_label
 from .theme import C
 
 log = logging.getLogger(__name__)
@@ -31,6 +32,8 @@ PAD = 28  # outer padding of a screen
 # screen lists two recent recordings instead of three. 1366 x 768 at 125 %
 # leaves about 535.
 COMPACT_HEIGHT = 600
+# Utterances shown in the live transcript on the Meeting screen.
+LIVE_LINES = 60
 
 
 class Screen(ctk.CTkFrame):
@@ -131,12 +134,18 @@ def delete_recording(app, folder: Path, parent) -> bool:
 
 def transcription_status(meeting, folder: Path) -> str:
     """Short status for a recordings card: running, queued, ready or missing."""
+    if meeting.recording and same_folder(meeting.recording_dir, folder):
+        return t("recording…")
     if meeting.is_active(folder):
         return t("transcribing…") if meeting.transcribing else t("summarizing…")
     position = meeting.queue_position(folder)
     if position:
         return t("Queued, #{n}", n=position)
-    return t("transcript ready") if session.find_file(folder, TRANSCRIPT_MD) else t("no transcript")
+    if not session.find_file(folder, TRANSCRIPT_MD):
+        return t("no transcript")
+    # Live text left by a recording that was never transcribed after the stop.
+    return t("partial transcript") if session.read_meta(folder).get(TRANSCRIPT_PARTIAL) \
+        else t("transcript ready")
 
 
 def session_title(folder_name: str) -> str:
@@ -205,6 +214,7 @@ class MeetingScreen(Screen):
         side.grid_columnconfigure(0, weight=1)
         recent_row = ctk.CTkFrame(side, fg_color="transparent")
         recent_row.grid(row=0, column=0, sticky="ew")
+        self._recent_row = recent_row
         recent_row.grid_columnconfigure(0, weight=1)
         ui.label(recent_row, t("Recent recordings"), theme.SM + 1, "bold", anchor="w").grid(
             row=0, column=0, sticky="w")
@@ -213,6 +223,21 @@ class MeetingScreen(Screen):
         self.recent = ctk.CTkFrame(side, fg_color="transparent")
         self.recent.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.recent.grid_columnconfigure(0, weight=1)
+
+        # Live transcript while recording (ucho/live_meeting.py): takes the place
+        # of the recent recordings until the stop.
+        self._side = side
+        self.live_box = ctk.CTkFrame(side, fg_color="transparent")
+        self.live_box.grid_columnconfigure(0, weight=1)
+        self.live_box.grid_rowconfigure(2, weight=1)
+        ui.label(self.live_box, t("Live transcript"), theme.SM + 1, "bold", anchor="w").grid(
+            row=0, column=0, sticky="w")
+        self.live_note = ui.muted(self.live_box, "", anchor="w", justify="left", wraplength=280)
+        self.live_note.grid(row=1, column=0, sticky="ew", pady=(2, 6))
+        self.live_text = ui.TranscriptText(self.live_box, height=120)
+        self.live_text.grid(row=2, column=0, sticky="nsew")
+        self._live_shown = False
+        self._live_shown_lines: list | None = None
 
         language = ctk.CTkFrame(side, fg_color="transparent")
         language.grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -250,6 +275,7 @@ class MeetingScreen(Screen):
 
     def _wrap(self, event) -> None:
         self.consent.configure(wraplength=max(160, ui.logical(self, event.width) - 56))
+        self.live_note.configure(wraplength=max(160, ui.logical(self, event.width) - 8))
 
     def _toggle(self) -> None:
         self.meeting.toggle(self.name.get())
@@ -263,6 +289,51 @@ class MeetingScreen(Screen):
     def _event(self, event: str, data) -> None:
         if event in ("state", "saved", "summary", "transcribed"):
             self.refresh_recent()
+        elif event == "live":
+            self._show_live_text(data)
+
+    def _show_live_text(self, segments) -> None:
+        # The last utterances are enough here; the whole text is in the session folder.
+        shown = segments[-LIVE_LINES:]
+        signature = [(seg.start, seg.speaker, seg.text) for seg in shown]
+        if signature == self._live_shown_lines:
+            return
+        self._live_shown_lines = signature
+        self.live_text.clear()
+        for seg in shown:
+            self.live_text.line(format_hms(seg.start), seg.speaker, speaker_label(seg.speaker), seg.text)
+        self.live_text.see("end")
+
+    def _update_live(self) -> None:
+        """Shows the live transcript instead of the recent recordings while it runs."""
+        m = self.meeting
+        live = m.live if m.recording else None
+        if (live is not None) != self._live_shown:
+            self._live_shown = live is not None
+            if self._live_shown:
+                self._recent_row.grid_remove()
+                self.recent.grid_remove()
+                self.live_box.grid(row=0, column=0, rowspan=2, sticky="nsew")
+                self._side.grid_rowconfigure(1, weight=1)
+                self._live_shown_lines = None
+                self._show_live_text(list(m.live_segments))
+            else:
+                self.live_box.grid_remove()
+                self._side.grid_rowconfigure(1, weight=0)
+                self._recent_row.grid()
+                self.recent.grid()
+        if live is None:
+            return
+        if live.gave_up:
+            note = t("Stopped for this recording: the computer is too slow for it right now. "
+                     "The transcript is made after the stop.")
+        elif not m.live_segments:
+            note = t("In progress. Text appears here a little while after it is said.")
+        else:
+            note = t("In progress, a little behind the speech. The final transcript is made "
+                     "after the stop.")
+        if self.live_note.cget("text") != note:
+            self.live_note.configure(text=note)
 
     def on_show(self, **kwargs) -> None:
         self.refresh_recent()
@@ -306,6 +377,7 @@ class MeetingScreen(Screen):
             message = message or t("No audio devices found. Connect a microphone or headphones.")
         if self.notice.cget("text") != message:
             self.notice.configure(text=message)
+        self._update_live()
 
 
 # --- Recording card (used in the list and as "recent") -------------------------------

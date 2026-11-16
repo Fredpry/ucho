@@ -104,6 +104,28 @@ Limits: the synthetic voice pauses clearly between sentences, so every cut fell 
 .\.venv\Scripts\python.exe tools\benchmark_engine.py --live --live-model OpenVINO/whisper-large-v3-int8-ov
 ```
 
+## Live meeting transcription (#16)
+
+A meeting transcribed while it is recorded (`ucho/live_meeting.py`), compared with today's transcription after the stop. `tools/benchmark_engine.py --live-meeting` builds an 8-minute synthetic meeting (system track: the made-up monologue by *Microsoft Paulina*; microphone track: one short sentence about once a minute over a faint noise floor), feeds both tracks in 128 ms blocks in real time to `LiveMeeting` as the recorder would, stops, and runs the normal transcription with the live cache. Meanwhile a 10 s dictation (separate FP16 model) is spoken every 50 s; no live chunk starts while it is spoken, as in the app. Transcription model large-v3 INT8, Core Ultra 7 258V, Arc 140V GPU, OpenVINO GenAI 2026.4.1, 16.11.2026. "After the stop only" has the model already loaded (the best case for it).
+
+| Language | After the stop only | Live: stop to transcript | Chunks from the live cache | Final transcript |
+|---|---|---|---|---|
+| Auto (12 s chunks) | 89.5 s, 137.9 s | 4.1 s | 77 of 82 | identical (60 utterances) |
+| Polish (chunks up to 5 min) | 56.0 s, 53.9 s | 23.2 s | 2 of 4 | identical (54 utterances) |
+| Auto, system track 1.6x louder from minute 4 (4x real time) | 67.2 s | 27.4 s | 49 of 83 | identical (60 utterances) |
+
+"Identical" compares start, end, speaker and text of every utterance with each run after the stop only (those runs were identical to each other too). In Auto mode only the last chunks are left after the stop; at the stop the live work was 4.9 s behind the recording. With a forced language the last chunk of each track (here about 3 minutes) can only be cut once the recording has ended, so it is always transcribed after the stop: up to 5 minutes 15 s of audio per track. The louder variant raises the silence threshold of Auto cutting in the middle of the recording, so some cuts made live no longer match the cuts of the whole track; those chunks are recognized again after the stop (with the 21.7 s the live work was behind at 4x speed, 34 chunks in all) and the transcript stays identical.
+
+Dictation while the live transcription runs: 1.4 to 2.1 s in Auto mode (9 dictations; alone 1.4 to 4.4 s in that run), 1.4 to 1.7 s with Polish (9 dictations; alone 1.3 to 1.4 s). One live chunk took at most 3.2 s of work in Auto mode, but 25.8 s with Polish (a 5-minute chunk). A dictation spoken while such a chunk is being recognized waits for it; none of the 9 did here, but that is luck of timing. This is why the automatic setting turns live transcription on only in Auto language mode (#12).
+
+Limits: synthetic speech with clear pauses and a steady level. In a real meeting the level changes (a louder speaker, a cough near the microphone), so more Auto chunks may be cut differently live and recognized again after the stop: slower, but never a different transcript. The transcription model stays loaded during the recording; before, it was loaded only after the stop.
+
+```powershell
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --live-meeting --meeting-min 8 --meeting-language auto
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --live-meeting --meeting-min 8 --meeting-language pl
+.\.venv\Scripts\python.exe tools\benchmark_engine.py --live-meeting --louder-from 4 --speed 4 --offline-runs 1
+```
+
 ## Parakeet TDT 0.6B v3 as an optional backend (v0.2)
 
 Plan v0.2, W6: is NVIDIA's Parakeet TDT 0.6B v3 (25 European languages, Polish among them), run through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), good enough to offer as an alternative to Whisper? Measure first; Whisper stays the default whatever the result.

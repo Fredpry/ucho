@@ -315,5 +315,15 @@
   "{device} (not connected)": "{device} (niepodłączony)",
   "While speaking": "W trakcie mówienia",
   "Recognize while speaking": "Rozpoznawaj w trakcie mówienia",
-  "The text is recognized in pieces during the dictation, so it is pasted right after you stop. Off: the whole dictation is recognized after the stop.": "Tekst jest rozpoznawany kawałkami w trakcie dyktowania, więc wkleja się zaraz po zakończeniu. Wyłączone: całe dyktowanie jest rozpoznawane dopiero po zakończeniu."
+  "The text is recognized in pieces during the dictation, so it is pasted right after you stop. Off: the whole dictation is recognized after the stop.": "Tekst jest rozpoznawany kawałkami w trakcie dyktowania, więc wkleja się zaraz po zakończeniu. Wyłączone: całe dyktowanie jest rozpoznawane dopiero po zakończeniu.",
+  "Live transcript": "Transkrypcja na żywo",
+  "In progress. Text appears here a little while after it is said.": "Trwa. Tekst pojawia się tu chwilę po tym, jak padnie.",
+  "In progress, a little behind the speech. The final transcript is made after the stop.": "Trwa, z niewielkim opóźnieniem. Ostateczny transkrypt powstaje po zatrzymaniu.",
+  "Stopped for this recording: the computer is too slow for it right now. The transcript is made after the stop.": "Wyłączona dla tego nagrania: komputer nie nadąża. Transkrypt powstanie po zatrzymaniu.",
+  "Recognized while recording; the transcript is not finished yet.": "Rozpoznane w trakcie nagrywania; transkrypt nie jest jeszcze gotowy.",
+  "While recording": "W trakcie nagrywania",
+  "Transcribe while recording": "Transkrybuj w trakcie nagrywania",
+  "The meeting is transcribed during the recording, so the transcript is ready soon after the stop and the Meeting screen shows the text so far. The final transcript is the same. Needs the automatic transcription after stopping. On by default in Auto language mode on a GPU; with a forced language a dictation may wait for a 5-minute piece. It stops by itself when the computer cannot keep up.": "Spotkanie jest transkrybowane już w trakcie nagrywania, więc transkrypt jest gotowy chwilę po zatrzymaniu, a ekran Spotkanie pokazuje dotychczasowy tekst. Ostateczny transkrypt jest taki sam. Wymaga automatycznej transkrypcji po zatrzymaniu. Domyślnie włączone w trybie Auto na karcie graficznej; przy wybranym języku dyktowanie może czekać na 5-minutowy fragment. Wyłącza się samo, gdy komputer nie nadąża.",
+  "partial transcript": "transkrypt częściowy",
+  "recording…": "nagrywanie…"
 }

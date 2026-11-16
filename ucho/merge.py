@@ -200,6 +200,8 @@ def as_markdown(segments: list[Segment], meta: dict) -> str:
     if meta.get("participants"):
         lines.append(f"- **{t('Participants')}:** {', '.join(meta['participants'])}")
     lines += ["", "---", ""]
+    if meta.get(TRANSCRIPT_PARTIAL):
+        lines += ["_" + t("Recognized while recording; the transcript is not finished yet.") + "_", ""]
 
     # The summary goes on top so nobody has to read everything; the full
     # version with decisions is in summary.md.
@@ -242,6 +244,10 @@ def as_text(segments: list[Segment],
 TRANSCRIPT_COMPLETE = "transcript_complete"
 TRANSCRIPTION_CANCELLED = "transcription_cancelled"
 TRANSCRIPTION_ERRORS = "transcription_errors"
+# Written while a meeting records with live transcription (ucho/live_meeting.py):
+# the text recognized so far, kept if the app is closed or crashes. The
+# transcription after the stop replaces it and drops this key.
+TRANSCRIPT_PARTIAL = "transcript_partial"
 
 
 def save_results(folder: Path, segments: list[Segment], meta: dict) -> dict[str, Path]:

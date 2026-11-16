@@ -11,6 +11,7 @@ and fed straight into the engine.
     python tools/benchmark_engine.py                       # shared and separate model, GPU
     python tools/benchmark_engine.py --device CPU --meeting-min 4
     python tools/benchmark_engine.py --live [--live-during-meeting] [--json out.json]
+    python tools/benchmark_engine.py --live-meeting --meeting-min 8 --meeting-language pl
     python tools/benchmark_engine.py --make-wer-set C:\\bench\\tts-pl   # 20 sentences + .txt
     python tools/benchmark_wer.py C:\\bench\\tts-pl --language pl --model OpenVINO/whisper-large-v3-fp16-ov
 
@@ -401,6 +402,188 @@ def live_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _meeting_tracks(temp: Path, meeting_min: float, louder_from_min: float | None):
+    """(microphone, system) float tracks of a synthetic meeting, as the recorder gets them.
+
+    System audio: the monologue, repeated. Microphone: a short sentence about
+    once a minute over a faint noise floor, silent otherwise (you mostly listen).
+    `louder_from_min` makes the system track 1.6 times louder from that minute
+    on: the silence threshold of Auto cutting then rises during the recording.
+    """
+    import numpy as np
+
+    meeting_file, _minutes = _build_meeting(temp, meeting_min)
+    system = load(meeting_file)
+    if louder_from_min is not None:
+        k = int(louder_from_min * 60 * 16_000)
+        system = system.copy()
+        system[k:] = np.clip(system[k:] * 1.6, -0.99, 0.99)
+    rng = np.random.default_rng(5)
+    microphone = (rng.normal(0, 1, system.size) * 2e-4).astype(np.float32)
+    for i, start in enumerate(range(20 * 16_000, system.size - 15 * 16_000, 63 * 16_000)):
+        wav = temp / f"mic_{i}.wav"
+        speak([SENTENCES[i % len(SENTENCES)]], wav, voice="Microsoft Paulina Desktop", rate=1)
+        line = load(wav)[: 12 * 16_000]
+        microphone[start: start + line.size] += line
+    return np.ascontiguousarray(microphone), np.ascontiguousarray(system)
+
+
+def _texts(segments) -> list[tuple]:
+    return [(round(s.start, 3), round(s.end, 3), s.speaker, s.text) for s in segments]
+
+
+def live_meeting_benchmark(args: argparse.Namespace) -> int:
+    """Stop-to-transcript time and final transcript, live vs after the stop (issue #16).
+
+    The two tracks are fed to LiveMeeting in 128 ms blocks at `--speed` times
+    real time, the way audio.Recorder's write threads feed it; meanwhile a
+    10 s dictation is spoken every `--spacing-live` seconds (live chunks wait
+    while it is spoken, as in the app) and its latency is measured.
+    """
+    import shutil
+
+    import numpy as np
+    import soundfile as sf
+
+    from ucho import engine as engine_mod
+    from ucho import live_meeting, transcribe
+
+    temp = Path(tempfile.mkdtemp(prefix="ucho-live-meeting-"))
+    eng = engine_mod.Engine()
+    model, device, language = INT8, args.device, args.meeting_language
+    dictation_model = args.live_model
+    try:
+        microphone, system = _meeting_tracks(temp, args.meeting_min, args.louder_from)
+        files = {}
+        for name, track in (("microphone", microphone), ("system", system)):
+            files[name] = temp / f"{name}.flac"
+            # As audio._Track writes it: float samples into a PCM_16 FLAC.
+            sf.write(str(files[name]), track, 16_000, subtype="PCM_16", format="FLAC")
+        dictations = []
+        for i in range(3):
+            wav = temp / f"dictation_{i}.wav"
+            speak(SENTENCES[2 * i: 2 * i + 2], wav)
+            audio = load(wav)
+            dictations.append(np.concatenate([audio, np.zeros(max(0, 160_000 - audio.size),
+                                                               np.float32)])[:160_000])
+
+        eng.start()
+        eng.configure((dictation_model, device), preload=True).wait(900)
+        eng.submit(lambda job: eng.pipeline(model, device).load()).wait(900)
+        # The first inference on the GPU compiles kernels: not part of the latency.
+        eng.dictate(dictations[0], dictation_model, device, "pl").wait(600)
+        eng.transcribe({"system": files["system"]}, model, device, language).wait(7200)
+        idle = []
+        for audio in dictations:
+            t0 = time.monotonic()
+            eng.dictate(audio, dictation_model, device, "pl").wait(300)
+            idle.append(time.monotonic() - t0)
+        print("idle dictation latency:", [round(x, 2) for x in idle])
+
+        # Today: everything after the stop (model already loaded, the best case).
+        offline = []
+        for run in range(args.offline_runs):
+            t0 = time.monotonic()
+            segments, used = eng.transcribe(files, model, device, language).wait(7200)
+            offline.append((time.monotonic() - t0, segments))
+            print(f"after the stop only, run {run + 1}: {offline[-1][0]:.1f} s, "
+                  f"{len(segments)} utterances on {used}")
+
+        # Live: real-time feeding, then the same transcription with the cache.
+        speaking = {"until": 0.0}
+        chunk_s: list[float] = []
+
+        def timed(pipe, chunk, begin, end, lang, speaker):
+            # How long a dictation can wait at most: one live chunk in flight.
+            t0 = time.monotonic()
+            try:
+                return transcribe.transcribe_chunk(pipe, chunk, begin, end, lang, speaker)
+            finally:
+                chunk_s.append(time.monotonic() - t0)
+
+        live = live_meeting.LiveMeeting(eng, model, device, language, recognize=timed,
+                                        should_wait=lambda: time.monotonic() < speaking["until"])
+        live.start()
+        block = 2048
+        seconds = system.size / 16_000
+        started = time.monotonic()
+        busy = []
+        next_dictation = args.spacing_live
+        pending = None
+        for offset in range(0, system.size, block):
+            due = started + offset / 16_000 / args.speed
+            now = time.monotonic()
+            if due > now:
+                time.sleep(due - now)
+            live.feed("microphone", microphone[offset: offset + block])
+            live.feed("system", system[offset: offset + block])
+            elapsed = offset / 16_000
+            if pending is not None and pending[1] is not None and pending[1].done.is_set():
+                pending[1].wait()
+                busy.append(pending[1].finished - pending[0])
+                print(f"  dictation during live transcription at {elapsed:.0f} s: {busy[-1]:.2f} s")
+                pending = None
+            if pending is None and elapsed >= next_dictation and elapsed + 15 < seconds:
+                # Spoken for 10 s first (the live chunks wait), then recognized.
+                speaking["until"] = time.monotonic() + 10.0 / args.speed
+                audio = dictations[len(busy) % len(dictations)]
+                start_at = speaking["until"]
+
+                def submit(audio=audio):
+                    return eng.dictate(audio, dictation_model, device, "pl")
+
+                pending = (start_at, None, submit)
+                next_dictation += args.spacing_live
+            if pending is not None and pending[1] is None and time.monotonic() >= pending[0]:
+                pending = (time.monotonic(), pending[2]())
+        while pending is not None:
+            if pending[1] is None:
+                time.sleep(max(0.0, pending[0] - time.monotonic()))
+                pending = (time.monotonic(), pending[2]())
+            pending[1].wait(300)
+            busy.append(pending[1].finished - pending[0])
+            pending = None
+        behind = live.behind_s
+        cache = live.stop()
+        t0 = time.monotonic()
+        segments, used = eng.transcribe(files, model, device, language, cache=cache).wait(7200)
+        live_s = time.monotonic() - t0
+        feed_s = time.monotonic() - started - live_s
+        same = [_texts(segments) == _texts(o[1]) for o in offline]
+        offline_same = all(_texts(o[1]) == _texts(offline[0][1]) for o in offline)
+        result = {
+            "meeting_min": round(seconds / 60, 1), "language": language, "device": used,
+            "model": model, "dictation_model": dictation_model, "speed": args.speed,
+            "louder_from_min": args.louder_from,
+            "after_stop_only_s": [round(o[0], 1) for o in offline],
+            "live_stop_to_transcript_s": round(live_s, 1),
+            "live_feeding_s": round(feed_s, 1),
+            "live_chunks_done": live.done, "live_gave_up": live.gave_up,
+            "live_chunk_compute_max_s": round(max(chunk_s), 2) if chunk_s else None,
+            "live_chunk_compute_total_s": round(sum(chunk_s), 1),
+            "behind_at_stop_s": round(behind, 1),
+            "chunks_from_cache": cache.hits, "chunks_after_stop": cache.misses,
+            "final_identical_to_after_stop_runs": same,
+            "after_stop_runs_identical": offline_same,
+            "utterances": len(segments),
+            "dictation_idle_s": [round(x, 2) for x in idle],
+            "dictation_during_live_s": [round(x, 2) for x in busy],
+            "dictation_during_live_max_s": round(max(busy), 2) if busy else None,
+        }
+        if not all(same):
+            a, b = _texts(segments), _texts(offline[0][1])
+            diff = [(x, y) for x, y in zip(a, b, strict=False) if x != y]
+            result["first_differences"] = diff[:3]
+            result["utterances_after_stop_only"] = len(b)
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        if args.json:
+            args.json.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    finally:
+        eng.stop()
+        shutil.rmtree(temp, ignore_errors=True)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="GPU")
@@ -419,12 +602,25 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--live-runs", type=int, default=3)
     parser.add_argument("--live-during-meeting", action="store_true",
                         help="also run live dictation during a synthetic meeting transcription")
+    parser.add_argument("--live-meeting", action="store_true",
+                        help="live meeting transcription: stop-to-transcript time, same final text, "
+                             "dictation latency meanwhile")
+    parser.add_argument("--speed", type=float, default=1.0,
+                        help="--live-meeting: feeding speed, 1.0 = real time")
+    parser.add_argument("--spacing-live", type=float, default=50.0,
+                        help="--live-meeting: seconds between dictations")
+    parser.add_argument("--offline-runs", type=int, default=2,
+                        help="--live-meeting: transcriptions after the stop only, for comparison")
+    parser.add_argument("--louder-from", type=float, default=None,
+                        help="--live-meeting: minute from which the system track is 1.6x louder")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if args.live:
         return live_benchmark(args)
+    if args.live_meeting:
+        return live_meeting_benchmark(args)
 
     if args.make_wer_set:
         args.make_wer_set.mkdir(parents=True, exist_ok=True)

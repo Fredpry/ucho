@@ -25,6 +25,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import soundfile as sf
@@ -264,15 +265,23 @@ def migrate_device_choices(settings, devices: dict) -> bool:
     return changed
 
 
+# Gets (track name, float32 16 kHz samples) right after they were written to
+# the track's file (live transcription, ucho/live_meeting.py). Runs on the
+# write thread, so it must be quick.
+Listener = Callable[[str, np.ndarray], None]
+
+
 class _Track:
     """A single track: PortAudio stream -> queue -> 16 kHz mono FLAC file."""
 
-    def __init__(self, name: str, file: Path, device: DeviceInfo):
+    def __init__(self, name: str, file: Path, device: DeviceInfo, listener: Listener | None = None):
         self.name = name
         self.file = file
         self.device = device
         self.level = 0.0
         self.error: str | None = None
+        self._listener = listener
+        self._listener_failed = False
 
         self._queue: "queue.Queue[bytes | None]" = queue.Queue(maxsize=256)
         self._stream = None
@@ -427,6 +436,18 @@ class _Track:
         self._align_to_clock()
         self._out.write(out)
         self._samples_written += len(out)
+        self._tell(out)
+
+    def _tell(self, samples: np.ndarray) -> None:
+        """Passes what was just written to the listener; its errors never touch the recording."""
+        if self._listener is None:
+            return
+        try:
+            self._listener(self.name, samples)
+        except Exception:
+            if not self._listener_failed:
+                self._listener_failed = True
+                log.exception("Listener of track %s failed", self.name)
 
     def _align_to_clock(self) -> None:
         """Pads with silence when the track fell behind real time.
@@ -439,8 +460,10 @@ class _Track:
         expected = (time.monotonic() - self._start_monotonic) * TARGET_RATE
         missing = int(expected - self._samples_written)
         if missing > DRIFT_TOLERANCE_S * TARGET_RATE:
-            self._out.write(np.zeros(missing, dtype=np.float32))
+            padding = np.zeros(missing, dtype=np.float32)
+            self._out.write(padding)
             self._samples_written += missing
+            self._tell(padding)
 
     @property
     def dead(self) -> bool:
@@ -456,8 +479,9 @@ class Recorder:
 
     def __init__(self, tracks: str = "both", microphone: str | None = None,
                  system: str | None = None, microphone_index: int | None = None,
-                 system_index: int | None = None):
+                 system_index: int | None = None, listener: Listener | None = None):
         self.tracks = tracks
+        self._listener = listener
         # Chosen devices by name; the indices are a choice saved by an earlier version.
         self._microphone = microphone
         self._system = system
@@ -505,7 +529,7 @@ class Recorder:
         self.start_ts = time.time()
 
         for name, file, dev in chosen:
-            track = _Track(name, folder / file, dev)
+            track = _Track(name, folder / file, dev, self._listener)
             track.open_file()
             try:
                 track.start(self._pa)

@@ -22,6 +22,15 @@ Events (name, data):
     transcribed    (folder, segments, meta, summary_expected)
     summary        (folder, result)
     error          text
+    live           segments recognized so far in the recording (live transcription)
+
+Live transcription (ucho/live_meeting.py, setting "meeting_live"): while a
+meeting records, the chunks the transcription after the stop will cut are
+recognized as soon as they are final, and the text so far is saved in the
+session folder. After the stop the normal transcription runs and takes every
+chunk it finds in the live cache with the same range and samples, so only the
+rest (usually the last chunk) goes to the model and the transcript is the same
+as without live transcription.
 """
 
 from __future__ import annotations
@@ -36,8 +45,8 @@ from typing import Callable
 
 from . import config, session, transcribe
 from .i18n import t
-from .merge import (TRANSCRIPT_COMPLETE, TRANSCRIPTION_CANCELLED, TRANSCRIPTION_ERRORS, Segment,
-                    save_results, slug)
+from .merge import (TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
+                    TRANSCRIPTION_ERRORS, Segment, save_results, slug)
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +71,10 @@ class MeetingController:
         self.last_meta: dict = {}
         self._job = None
         self._queue: deque[tuple[Path, dict, dict]] = deque()  # (folder, files, meta)
+        self.live = None  # live_meeting.LiveMeeting of the recording, when on
+        self.live_segments: list[Segment] = []
+        self._live_meta: dict = {}
+        self._caches: dict[str, object] = {}  # folder key -> live_meeting.ChunkCache
         self._listeners: list[Callable[[str, object], None]] = []
 
     # --- events -------------------------------------------------------------
@@ -113,6 +126,7 @@ class MeetingController:
         for entry in list(self._queue):
             if same_folder(entry[0], folder):
                 self._queue.remove(entry)
+                self._caches.pop(_folder_key(entry[0]), None)
                 self._emit("state")
                 return True
         return False
@@ -150,22 +164,31 @@ class MeetingController:
         from . import audio
 
         name = name.strip() or t("Meeting")
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d_%H-%M")
         folder = self.settings.recordings_dir / f"{stamp}_{slug(name) or 'Meeting'}"
+        live = self._new_live(folder, name, now)
         recorder = audio.Recorder(
             tracks=self.settings["tracks"],
             microphone=self.settings["microphone_name"],
             system=self.settings["system_name"],
             microphone_index=self.settings["microphone_index"],
             system_index=self.settings["system_index"],
+            listener=live.feed if live is not None else None,
         )
         try:
             recorder.start(folder)
         except Exception as error:
             log.exception("Could not start recording")
+            if live is not None:
+                live.stop()
             self.message = (str(error), "warning")
             self._emit("error", str(error))
             return False
+        self.live = live
+        self.live_segments = []
+        if live is not None:
+            live.start()
         self.recorder = recorder
         self.recording = True
         self.recording_dir = folder
@@ -182,6 +205,11 @@ class MeetingController:
             return
         self.recording = False
         self.recording_dir = None
+        # Live work first: no more chunks are started and nothing more is
+        # saved by the live thread. A chunk already in the engine finishes
+        # before the transcription below starts and lands in the cache.
+        live, self.live = self.live, None
+        cache = live.stop() if live is not None else None
         result = self.recorder.stop()
         self.recorder = None
         files = {n: d["file"] for n, d in result["tracks"].items()}
@@ -201,14 +229,72 @@ class MeetingController:
             "system_device": result["tracks"].get("system", {}).get("device"),
             "genai": transcribe.genai_version(),
         }
-        (result["folder"] / "meta.json").write_text(
-            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        if live is not None:
+            log.info("Live transcription while recording: %d chunks done, %d failed%s",
+                     live.done, live.errors, ", stopped early (too slow)" if live.gave_up else "")
+        if self.live_segments:
+            # Keeps the live text on disk until the transcription replaces it.
+            self._save_partial(result["folder"], self.live_segments, meta)
+        else:
+            (result["folder"] / "meta.json").write_text(
+                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         self.message = None
         self._emit("state")
         if self.settings["transcribe_after_stop"]:
-            self.transcribe(result["folder"], files, meta)
+            self.transcribe(result["folder"], files, meta, cache=cache)
         else:
             self._emit("saved", result["folder"])
+
+    # --- live transcription while recording ---------------------------------------
+
+    def live_wanted(self) -> bool:
+        """Live transcription runs only when the recording is transcribed after the stop anyway."""
+        return bool(self.settings["transcribe_after_stop"]) and self.settings.meeting_live()
+
+    def _new_live(self, folder: Path, name: str, started: datetime):
+        """A LiveMeeting for a new recording, or None when off or the model is missing."""
+        if not self.live_wanted():
+            return None
+        model, device, language = (self.settings["model"], self.settings["device"],
+                                   self.settings["language"])
+        if not transcribe.model_downloaded(model):
+            return None
+        from .live_meeting import LiveMeeting
+
+        self._live_meta = {
+            "name": name,
+            "date": started.strftime("%Y-%m-%d %H:%M"),
+            "model": model,
+            "language": language,
+        }
+        dictation = getattr(self.app, "dictation", None)
+
+        def dictating() -> bool:
+            # No new meeting chunk starts while a dictation is being spoken:
+            # the dictation would wait for the whole chunk (up to 5 minutes of
+            # audio with a forced language, see #12).
+            return bool(getattr(dictation, "recording", False))
+
+        return LiveMeeting(self.app.engine, model, device, language,
+                           on_update=lambda segments: self._live_update(folder, segments),
+                           should_wait=dictating if dictation is not None else None)
+
+    def _live_update(self, folder: Path, segments: list[Segment]) -> None:
+        """New live text (live thread): saved at once, so a crash keeps it."""
+        self.live_segments = segments
+        meta = dict(self._live_meta, duration_s=round(self.elapsed(), 1))
+        self._save_partial(folder, segments, meta)
+        self._emit("live", segments)
+
+    @staticmethod
+    def _save_partial(folder: Path, segments: list[Segment], meta: dict) -> None:
+        partial = dict(meta)
+        partial[TRANSCRIPT_COMPLETE] = False
+        partial[TRANSCRIPT_PARTIAL] = True
+        try:
+            save_results(folder, segments, partial)
+        except OSError as error:
+            log.warning("Could not save the live transcript: %s", type(error).__name__)
 
     # --- transcription ----------------------------------------------------------
 
@@ -222,30 +308,34 @@ class MeetingController:
         meta.setdefault("name", folder.name)
         return self.transcribe(folder, files, meta)
 
-    def transcribe(self, folder: Path, files: dict, meta: dict) -> bool:
+    def transcribe(self, folder: Path, files: dict, meta: dict, cache=None) -> bool:
         """Transcribes the session now, or queues it while another one is being worked on.
 
         True when the session is running or waiting in the queue (also when it
-        already was: a session is never queued twice).
+        already was: a session is never queued twice). `cache`: chunks
+        recognized while recording (live_meeting.ChunkCache).
         """
         if self.is_active(folder) or self.queue_position(folder):
             log.info("Transcription of %s already running or queued", folder.name)
             return True
         if self.busy or self._queue:
             self._queue.append((folder, files, meta))
+            if cache is not None:
+                self._caches[_folder_key(folder)] = cache
             log.info("Transcription of %s queued (%d waiting)", folder.name, len(self._queue))
             self._emit("state")
             return True
-        return self._start(folder, files, meta)
+        return self._start(folder, files, meta, cache)
 
     def _advance(self) -> None:
         """Starts the next queued session when nothing is running (UI thread)."""
         while self._queue and not self.busy:
             folder, files, meta = self._queue.popleft()
+            cache = self._caches.pop(_folder_key(folder), None)
             if not folder.is_dir():
                 log.warning("Queued session %s no longer exists - skipped", folder.name)
                 continue
-            if self._start(folder, files, meta):
+            if self._start(folder, files, meta, cache):
                 return
         self._emit("state")
 
@@ -253,7 +343,7 @@ class MeetingController:
         """The current session is done (transcript, and summary when expected) or failed."""
         self.app.post(self._advance)
 
-    def _start(self, folder: Path, files: dict, meta: dict) -> bool:
+    def _start(self, folder: Path, files: dict, meta: dict, cache=None) -> bool:
         # Settings are read once at start and the app can sit in the tray for
         # weeks; every UI change goes to disk at once, so the file is at least
         # as fresh as memory.
@@ -265,6 +355,9 @@ class MeetingController:
             return False
         # A queued session may start after the settings changed: record what is used.
         meta["model"], meta["language"] = model, self.settings["language"]
+        if cache is not None and not cache.matches(model, device, self.settings["language"]):
+            log.info("Live results not used: model, device or language changed since the recording")
+            cache = None
 
         self.transcribing = True
         self.session_dir = folder
@@ -307,8 +400,12 @@ class MeetingController:
             # Stop during the transcription ends the job normally with the
             # segments so far. Audio retention deletes audio only when this
             # says the transcript is complete (retention.transcript_complete).
-            for key in (TRANSCRIPT_COMPLETE, TRANSCRIPTION_CANCELLED, TRANSCRIPTION_ERRORS):
+            for key in (TRANSCRIPT_COMPLETE, TRANSCRIPTION_CANCELLED, TRANSCRIPTION_ERRORS,
+                        TRANSCRIPT_PARTIAL):
                 full.pop(key, None)
+            if cache is not None:
+                log.info("Chunks recognized while recording: %d used, %d recognized now",
+                         cache.hits, cache.misses)
             full[TRANSCRIPT_COMPLETE] = not report["cancelled"] and not report["errors"]
             if report["cancelled"]:
                 full[TRANSCRIPTION_CANCELLED] = True
@@ -346,7 +443,8 @@ class MeetingController:
 
         self._job = self.app.engine.transcribe(files, model, device, self.settings["language"],
                                                progress=progress, status=status,
-                                               on_done=done, on_error=failed, report=report)
+                                               on_done=done, on_error=failed, report=report,
+                                               **({"cache": cache} if cache is not None else {}))
         return True
 
     def cancel(self) -> None:
@@ -454,8 +552,16 @@ class MeetingController:
             log.info("Quit with %d queued transcription(s) not started: %s", len(self._queue),
                      ", ".join(folder.name for folder, _f, _m in self._queue))
             self._queue.clear()
+        self._caches.clear()
         if self._job is not None:
             self._job.cancel.set()
+
+
+def _folder_key(folder: Path) -> str:
+    try:
+        return str(Path(folder).resolve()).lower()
+    except (OSError, RuntimeError):
+        return str(folder).lower()
 
 
 def same_folder(a: Path | None, b: Path | None, unknown: bool = False) -> bool:
