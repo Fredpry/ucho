@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""First-run wizard, four steps: language, recordings folder, hardware, consent.
+"""First-run wizard, five steps: language, recordings folder, hardware, language model (optional), consent.
 
 Shown in the main window until it is finished once (`setup_complete`). The
 hardware step shows the recommendation of ucho.hardware and can measure the
@@ -16,15 +16,15 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, hardware, theme, transcribe, ui
+from . import config, hardware, llm, theme, transcribe, ui
 from .hotkeys import label as hotkey_label
 from .i18n import t
-from .settings_screen import short_model
+from .settings_screen import LanguageModelPicker, short_model
 from .theme import C
 
 log = logging.getLogger(__name__)
 
-STEPS = 4
+STEPS = 5
 
 
 class Wizard(ctk.CTkFrame):
@@ -37,6 +37,8 @@ class Wizard(ctk.CTkFrame):
             "folder": str(self.settings.recordings_dir),
             "use_recommendation": True,
             "measured": None,
+            "analysis_model": llm.chosen(self.settings),
+            "summary": bool(self.settings["summary_enabled"]),
         }
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -66,7 +68,7 @@ class Wizard(ctk.CTkFrame):
         self.body = ctk.CTkFrame(content, fg_color="transparent")
         self.body.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
         self.body.grid_columnconfigure(0, weight=1)
-        [self._language, self._folder, self._hardware, self._consent][step]()
+        [self._language, self._folder, self._hardware, self._analysis, self._consent][step]()
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.grid(row=1, column=1, sticky="ew", padx=40, pady=(8, 24))
@@ -252,6 +254,40 @@ class Wizard(ctk.CTkFrame):
 
         threading.Thread(target=job, daemon=True).start()
 
+    def _analysis(self) -> None:
+        self._title(
+            t("Meeting names and summaries"),
+            t("Optional: a local language model gives your meetings short names and can also "
+              "summarize them. It runs on this computer after the transcription. Skip this step "
+              "if you only need transcripts; you can choose later in Settings."),
+        )
+        holder = ctk.CTkFrame(self.body, fg_color="transparent")
+        holder.grid(row=2, column=0, sticky="ew")
+        ui.label(holder, t("Language model"), theme.SM, "bold", anchor="w").pack(
+            anchor="w", pady=(0, 6))
+        self.analysis_picker = LanguageModelPicker(
+            holder, self.app, self.state["analysis_model"], self._set_analysis,
+            width=360, wraplength=540,
+        )
+        self.analysis_picker.pack(anchor="w")
+        self.summary_switch = ui.switch(
+            self.body, t("Also summarize every meeting"), bool(self.state["summary"]),
+            lambda v: self.state.update(summary=bool(v)),
+        )
+        self.summary_switch.grid(row=3, column=0, sticky="w", pady=(14, 0))
+        if self.state["analysis_model"] == llm.NONE:
+            self.summary_switch.configure(state="disabled")
+        ui.muted(
+            self.body,
+            t("Built-in models are downloaded once from Hugging Face. "
+              "Your own model stays where it is; Ucho only reads it."),
+            theme.XS + 1, anchor="w", justify="left", wraplength=560,
+        ).grid(row=4, column=0, sticky="w", pady=(12, 0))
+
+    def _set_analysis(self, value: str) -> None:
+        self.state["analysis_model"] = value
+        self.summary_switch.configure(state="normal" if value != llm.NONE else "disabled")
+
     def _consent(self) -> None:
         self._title(t("Before your first recording"),
                     t("Four things worth knowing before you press REC."))
@@ -299,6 +335,9 @@ class Wizard(ctk.CTkFrame):
         p, rec = self.app.hardware_profile, self.app.hardware_rec
         if self.state["use_recommendation"] and p is not None and rec is not None:
             hardware.save(self.settings, p, rec, getattr(self.app, "hardware_measured", None))
+        chosen = self.state.get("analysis_model", llm.chosen(self.settings))
+        llm.set_choice(self.settings, chosen)
+        self.settings["summary_enabled"] = bool(self.state.get("summary")) and chosen != llm.NONE
         self.settings["setup_complete"] = True
         self.settings.save()
         log.info("First-start setup finished")

@@ -23,6 +23,7 @@ Records Teams, Zoom and Meet calls and your dictation, and turns them into text 
 | <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Space</kbd> | dictate wherever your cursor is; recognized while you speak, pasted about a second after you stop |
 | **Live** | the meeting is transcribed while you record, so the transcript is ready seconds after the stop (on a GPU or NPU) |
 | **Speakers** | "Me" and "Meeting" from two tracks; optional experimental speaker detection inside a track ("Speaker 1", "Speaker 2"…) and naming speakers by clicking them on the transcript |
+| **Titles & summaries** | optional: one local language model (chosen in the first-start wizard or in Settings → Language model) gives unnamed meetings short titles and can summarize them; built-in Qwen models or your own OpenVINO / `.gguf` model |
 | **MCP** | Claude Code, Cursor or Codex read your transcripts |
 | **1 h → 4–7 min** | to transcribe an hour of talk after the stop on Intel Arc graphics ([measured](docs/benchmarks.md)) |
 
@@ -47,8 +48,8 @@ Windows 10 or 11, 16 GB RAM recommended, about 3 GB of disk (8 GB with summaries
 <summary>Installer options and troubleshooting</summary>
 
 - From PowerShell instead of a double-click, in the app folder: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
-- `-WithSummary`: local summaries (Qwen model, about 5 GB). Off by default.
-- Automatic meeting titles: short titles for unnamed meetings from a local language model (Qwen3 4B, ~2.3 GB, downloaded in Settings → Meeting names).
+- `-WithSummary`: pre-downloads the default language model (`OpenVINO/Qwen3-8B-int4-ov`, ~5.0 GB) and turns on summaries. Off by default.
+- **Language model (meeting names and summaries)**: one local language model, chosen in the optional step of the first-start wizard or in Settings → Language model, serves both automatic meeting titles and summaries. Built-in models (`OpenVINO/Qwen3-8B-int4-ov` ~5.0 GB, `OpenVINO/Qwen3-4B-int4-ov` ~2.3 GB, `OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov` ~0.95 GB) are downloaded on demand. You can also point Ucho at your own model ("My own model"): an OpenVINO IR folder exported with `optimum-cli` (`openvino_model.xml`/`.bin` + `openvino_tokenizer.xml` + `openvino_detokenizer.xml`) or a single `.gguf` file (`Q4_0` and `Q8_0` tested, `Q4_1` and `F16`/`F32` accepted; `Q4_K_M` and other K-quants do not load in OpenVINO GenAI 2026.4.1 and are rejected). Your model is never copied or uploaded; quality of Polish titles and summaries is not guaranteed for custom models. Settings from v0.4 keep working (the choice is derived from the models already downloaded).
 - `-WithParakeet`: an extra NVIDIA Parakeet engine, fast on the CPU alone. Weaker with English phrases inside Polish sentences. Choose it in Settings → Hardware.
 - `-WithSpeakers`: the optional `sherpa-onnx` package for speaker detection inside a track (Settings → Transcription → Speakers; two small models, ~33 MB, downloaded when you turn it on).
 - `-Force`: install inside a OneDrive folder without asking. Not recommended: models, settings and the log with your dictated text would sync to the cloud.

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
 # SPDX-License-Identifier: Apache-2.0
-"""Settings screen: appearance and windows, hardware, transcription, dictation, audio, summary.
+"""Settings screen: appearance, hardware, transcription, dictation, audio, language model, summary.
 
 Every change is saved to settings.json at once (the transcription re-reads
 the file before it starts, see meeting.py).
@@ -11,10 +11,11 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
+from typing import Callable
 
 import customtkinter as ctk
 
-from . import config, diarize, hardware, i18n, retention, theme, transcribe, ui, winshell
+from . import config, diarize, hardware, i18n, llm, retention, theme, transcribe, ui, winshell
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .screens import PAD, Screen, header, open_path
@@ -34,6 +35,159 @@ def model_label(repo: str) -> str:
 
 def short_model(repo: str) -> str:
     return repo.split("/")[-1].removeprefix("whisper-").removesuffix("-ov")
+
+
+class LanguageModelPicker(ctk.CTkFrame):
+    """Picker for the local analysis language model (built-in, custom folder/.gguf, or none)."""
+
+    def __init__(self, master, app, value: str, on_change: Callable[[str], None],
+                 width: int = 340, wraplength: int = 520):
+        super().__init__(master, fg_color="transparent")
+        self.app = app
+        self.value = value or llm.NONE
+        self._on_change = on_change
+        self._labels: dict[str, str] = {}
+        values, current = self._menu_items()
+        self.menu = ui.option_menu(self, values, current, self._choose, width=width)
+        self.menu.pack(anchor="w")
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(anchor="w", pady=(6, 0))
+        self.state = ui.muted(row, "", theme.XS + 1, anchor="w", justify="left",
+                              wraplength=wraplength)
+        self.state.pack(side="left")
+        self.download = ui.secondary(row, t("Download model"), self._download, width=10,
+                                     height=30)
+        self.after(400, self.refresh)
+
+    def _menu_items(self) -> tuple[list[str], str]:
+        labels: dict[str, str] = {t("No language model"): llm.NONE}
+        for repo, info in config.LLM_MODELS.items():
+            labels[f"{repo.split('/')[-1]}  ({info['size']})"] = repo
+        if self.value and self.value not in labels.values():
+            if llm.is_custom(self.value):
+                custom_name = llm.label(self.value).split("/")[-1]
+                labels[t("Own: {name}", name=custom_name)] = self.value
+            else:
+                labels[self.value.split("/")[-1]] = self.value
+        self._labels = labels
+        current = next((k for k, v in labels.items() if v == self.value),
+                       t("No language model"))
+        values = list(labels) + [
+            t("My own model: folder…"),
+            t("My own model: .gguf file…"),
+        ]
+        return values, current
+
+    def _sync_menu(self) -> None:
+        values, current = self._menu_items()
+        self.menu.configure(values=values)
+        self.menu.set(current)
+
+    def _current_label(self) -> str:
+        return next((k for k, v in self._labels.items() if v == self.value),
+                    t("No language model"))
+
+    def _choose(self, label: str) -> None:
+        if label in self._labels:
+            self.value = self._labels[label]
+            self._sync_menu()
+            self._on_change(self.value)
+            self.refresh()
+            return
+        from tkinter import filedialog
+
+        if label == t("My own model: folder…"):
+            chosen = filedialog.askdirectory(
+                parent=self, mustexist=True,
+                title=t("Choose the folder of your language model"),
+            )
+        else:
+            chosen = filedialog.askopenfilename(
+                parent=self,
+                title=t("Choose a .gguf language model file"),
+                filetypes=[(t("GGUF model"), "*.gguf")],
+            )
+        if not chosen:
+            self.menu.set(self._current_label())
+            return
+        normalized, error = llm.validate_custom(chosen)
+        if normalized is None or error is not None:
+            self.menu.set(self._current_label())
+            self.download.pack_forget()
+            self.state.configure(text=error or "", text_color=C.warning)
+            return
+        self.value = normalized
+        self._sync_menu()
+        self._on_change(self.value)
+        self.refresh()
+
+    def refresh(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.download.pack_forget()
+        model = self.value
+        if not model:
+            self.state.configure(
+                text=t("Meeting names and summaries stay off. Transcription works without a language model."),
+                text_color=C.text_muted,
+            )
+            return
+        if llm.is_custom(model):
+            normalized, reason = llm.validate_custom(model)
+            if normalized is not None and reason is None:
+                self.state.configure(
+                    text=t(
+                        "Your own model: {path}. Ucho was tested only with the models in this list; "
+                        "with another model the names and summaries may be in worse Polish or empty.",
+                        path=model,
+                    ),
+                    text_color=C.text_muted,
+                )
+            else:
+                self.state.configure(
+                    text=t("Your own model is not available: {reason}", reason=reason or ""),
+                    text_color=C.warning,
+                )
+            return
+        size = llm.size(model)
+        if llm.available(model):
+            self.state.configure(
+                text=t("Model downloaded ({size})", size=size),
+                text_color=C.success,
+            )
+        else:
+            self.state.configure(
+                text=t("Not downloaded ({size}). Transcription works without it.", size=size),
+                text_color=C.text_muted,
+            )
+            self.download.configure(text=t("Download model ({size})", size=size), state="normal")
+            self.download.pack(side="left", padx=(12, 0))
+
+    def _download(self) -> None:
+        model = self.value
+        if not model or llm.is_custom(model):
+            return
+        self.download.configure(state="disabled", text=t("Downloading..."))
+
+        def job() -> None:
+            error_message: str | None = None
+            try:
+                transcribe.model_path(model, download=True)
+            except Exception as error:
+                error_message = str(error)
+                log.exception("Language model download failed")
+            self.app.post(lambda: self.winfo_exists() and self.refresh())
+            if error_message is None:
+                # Lets the owner update what depends on the model (the meeting names state).
+                self.app.post(lambda: self.winfo_exists() and self.value == model
+                              and self._on_change(model))
+            else:
+                self.app.post(lambda m=error_message: self.winfo_exists() and self.state.configure(
+                    text=t("Language model download failed: {error}", error=m),
+                    text_color=C.warning,
+                ))
+
+        threading.Thread(target=job, daemon=True).start()
 
 
 class Section(ctk.CTkFrame):
@@ -97,6 +251,7 @@ class SettingsScreen(Screen):
         self._build_transcription()
         self._build_dictation()
         self._build_audio()
+        self._build_llm()
         self._build_titles()
         self._build_summary()
         self._build_storage()
@@ -194,6 +349,8 @@ class SettingsScreen(Screen):
 
     def on_show(self, **kwargs) -> None:
         self._refresh_model()
+        self.llm_picker.refresh()
+        self._refresh_title_model()
         if not self._profile_loaded:
             self._profile_loaded = True
             self.app.load_hardware(lambda: self._show_hardware())
@@ -201,8 +358,10 @@ class SettingsScreen(Screen):
             self._show_hardware()
         if kwargs.get("section") == "hardware":
             self.scroll._parent_canvas.yview_moveto(0.12)  # noqa: SLF001
+        elif kwargs.get("section") == "llm":
+            self.scroll._parent_canvas.yview_moveto(0.59)  # noqa: SLF001
         elif kwargs.get("section") == "titles":
-            self.scroll._parent_canvas.yview_moveto(0.6)  # noqa: SLF001
+            self.scroll._parent_canvas.yview_moveto(0.64)  # noqa: SLF001
 
     def _show_hardware(self) -> None:
         p, rec = self.app.hardware_profile, self.app.hardware_rec
@@ -511,6 +670,27 @@ class SettingsScreen(Screen):
         self.settings[f"{key}_index"] = None
         self.settings.save()
 
+    # --- language model -----------------------------------------------------------------
+
+    def _build_llm(self) -> None:
+        s = self._section(
+            t("Language model (optional)"),
+            t("One local model gives meetings their names and writes the summaries. "
+              "It starts only after the transcription and is released right after it. Runs offline."),
+        )
+        self.llm_picker = s.row(
+            t("Model"),
+            lambda m: LanguageModelPicker(
+                m, self.app, llm.chosen(self.settings), self._analysis_model,
+            ),
+        )
+        s.end()
+
+    def _analysis_model(self, value: str) -> None:
+        llm.set_choice(self.settings, value)
+        self.settings.save()
+        self._refresh_title_model()
+
     # --- meeting names ------------------------------------------------------------------
 
     def _build_titles(self) -> None:
@@ -520,99 +700,46 @@ class SettingsScreen(Screen):
               "transcription, when nothing else is waiting. A name you type is never replaced."),
         )
         initial = (self.settings["auto_title"] is not False
-                   and transcribe.model_downloaded(config.TITLE_MODEL))
+                   and llm.available(llm.chosen(self.settings)))
         self.auto_title_switch = s.row(t("Automatic names"), lambda m: ui.switch(
             m, t("Name meetings automatically"), initial, self._auto_title))
         self.title_note = s.full(lambda m: None, pady=(0, 8))
         self.title_state = ui.muted(self.title_note, "", theme.XS + 1, anchor="w")
         self.title_state.pack(side="left")
-        self.title_download = ui.secondary(self.title_note, t("Download model"),
-                                           self._download_title_model, width=10, height=30)
         s.end()
         self.after(400, self._refresh_title_model)
 
     def _auto_title(self, value: bool) -> None:
         self._save("auto_title", bool(value))
-        if value and not transcribe.model_downloaded(config.TITLE_MODEL):
-            self._download_title_model()
+        self._refresh_title_model()
 
     def _refresh_title_model(self) -> None:
-        size = config.TITLE_MODEL_SIZE
-        self.title_download.pack_forget()
-        if transcribe.model_downloaded(config.TITLE_MODEL):
-            self.title_state.configure(text=t("Model downloaded ({size})", size=size),
-                                       text_color=C.success)
+        if not self.winfo_exists():
+            return
+        chosen = llm.chosen(self.settings)
+        if llm.available(chosen):
+            self.title_state.configure(
+                text=t("Uses {model}.", model=llm.label(chosen).split("/")[-1]),
+                text_color=C.success,
+            )
         else:
             self.title_state.configure(
-                text=t("Needs the language model {model} ({size}), downloaded once.",
-                       model=config.TITLE_MODEL.split("/")[-1], size=size),
+                text=t("Needs a language model: choose one in “Language model” above."),
                 text_color=C.text_muted,
             )
-            self.title_download.configure(text=t("Download model ({size})", size=size), state="normal")
-            self.title_download.pack(side="left", padx=(12, 0))
-
-    def _download_title_model(self) -> None:
-        self._download_model(config.TITLE_MODEL, self.title_download, self._refresh_title_model)
 
     # --- summary ------------------------------------------------------------------------
 
     def _build_summary(self) -> None:
         s = self._section(t("AI summary (optional)"),
-                          t("The model starts only after transcription and is released right after it. "
-                            "Runs locally, offline."))
+                          t("Uses the language model chosen above. Runs locally, offline."))
         s.row(t("Summary"), lambda m: ui.switch(
             m, t("Summarize after transcription"), self.settings["summary_enabled"],
             lambda v: self._save("summary_enabled", v)))
         s.row(t("Folder name"), lambda m: ui.switch(
             m, t("Name the folder after the topic and names"), self.settings["rename_folder"],
             lambda v: self._save("rename_folder", v)))
-        llm = {f"{k.split('/')[-1]}  ({v['size']})": k for k, v in config.LLM_MODELS.items()}
-        current = next((label for label, k in llm.items() if k == self.settings["summary_model"]),
-                       next(iter(llm)))
-        self.llm_labels = llm
-        s.row(t("Language model"), lambda m: ui.option_menu(
-            m, list(llm), current, self._llm, width=340))
-        self.llm_note = s.full(lambda m: None, pady=(0, 8))
-        self.llm_state = ui.muted(self.llm_note, "", theme.XS + 1, anchor="w")
-        self.llm_state.pack(side="left")
-        self.llm_download = ui.secondary(self.llm_note, t("Download model"), self._download_llm,
-                                         width=10, height=30)
         s.end()
-        self.after(400, self._refresh_llm)
-
-    def _llm(self, value: str) -> None:
-        self._save("summary_model", self.llm_labels.get(value, config.DEFAULT_LLM_MODEL))
-        self._refresh_llm()
-
-    def _refresh_llm(self) -> None:
-        model = self.settings["summary_model"]
-        size = config.LLM_MODELS.get(model, {}).get("size", "")
-        self.llm_download.pack_forget()
-        if transcribe.model_downloaded(model):
-            self.llm_state.configure(text=t("Model downloaded ({size})", size=size), text_color=C.success)
-        else:
-            self.llm_state.configure(text=t("Not downloaded ({size}). Transcription works without it.",
-                                            size=size), text_color=C.text_muted)
-            self.llm_download.configure(text=t("Download model ({size})", size=size), state="normal")
-            self.llm_download.pack(side="left", padx=(12, 0))
-
-    def _download_llm(self) -> None:
-        self._download_model(self.settings["summary_model"], self.llm_download, self._refresh_llm)
-
-    def _download_model(self, model: str, button, refresh) -> None:
-        button.configure(state="disabled", text=t("Downloading..."))
-
-        def job():
-            try:
-                transcribe.model_path(model, download=True)
-            except Exception as error:
-                message = str(error)
-                log.exception("Language model download failed")
-                self.app.post(lambda: self.app.toast(
-                    t("Language model download failed: {error}", error=message), "warning"))
-            self.app.post(refresh)
-
-        threading.Thread(target=job, daemon=True).start()
 
     # --- storage ------------------------------------------------------------------------
 

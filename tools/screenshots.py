@@ -202,13 +202,15 @@ def main(argv: list[str]) -> int:
              lambda: (transcribing(True), app.show("transcript", live=True)))
         shot(f"settings-hardware-{mode}",
              lambda: (transcribing(False), app.show("settings", section="hardware")))
+        shot(f"settings-llm-{mode}", lambda: app.show("settings", section="llm"))
         shot(f"settings-titles-{mode}", lambda: app.show("settings", section="titles"))
     shot("transcript-all-actions-light",
          lambda: (app.set_theme("light"),
                   app.show("transcript", folder=recordings / "2026-11-07_09-15_Przeglad-sprintu")))
     shot("wizard-language-light", lambda: (app.set_theme("light"), app.show_wizard(0)))
     shot("wizard-hardware-light", lambda: app.show_wizard(2))
-    shot("wizard-consent-dark", lambda: (app.set_theme("dark"), app.show_wizard(3)))
+    shot("wizard-llm-light", lambda: app.show_wizard(3))
+    shot("wizard-consent-dark", lambda: (app.set_theme("dark"), app.show_wizard(4)))
     shot("layout-tray-main-light", lambda: (app.set_theme("light"), app.wizard().finish(),
                                             app.set_layout("tray"), app.show("meeting")))
     shot("layout-tray-dictation-light", lambda: (dictating(True), app.show_dictation()), "dictation")
@@ -224,8 +226,8 @@ def main(argv: list[str]) -> int:
             return
         name, prepare, window = queue_.pop(0)
         prepare()
-        app.after(1500 if "settings" in name or "wizard-hardware" in name else 900,
-                  lambda: capture(name, window))
+        slow = "settings" in name or "wizard-hardware" in name or "wizard-llm" in name
+        app.after(1500 if slow else 900, lambda: capture(name, window))
 
     def capture(name, window):
         if (name, ) and any(s[0] == name for s in selected):
