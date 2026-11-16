@@ -37,6 +37,10 @@ Two mechanical filters run on the result, because no prompt was enough:
 
 Meetings up to ~40 minutes are summarized in one pass. Longer ones are split, but the threshold is high on purpose: map-reduce loses decisions that are renegotiated during a meeting (the model took the first proposed date and missed that it was moved half an hour later).
 
+### Automatic meeting titles
+
+Meetings the user did not name (`name_source` not `"user"`) and that have no summary get a short 3–7 word title from `OpenVINO/Qwen3-4B-int4-ov` (`ucho/titles.py`, setting `auto_title`). The prompt receives only a bounded excerpt (the first ~1,800 characters plus ~900 characters from the middle), so the cost stays around 1,000 prompt tokens regardless of meeting length. Output is constrained by a JSON schema (`{"title": "..."}`), then cleaned and checked by filters: 2–8 words, at most 60 characters, no generic words ("Spotkanie", "Meeting"), no invented months or numeric dates (`_without_invented_dates`), no numbers absent from the transcript, and in Polish no capitalized words (names) that were not said in the transcript. Title generation runs through `engine.exclusive` only after the transcription queue is empty, and yields immediately (aborting via the streamer and retrying later) whenever a recording, dictation, transcription or summary starts. The result is stored in `meta.json` as `name` with `name_source: "auto"`; a user-typed name (`name_source: "user"`, set at recording start or via Rename) is never overwritten and takes precedence over a summary topic in `display_title`.
+
 ## 6. MCP: the archive as memory for your agent
 
 `ucho_mcp/server.py` is a stdio MCP server built only on the Python standard library: JSON-RPC over stdin/stdout, no ports, no network, read-only. It reads `meta.json` segments through `ucho/session.py` (the same reader the app uses, which also understands the Polish file names and keys of v0.1 archives), builds an in-memory SQLite FTS5 index (diacritics-insensitive, prefix search) and rebuilds it when the archive changes. Meeting ids are folder names; anything containing a path separator or `..` is rejected.

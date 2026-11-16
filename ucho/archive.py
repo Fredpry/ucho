@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import session as sessions
-from .merge import META_FILE, TRANSCRIPT_MD
+from .merge import META_FILE, TRANSCRIPT_MD, display_title
 
 
 class ArchiveError(Exception):
@@ -182,7 +182,7 @@ class Archive:
         meta = self.meta(session) if meta is None else meta
         description = {
             "id": session.name,
-            "title": meta.get("topic") or meta.get("name") or session.name,
+            "title": display_title(meta) or session.name,
             "date": meta.get("date") or sessions.date_from_name(session.name),
             "duration": hms(meta["duration_s"]) if meta.get("duration_s") else None,
             "transcript": sessions.find_file(session, TRANSCRIPT_MD) is not None,

@@ -46,7 +46,7 @@ class FakeApp:
         self.engine = FakeEngine()
         self.settings = FakeSettings(model="M", device="GPU", language="auto", summary_enabled=False,
                                      summary_model="LLM", rename_folder=False,
-                                     transcribe_after_stop=True)
+                                     transcribe_after_stop=True, auto_title=False)
         self.posted: list = []
 
     def post(self, fn):

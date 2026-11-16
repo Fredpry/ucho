@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- **Automatic meeting titles** (#17): meetings you did not name and that have no summary get a short title from `OpenVINO/Qwen3-4B-int4-ov` (~2.3 GB, the same model as the 4B summary option, offered in Settings → Meeting names, not downloaded by the installer, on automatically when the model is present). Runs after the transcription when no other transcription waits and no dictation or recording is running, and steps aside (stops and retries later) when one starts. Takes about 1 s per title on the Arc iGPU plus the model load, and 7 to 27 s on the CPU (numbers in `docs/benchmarks.md`). A typed name is never replaced (`name_source: "user"` vs `"auto"` in `meta.json`); the session folder is renamed only when the folder-naming setting (`rename_folder`) is on. New settings key `auto_title`.
+- **Rename** button on the Transcript screen to rename any finished recording (`name_source: "user"`).
 - A dictation spoken while a meeting is being transcribed goes first: no new transcription chunk starts while you speak, the meeting screen says the transcription is paused for a dictation, and the dictation window says when it waits for the transcription (#13).
 
 ## v0.3.0 (2026-11-16)

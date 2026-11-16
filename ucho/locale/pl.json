@@ -329,5 +329,14 @@
   "Waiting for the transcription…": "Czekam na transkrypcję…",
   "Waiting for the summary…": "Czekam na podsumowanie…",
   "Waiting for the model…": "Czekam na model…",
-  "Paused for a dictation": "Wstrzymano na czas dyktowania"
+  "Paused for a dictation": "Wstrzymano na czas dyktowania",
+  "Meeting names": "Nazwy spotkań",
+  "Automatic names": "Nazwy automatyczne",
+  "Name meetings automatically": "Nadawaj nazwy spotkaniom automatycznie",
+  "Meetings you did not name get a short title from a local language model after the transcription, when nothing else is waiting. A name you type is never replaced.": "Spotkania bez nazwy dostają po transkrypcji krótki tytuł z lokalnego modelu językowego, gdy nic innego nie czeka. Nazwa wpisana przez Ciebie nigdy nie jest zastępowana.",
+  "Needs the language model {model} ({size}), downloaded once.": "Wymaga modelu językowego {model} ({size}), pobieranego raz.",
+  "Rename": "Zmień nazwę",
+  "New name for this recording:": "Nowa nazwa nagrania:",
+  "This recording is busy. Rename it when it has finished.": "To nagranie jest teraz przetwarzane. Zmień nazwę, gdy się skończy.",
+  "Could not rename: {error}": "Nie udało się zmienić nazwy: {error}"
 }

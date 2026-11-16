@@ -37,7 +37,7 @@ The LGPL libraries are installed as separate, unmodified packages in a normal vi
 | OpenVINO/whisper-large-v3-turbo-int8-ov | transcription, optional | MIT |
 | OpenVINO/whisper-large-v3-turbo-int4-ov | transcription, optional | MIT |
 | OpenVINO/Qwen3-8B-int4-ov | summaries, optional | Apache-2.0 |
-| OpenVINO/Qwen3-4B-int4-ov | summaries, optional | Apache-2.0 |
+| OpenVINO/Qwen3-4B-int4-ov | summaries and meeting titles, optional | Apache-2.0 |
 | OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov | summaries, optional | Apache-2.0 |
 
 | csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3 | transcription and dictation, optional (Parakeet backend, only with `-WithParakeet`) | CC BY 4.0 |

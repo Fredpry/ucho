@@ -44,7 +44,7 @@ class FakeApp:
         self.engine = FakeEngine()
         self.settings = FakeSettings(model="M", device="CPU", language="auto",
                                      summary_enabled=summary, summary_model="LLM",
-                                     rename_folder=False)
+                                     rename_folder=False, auto_title=False)
         self.posted: list = []
 
     def post(self, fn):

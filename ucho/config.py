@@ -122,6 +122,16 @@ LLM_MODELS = {
 
 DEFAULT_LLM_MODEL = "OpenVINO/Qwen3-8B-int4-ov"
 
+# Model for automatic meeting titles (ucho/titles.py). Measured on 10 synthetic
+# Polish and English meetings (docs/benchmarks.md, "Meeting titles"): Qwen3-1.7B
+# and Qwen2.5-1.5B gave a wrong or ungrammatical Polish title in 3-4 of 10,
+# Qwen3-0.6B in most; Qwen3-4B in none. 4B takes about 1 s on the Arc iGPU and
+# 7-27 s on the CPU per title. It is the same pinned model as the 4B summary
+# option, so one download serves both. Offered in Settings, never downloaded by
+# the installer.
+TITLE_MODEL = "OpenVINO/Qwen3-4B-int4-ov"
+TITLE_MODEL_SIZE = LLM_MODELS[TITLE_MODEL]["size"]
+
 # Pinned model revisions (Hugging Face commit, checked 14.11.2026). We download
 # exactly these, so a model swapped in the source repository does not reach
 # users without a change to this dict.
@@ -228,6 +238,10 @@ DEFAULTS = {
     "summary_enabled": False,
     "summary_model": DEFAULT_LLM_MODEL,
     "rename_folder": False,
+    # Name meetings the user did not name with a short title from the title model
+    # (ucho/titles.py); None = automatic: on when the title model is downloaded;
+    # True/False = the user's choice.
+    "auto_title": None,
     # Delete the audio of transcribed recordings after this many days (0 = never).
     # Transcripts, summaries and meta.json stay. See ucho/retention.py.
     "audio_retention_days": 0,

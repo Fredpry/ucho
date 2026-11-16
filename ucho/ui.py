@@ -47,6 +47,7 @@ GLYPHS = {
     "speed": "\uEC4A",       # Speed high
     "close": "\uE711",
     "delete": "\uE74D",
+    "edit": "\uE70F",
 }
 _icon_font_path: str | None = None
 _icon_cache: dict = {}

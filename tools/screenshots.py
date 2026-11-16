@@ -201,6 +201,7 @@ def main(argv: list[str]) -> int:
              lambda: (transcribing(True), app.show("transcript", live=True)))
         shot(f"settings-hardware-{mode}",
              lambda: (transcribing(False), app.show("settings", section="hardware")))
+        shot(f"settings-titles-{mode}", lambda: app.show("settings", section="titles"))
     shot("transcript-all-actions-light",
          lambda: (app.set_theme("light"),
                   app.show("transcript", folder=recordings / "2026-11-07_09-15_Przeglad-sprintu")))
