@@ -22,7 +22,7 @@ from .archive import Match, fold, hms, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .meeting import same_folder
-from .merge import TRANSCRIPT_MD, TRANSCRIPT_PARTIAL, format_hms, speaker_label
+from .merge import TRANSCRIPT_MD, TRANSCRIPT_PARTIAL, display_title, format_hms, speaker_label
 from .theme import C
 
 log = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def open_path(path: Path) -> None:
 
 def describe(meta: dict, folder: Path) -> tuple[str, str]:
     """(title, "date · duration") of a session."""
-    title = meta.get("topic") or meta.get("name") or session_title(folder.name)
+    title = display_title(meta) or session_title(folder.name)
     parts = [meta.get("date") or session.date_from_name(folder.name)]
     if meta.get("duration_s"):
         parts.append(hms(meta["duration_s"]))
@@ -287,7 +287,7 @@ class MeetingScreen(Screen):
                 self.app.settings.save()
 
     def _event(self, event: str, data) -> None:
-        if event in ("state", "saved", "summary", "transcribed"):
+        if event in ("state", "saved", "summary", "transcribed", "titled", "renamed"):
             self.refresh_recent()
         elif event == "live":
             self._show_live_text(data)
@@ -502,8 +502,9 @@ class RecordingsScreen(Screen):
         self._after = None
         self._generation = 0
         # "state" too: the status of queued and running transcriptions changes with it.
-        app.meeting.listen(lambda event, _d: event in ("state", "saved", "summary", "transcribed")
-                           and self.winfo_ismapped() and self.search())
+        app.meeting.listen(lambda event, _d: event in (
+            "state", "saved", "summary", "transcribed", "titled", "renamed"
+        ) and self.winfo_ismapped() and self.search())
 
     def on_show(self, **kwargs) -> None:
         if "query" in kwargs:
@@ -606,6 +607,7 @@ class TranscriptScreen(Screen):
         self.copy.pack(side="left", padx=(0, 8))
         self.open = ui.secondary(self.buttons, t("Open folder"), self._open, "folder", width=10)
         self.open.pack(side="left", padx=(0, 8))
+        self.rename = ui.secondary(self.buttons, t("Rename"), self._rename, "edit", width=10)
         self.again = ui.secondary(self.buttons, t("Transcribe again"), self._again, "refresh",
                                   width=10)
         self.again.pack(side="left", padx=(0, 8))
@@ -715,6 +717,7 @@ class TranscriptScreen(Screen):
         position = self.meeting.queue_position(self.folder)
         has_audio = bool(self.folder and session.audio_tracks(self.folder))
         has_summary = bool(self.folder and session.find_file(self.folder, session.SUMMARY_MD))
+        self.rename.pack_forget()
         self.again.pack_forget()
         self.summarize.pack_forget()
         self.stop.pack_forget()
@@ -727,6 +730,8 @@ class TranscriptScreen(Screen):
             self.progress_label.configure(text=t("Queued, #{n}", n=position))
             self.progress_row.grid(row=4, column=0, sticky="ew", padx=PAD, pady=(0, 12))
         else:
+            if self.folder is not None:
+                self.rename.pack(side="left", padx=(0, 8))
             if has_audio:
                 self.again.pack(side="left", padx=(0, 8))
             if self.segments and not has_summary:
@@ -759,6 +764,18 @@ class TranscriptScreen(Screen):
     # --- events ----------------------------------------------------------------
 
     def _event(self, event: str, data) -> None:
+        if event == "titled":
+            old, new, _name = data
+            if self.folder is not None and same_folder(self.folder, old) and not self.live:
+                self._show_session(new)
+                self._update_actions()
+            return
+        if event == "renamed":
+            folder, _name = data
+            if self.folder is not None and same_folder(self.folder, folder) and not self.live:
+                self._show_session(folder)
+                self._update_actions()
+            return
         m = self.meeting
         if not self.live:
             if event == "state" and self.folder is not None:
@@ -817,6 +834,15 @@ class TranscriptScreen(Screen):
     def _open(self) -> None:
         if self.folder is not None:
             open_path(self.folder)
+
+    def _rename(self) -> None:
+        if self.folder is None:
+            return
+        dialog = ctk.CTkInputDialog(text=t("New name for this recording:"), title=t("Rename"))
+        value = dialog.get_input()
+        if value and value.strip() and self.meeting.rename(self.folder, value):
+            self._show_session(self.folder)
+            self._update_actions()
 
     def _again(self) -> None:
         if self.folder is not None and self.meeting.transcribe_again(self.folder):

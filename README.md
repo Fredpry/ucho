@@ -46,6 +46,7 @@ Windows 10 or 11, 16 GB RAM recommended, about 3 GB of disk (8 GB with summaries
 
 - From PowerShell instead of a double-click, in the app folder: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
 - `-WithSummary`: local summaries (Qwen model, about 5 GB). Off by default.
+- Automatic meeting titles: short titles for unnamed meetings from a local language model (Qwen3 4B, ~2.3 GB, downloaded in Settings → Meeting names).
 - `-WithParakeet`: an extra NVIDIA Parakeet engine, fast on the CPU alone. Weaker with English phrases inside Polish sentences. Choose it in Settings → Hardware.
 - `-Force`: install inside a OneDrive folder without asking. Not recommended: models, settings and the log with your dictated text would sync to the cloud.
 - Options also work with the double-click file: `install.cmd -WithSummary`.

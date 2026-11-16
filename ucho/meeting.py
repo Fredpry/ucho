@@ -21,8 +21,16 @@ Events (name, data):
     status         text
     transcribed    (folder, segments, meta, summary_expected)
     summary        (folder, result)
+    titled         (old_folder, new_folder, name)
+    renamed        (folder, name)
     error          text
     live           segments recognized so far in the recording (live transcription)
+
+Automatic titles (ucho/titles.py, setting "auto_title"): sessions the user did
+not name and that have no summary get a short title from the local language
+model after the transcription queue is empty. Title jobs run through
+`engine.exclusive` and yield immediately (and retry later) when a recording,
+dictation, transcription or summary starts, so naming never delays user work.
 
 Live transcription (ucho/live_meeting.py, setting "meeting_live"): while a
 meeting records, the chunks the transcription after the stop will cut are
@@ -37,18 +45,22 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
-from . import config, session, transcribe
+from . import config, session, titles, transcribe
 from .i18n import t
-from .merge import (TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
+from .merge import (META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
                     TRANSCRIPTION_ERRORS, Segment, save_results, slug)
 
 log = logging.getLogger(__name__)
+
+TITLE_RETRY_S = 30.0
 
 
 class MeetingController:
@@ -58,6 +70,7 @@ class MeetingController:
         self.recording = False
         self.recording_start = 0.0
         self.session_name = ""
+        self.session_name_source: str | None = None
         self.session_dir: Path | None = None  # the session being transcribed or summarized
         self.recording_dir: Path | None = None  # the session being recorded right now
         self.last_stopped: Path | None = None  # folder of the last finished recording
@@ -71,6 +84,10 @@ class MeetingController:
         self.last_meta: dict = {}
         self._job = None
         self._queue: deque[tuple[Path, dict, dict]] = deque()  # (folder, files, meta)
+        self._titles: deque[Path] = deque()
+        self._titling: Path | None = None
+        self._title_job = None
+        self._title_timer: threading.Timer | None = None
         self.live = None  # live_meeting.LiveMeeting of the recording, when on
         self.live_segments: list[Segment] = []
         self._live_meta: dict = {}
@@ -123,6 +140,7 @@ class MeetingController:
 
     def dequeue(self, folder: Path) -> bool:
         """Takes a session out of the queue (for example before it is deleted)."""
+        self._drop_title(folder)
         for entry in list(self._queue):
             if same_folder(entry[0], folder):
                 self._queue.remove(entry)
@@ -130,6 +148,11 @@ class MeetingController:
                 self._emit("state")
                 return True
         return False
+
+    def _drop_title(self, folder: Path) -> None:
+        for queued in list(self._titles):
+            if same_folder(queued, folder):
+                self._titles.remove(queued)
 
     def in_use(self, folder: Path | None) -> bool:
         """Recorded, transcribed, summarized or waiting in the queue: not to be deleted or trimmed."""
@@ -139,6 +162,8 @@ class MeetingController:
         if self.recording and same_folder(self.recording_dir, folder, unknown=True):
             return True
         if self.busy and same_folder(self.session_dir, folder, unknown=True):
+            return True
+        if self._titling is not None and same_folder(self._titling, folder, unknown=True):
             return True
         return any(same_folder(queued, folder, unknown=True) for queued, _files, _meta in list(self._queue))
 
@@ -163,11 +188,13 @@ class MeetingController:
             return False
         from . import audio
 
-        name = name.strip() or t("Meeting")
+        typed = name.strip()
+        name_source = "user" if typed else None
+        name = typed or t("Meeting")
         now = datetime.now()
         stamp = now.strftime("%Y-%m-%d_%H-%M")
         folder = self.settings.recordings_dir / f"{stamp}_{slug(name) or 'Meeting'}"
-        live = self._new_live(folder, name, now)
+        live = self._new_live(folder, name, now, name_source=name_source)
         recorder = audio.Recorder(
             tracks=self.settings["tracks"],
             microphone=self.settings["microphone_name"],
@@ -194,6 +221,7 @@ class MeetingController:
         self.recording_dir = folder
         # Not session_dir: that one belongs to a transcription that may still run.
         self.session_name = name
+        self.session_name_source = name_source
         self.recording_start = time.time()
         self.message = (("; ".join(recorder.warnings)), "warning") if recorder.warnings else None
         log.info("Recording started: %s", folder.name)
@@ -229,6 +257,8 @@ class MeetingController:
             "system_device": result["tracks"].get("system", {}).get("device"),
             "genai": transcribe.genai_version(),
         }
+        if self.session_name_source == "user":
+            meta["name_source"] = "user"
         if live is not None:
             log.info("Live transcription while recording: %d chunks done, %d failed%s",
                      live.done, live.errors, ", stopped early (too slow)" if live.gave_up else "")
@@ -251,7 +281,8 @@ class MeetingController:
         """Live transcription runs only when the recording is transcribed after the stop anyway."""
         return bool(self.settings["transcribe_after_stop"]) and self.settings.meeting_live()
 
-    def _new_live(self, folder: Path, name: str, started: datetime):
+    def _new_live(self, folder: Path, name: str, started: datetime,
+                  name_source: str | None = None):
         """A LiveMeeting for a new recording, or None when off or the model is missing."""
         if not self.live_wanted():
             return None
@@ -267,6 +298,8 @@ class MeetingController:
             "model": model,
             "language": language,
         }
+        if name_source == "user":
+            self._live_meta["name_source"] = "user"
         dictation = getattr(self.app, "dictation", None)
 
         def dictating() -> bool:
@@ -338,6 +371,7 @@ class MeetingController:
             if self._start(folder, files, meta, cache):
                 return
         self._emit("state")
+        self._next_title()
 
     def _finished(self) -> None:
         """The current session is done (transcript, and summary when expected) or failed."""
@@ -417,6 +451,11 @@ class MeetingController:
                 failed(RuntimeError(t("Saving failed: {error}", error=error)))
                 return
             expected = self._summary_expected(segments)
+            if (not expected and segments and self.titles_enabled()
+                    and titles.wants_title(full, folder.name)
+                    and not same_folder(self._titling, folder)
+                    and not any(same_folder(queued, folder) for queued in self._titles)):
+                self._titles.append(folder)
             # Summarizing first: `busy` must not drop between the two steps,
             # or a queued session would start in between.
             self.summarizing = expected
@@ -542,10 +581,134 @@ class MeetingController:
         self.last_meta = meta
         self._emit("summary", (folder, result))
 
+    # --- automatic titles and user rename -------------------------------------
+
+    def titles_enabled(self) -> bool:
+        value = self.settings.get("auto_title")
+        if value is False:
+            return False
+        return transcribe.model_downloaded(config.TITLE_MODEL)
+
+    def _title_should_yield(self) -> bool:
+        dictating = bool(getattr(getattr(self.app, "dictation", None), "recording", False))
+        return bool(self.recording or self.transcribing or self.summarizing
+                    or self._queue or dictating)
+
+    def _next_title(self) -> None:
+        if self._titling is not None or not self._titles:
+            return
+        if not self.titles_enabled():
+            self._titles.clear()
+            return
+        if self._title_should_yield():
+            self._retry_titles()
+            return
+        chosen = None
+        while self._titles:
+            candidate = self._titles.popleft()
+            if not candidate.is_dir():
+                continue
+            meta = session.read_meta(candidate)
+            segments = session.segments(meta)
+            if segments and titles.wants_title(meta, candidate.name):
+                chosen = (candidate, meta, segments)
+                break
+        if chosen is None:
+            return
+        folder, meta, segments = chosen
+        self._titling = folder
+
+        def work(job):
+            cancel = SimpleNamespace(is_set=lambda: job.cancel.is_set() or self._title_should_yield())
+            if cancel.is_set():
+                return (True, {})
+            result = titles.generate_title(
+                segments, config.TITLE_MODEL, self.settings["device"],
+                cancel=cancel, language=meta.get("language"))
+            return (cancel.is_set(), result)
+
+        def done(value) -> None:
+            self.app.post(lambda: self._title_finished(folder, *value))
+
+        def failed(error: BaseException) -> None:
+            log.warning("Title generation failed: %s", type(error).__name__)
+            self.app.post(lambda: self._title_finished(folder, False, {}))
+
+        self._title_job = self.app.engine.exclusive(work, "title", on_done=done, on_error=failed)
+
+    def _retry_titles(self) -> None:
+        if self._title_timer is not None and self._title_timer.is_alive():
+            return
+        timer = threading.Timer(TITLE_RETRY_S, lambda: self.app.post(self._next_title))
+        timer.daemon = True
+        timer.start()
+        self._title_timer = timer
+
+    def _title_finished(self, folder: Path, interrupted: bool, result: dict) -> None:
+        self._titling = None
+        self._title_job = None
+        if interrupted:
+            if not any(same_folder(queued, folder) for queued in self._titles):
+                self._titles.appendleft(folder)
+            self._retry_titles()
+            return
+        try:
+            if result and folder.is_dir():
+                meta = session.read_meta(folder)
+                if titles.wants_title(meta, folder.name):
+                    meta["name"] = result["name"]
+                    meta["name_source"] = "auto"
+                    for key in ("title_model", "title_device", "title_time_s"):
+                        if key in result:
+                            meta[key] = result[key]
+                    try:
+                        save_results(folder, session.segments(meta), meta)
+                    except OSError as error:
+                        log.warning("Could not save automatic title: %s", type(error).__name__)
+                        return
+                    new = (rename_session(folder, {"topic": result["name"], "participants": []})
+                           if self.settings["rename_folder"] else folder)
+                    self._emit("titled", (folder, new, result["name"]))
+        finally:
+            self._next_title()
+
+    def rename(self, folder: Path, name: str) -> bool:
+        name = " ".join(name.split())[:120]
+        if not name:
+            return False
+        if (self.is_active(folder) or self.queue_position(folder)
+                or (self.recording and same_folder(self.recording_dir, folder))):
+            self._emit("error", t("This recording is busy. Rename it when it has finished."))
+            return False
+        meta = session.read_meta(folder)
+        meta["name"] = name
+        meta["name_source"] = "user"
+        for key in ("title_model", "title_device", "title_time_s"):
+            meta.pop(key, None)
+        segments = session.segments(meta)
+        try:
+            if segments:
+                save_results(folder, segments, meta)
+            else:
+                (folder / META_FILE).write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as error:
+            self._emit("error", t("Could not rename: {error}", error=error))
+            return False
+        self._drop_title(folder)
+        self._emit("renamed", (folder, name))
+        return True
+
     def quit(self) -> None:
         if self.recording:
             # Do not lose a recording in progress: close the files properly.
             self.stop()
+        if self._title_timer is not None:
+            self._title_timer.cancel()
+            self._title_timer = None
+        self._titles.clear()
+        if self._title_job is not None:
+            self._title_job.cancel.set()
         if self._queue:
             # Not saved: these sessions keep their audio and can be
             # transcribed later with "Transcribe again".

@@ -97,6 +97,7 @@ class SettingsScreen(Screen):
         self._build_transcription()
         self._build_dictation()
         self._build_audio()
+        self._build_titles()
         self._build_summary()
         self._build_storage()
         self._build_about()
@@ -200,6 +201,8 @@ class SettingsScreen(Screen):
             self._show_hardware()
         if kwargs.get("section") == "hardware":
             self.scroll._parent_canvas.yview_moveto(0.12)  # noqa: SLF001
+        elif kwargs.get("section") == "titles":
+            self.scroll._parent_canvas.yview_moveto(0.6)  # noqa: SLF001
 
     def _show_hardware(self) -> None:
         p, rec = self.app.hardware_profile, self.app.hardware_rec
@@ -447,6 +450,49 @@ class SettingsScreen(Screen):
         self.settings[f"{key}_index"] = None
         self.settings.save()
 
+    # --- meeting names ------------------------------------------------------------------
+
+    def _build_titles(self) -> None:
+        s = self._section(
+            t("Meeting names"),
+            t("Meetings you did not name get a short title from a local language model after the "
+              "transcription, when nothing else is waiting. A name you type is never replaced."),
+        )
+        initial = (self.settings["auto_title"] is not False
+                   and transcribe.model_downloaded(config.TITLE_MODEL))
+        self.auto_title_switch = s.row(t("Automatic names"), lambda m: ui.switch(
+            m, t("Name meetings automatically"), initial, self._auto_title))
+        self.title_note = s.full(lambda m: None, pady=(0, 8))
+        self.title_state = ui.muted(self.title_note, "", theme.XS + 1, anchor="w")
+        self.title_state.pack(side="left")
+        self.title_download = ui.secondary(self.title_note, t("Download model"),
+                                           self._download_title_model, width=10, height=30)
+        s.end()
+        self.after(400, self._refresh_title_model)
+
+    def _auto_title(self, value: bool) -> None:
+        self._save("auto_title", bool(value))
+        if value and not transcribe.model_downloaded(config.TITLE_MODEL):
+            self._download_title_model()
+
+    def _refresh_title_model(self) -> None:
+        size = config.TITLE_MODEL_SIZE
+        self.title_download.pack_forget()
+        if transcribe.model_downloaded(config.TITLE_MODEL):
+            self.title_state.configure(text=t("Model downloaded ({size})", size=size),
+                                       text_color=C.success)
+        else:
+            self.title_state.configure(
+                text=t("Needs the language model {model} ({size}), downloaded once.",
+                       model=config.TITLE_MODEL.split("/")[-1], size=size),
+                text_color=C.text_muted,
+            )
+            self.title_download.configure(text=t("Download model ({size})", size=size), state="normal")
+            self.title_download.pack(side="left", padx=(12, 0))
+
+    def _download_title_model(self) -> None:
+        self._download_model(config.TITLE_MODEL, self.title_download, self._refresh_title_model)
+
     # --- summary ------------------------------------------------------------------------
 
     def _build_summary(self) -> None:
@@ -490,8 +536,10 @@ class SettingsScreen(Screen):
             self.llm_download.pack(side="left", padx=(12, 0))
 
     def _download_llm(self) -> None:
-        model = self.settings["summary_model"]
-        self.llm_download.configure(state="disabled", text=t("Downloading..."))
+        self._download_model(self.settings["summary_model"], self.llm_download, self._refresh_llm)
+
+    def _download_model(self, model: str, button, refresh) -> None:
+        button.configure(state="disabled", text=t("Downloading..."))
 
         def job():
             try:
@@ -501,7 +549,7 @@ class SettingsScreen(Screen):
                 log.exception("Language model download failed")
                 self.app.post(lambda: self.app.toast(
                     t("Language model download failed: {error}", error=message), "warning"))
-            self.app.post(self._refresh_llm)
+            self.app.post(refresh)
 
         threading.Thread(target=job, daemon=True).start()
 

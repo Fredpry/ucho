@@ -3,8 +3,8 @@
 import json
 
 from ucho import i18n
-from ucho.merge import (Segment, as_markdown, as_srt, as_text, clean, format_hms, merge_tracks,
-                        save_results, slug, strip_outro)
+from ucho.merge import (Segment, as_markdown, as_srt, as_text, clean, display_title, format_hms,
+                        merge_tracks, save_results, slug, strip_outro)
 
 
 def test_clean_drops_whisper_hallucinations():
@@ -96,3 +96,15 @@ def test_save_results_writes_new_names_and_english_keys(tmp_path):
     meta = json.loads(files["meta"].read_text(encoding="utf-8"))
     assert meta["segment_count"] == 1
     assert meta["segments"] == [{"start": 0.0, "end": 2.0, "text": "Dzień dobry.", "speaker": "me"}]
+
+
+def test_display_title_priorities():
+    assert display_title({"name": "Typed name", "name_source": "user", "topic": "Summary topic"}) == "Typed name"
+    assert display_title({"name": "   ", "name_source": "user", "topic": "Summary topic"}) == "Summary topic"
+    assert display_title({"name": "Auto name", "name_source": "auto", "topic": "Summary topic"}) == "Summary topic"
+    assert display_title({"name": "Auto name", "name_source": "auto"}) == "Auto name"
+    assert display_title({"name": "Default name", "topic": "Summary topic"}) == "Summary topic"
+    assert display_title({"name": "Default name"}) == "Default name"
+    assert display_title({}) == ""
+    assert "# Transcript: Typed name" in as_markdown([], {"name": "Typed name", "name_source": "user", "topic": "Summary topic"})
+

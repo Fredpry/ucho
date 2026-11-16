@@ -126,6 +126,26 @@ Limits: synthetic speech with clear pauses and a steady level. In a real meeting
 .\.venv\Scripts\python.exe tools\benchmark_engine.py --live-meeting --louder-from 4 --speed 4 --offline-runs 1
 ```
 
+## Meeting titles (#17)
+
+Automatic short titles for unnamed meetings (`ucho/titles.py`). Measured on 10 synthetic meetings written for the test (5 to 60 minutes, 7 Polish and 3 English); OpenVINO GenAI 2026.4.1; Core Ultra 7 258V, Arc 140V; greedy decoding, JSON schema; quality judged by hand:
+
+| Model | Size | Usable titles (of 10) | Title, Arc iGPU | Title, CPU |
+|---|---|---|---|---|
+| Qwen3-0.6B INT4 | 0.45 GB | 2 (most start with "Spotkanie", broken grammar) | 0.9-2.5 s | not measured |
+| Qwen2.5-1.5B Instruct INT4 | 0.94 GB | 6 (wrong topic for the interview, "Kampania Premiera") | 0.6-1.5 s | not measured |
+| Qwen3-1.7B INT4 | 1.21 GB | 6-7 (missed the job interview and the rescheduling call in 2 of 3 prompt variants, lower-case titles) | 0.4-1.1 s | 14-43 s |
+| Qwen3-4B INT4 | 2.29 GB | 10 | 0.6-1.2 s | 7-27 s |
+
+Notes:
+- Times are per title for ~1,000 prompt tokens (1,800 + 900 characters of transcript), after the model is loaded.
+- Loading from the OpenVINO cache took 1.4-2.8 s on the GPU and 4.4 s on the CPU; the first load ever (compilation) took about 30 s on the GPU.
+- With 1,450 prompt tokens the CPU took 40-47 s, hence the smaller excerpt (1,800 + 900 characters).
+- CPU numbers vary because the machine was shared with other work during the test.
+- Example titles by Qwen3-4B: "Plan wdrożenia systemu magazynowego", "Przełożenie czwartkowego spotkania", "Przenoszenie pipeline'ów na GitHub Actions", "Analytics Dashboard Roadmap Review", "Xero Invoice Sync Issue Resolution".
+- Prompt lessons: example titles in the prompt were copied into unrelated meetings ("Odbiór prac remontowych..."), and a list of meeting kinds made every title start with "Planowanie" or "Negocjacje".
+- Next step: check on real meetings locally (not in the repo).
+
 ## Parakeet TDT 0.6B v3 as an optional backend (v0.2)
 
 Plan v0.2, W6: is NVIDIA's Parakeet TDT 0.6B v3 (25 European languages, Polish among them), run through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), good enough to offer as an alternative to Whisper? Measure first; Whisper stays the default whatever the result.

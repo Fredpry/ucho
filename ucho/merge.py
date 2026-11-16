@@ -182,8 +182,16 @@ def _srt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def display_title(meta: dict) -> str:
+    """The session title to show: a user-typed name wins over a summary topic."""
+    name = str(meta.get("name") or "").strip()
+    if meta.get("name_source") == "user" and name:
+        return name
+    return str(meta.get("topic") or meta.get("name") or "")
+
+
 def as_markdown(segments: list[Segment], meta: dict) -> str:
-    title = meta.get("topic") or meta.get("name") or t("Meeting")
+    title = display_title(meta) or t("Meeting")
     lines = [
         "# " + t("Transcript: {title}", title=title),
         "",

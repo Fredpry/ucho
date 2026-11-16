@@ -40,6 +40,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/merge.py` | `Segment`, speaker codes and labels, merging tracks, hallucination filter, `transcript.md/.srt/.txt`, `meta.json` |
 | `ucho/session.py` | The one reader of session folders, for the app and the MCP server; maps v0.1 Polish file names and `meta.json` keys to the current ones |
 | `ucho/summary.py` | Optional LLM summary: JSON schema output, map-reduce for long meetings, name and date filters, folder naming |
+| `ucho/titles.py` | Automatic meeting titles: small LLM pass on an excerpt, filters, `wants_title`; run by meeting.py after the transcription queue is empty |
 | `ucho/dictate.py` | Compatibility: `main()` opens dictation in the app, reading the old `dictate.json`, last dictated text from the log |
 | `ucho/tray.py`, `ucho/winshell.py`, `ucho/icon.py` | Tray icon; taskbar AppUserModelID, Jump List, progress and autostart via COM/registry; the ear icon drawn from the design mark |
 | `ucho_mcp/server.py` | Read-only stdio MCP server, standard library only |
@@ -56,7 +57,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 ## Change carefully (read the comments first)
 
 - `transcribe.py` silence thresholds and language detection. Restricting `lang_to_id` fixed 8 of 8 bad chunks; `suppress_tokens` fixed 1 of 8. Change only after testing on a real recording. Live meeting transcription (`live_meeting.py`) cuts with the same functions (`split_into_chunks`, `ranges_at_boundaries`, `boundaries_from_energy`); keep its tests green so live results stay reusable.
-- `summary.py` filters `_names`, `_name_in_text`, `_without_invented_dates`. They exist because prompts alone did not work. Whole-word comparison is deliberate.
+- `summary.py` filters `_names`, `_name_in_text`, `_without_invented_dates` and `titles.py` filters (`clean_title`). They exist because prompts alone did not work. Whole-word comparison is deliberate.
 - Model memory order: Whisper is released before the LLM loads; both must never sit on the iGPU at once. `engine.exclusive()` enforces it; run anything that loads a model through the engine.
 - `engine.py`: every OpenVINO call runs on the engine thread. Long work must be a step generator, or a dictation waits for all of it.
 - PortAudio init and terminate go through `audio.new_pyaudio()` / `audio.close_pyaudio()` (one lock): two threads creating PyAudio at once crashed the process.

@@ -46,6 +46,7 @@ Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami)
 
 - Z PowerShella zamiast dwukliku, w folderze programu: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
 - `-WithSummary`: lokalne podsumowania (model Qwen, ok. 5 GB). Domyślnie wyłączone.
+- Automatyczne nazwy spotkań: krótkie tytuły dla spotkań bez nazwy z lokalnego modelu językowego (Qwen3 4B, ok. 2,3 GB, pobierany w Ustawieniach → Nazwy spotkań).
 - `-WithParakeet`: dodatkowy silnik NVIDIA Parakeet, szybki na samym procesorze. Słabiej radzi sobie z angielskimi wtrąceniami. Wybierasz go w Ustawieniach → Sprzęt.
 - `-Force`: instalacja w folderze OneDrive bez pytania. Odradzamy: modele, ustawienia i log z podyktowanym tekstem trafiłyby do chmury.
 - Opcje działają też z plikiem do dwukliku: `install.cmd -WithSummary`.
