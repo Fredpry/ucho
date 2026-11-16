@@ -90,6 +90,10 @@ class Engine:
         self._factory = pipeline_factory
         self._pipelines: dict[Key, Any] = {}
         self._keep: set[Key] = set()  # pipelines to keep loaded between jobs
+        # Pipelines held by a live meeting transcription (ucho/live_meeting.py)
+        # while it records: not released when idle or after another job.
+        # exclusive() still releases them (memory order for the summary).
+        self._held: dict[Key, int] = {}
         self._idle_since: dict[Key, float] = {}
         self._heap: list[tuple[int, int, Job]] = []
         self._seq = itertools.count()
@@ -209,6 +213,24 @@ class Engine:
         self._idle_since[key] = time.monotonic()
         return pipe
 
+    def hold(self, key: Key) -> None:
+        """Keeps `key` loaded between jobs until `unhold` (any thread)."""
+        with self._cv:
+            self._held[key] = self._held.get(key, 0) + 1
+
+    def unhold(self, key: Key) -> None:
+        with self._cv:
+            count = self._held.get(key, 0) - 1
+            if count > 0:
+                self._held[key] = count
+            else:
+                self._held.pop(key, None)
+
+    def _kept(self) -> set[Key]:
+        """Pipelines to keep between jobs: the dictation model and held ones."""
+        with self._cv:
+            return set(self._keep) | set(self._held)
+
     def loaded(self) -> list[Key]:
         return [k for k, p in self._pipelines.items() if getattr(p, "_pipe", True) is not None]
 
@@ -224,7 +246,7 @@ class Engine:
     def _release_idle(self) -> None:
         now = time.monotonic()
         for key in list(self._pipelines):
-            if key not in self._keep and now - self._idle_since.get(key, now) > IDLE_RELEASE_S:
+            if key not in self._kept() and now - self._idle_since.get(key, now) > IDLE_RELEASE_S:
                 log.info("Releasing idle model %s on %s", *key)
                 self._release({k for k in self._pipelines if k != key})
 
@@ -235,7 +257,7 @@ class Engine:
         def work(job: Job):
             self._keep = {dictation} if (dictation and preload) else set()
             busy = self._busy_keys()
-            self._release(self._keep | busy)
+            self._release(self._kept() | busy)
             if dictation and preload:
                 started = time.monotonic()
                 pipe = self.pipeline(*dictation)
@@ -259,11 +281,12 @@ class Engine:
 
     def transcribe(self, files: dict, model: str, device: str, language: str,
                    progress=None, status=None, on_done=None, on_error=None,
-                   report: dict | None = None) -> Job:
+                   report: dict | None = None, cache=None) -> Job:
         """Meeting transcription in steps. Result: (segments, used_device).
 
         `report` (transcribe.new_report) is filled in on the engine thread
-        before `on_done` runs: cancelled or not, failed chunks.
+        before `on_done` runs: cancelled or not, failed chunks. `cache`
+        (live_meeting.ChunkCache): chunks recognized while recording.
         """
         from . import transcribe as tr
 
@@ -271,13 +294,14 @@ class Engine:
             pipe = self.pipeline(model, device)
             segments = yield from tr.iter_transcribe_session(
                 files, pipe, language, progress=progress, cancel=job.cancel, status=status,
-                report=report)
+                report=report, cache=cache)
             if report is not None and job.cancel.is_set():
                 # Stop pressed after the last chunk check: treated as cancelled too.
                 report["cancelled"] = True
             used = pipe.device
-            if (model, device) not in self._keep:
-                self._release(self._keep | (self._busy_keys() - {(model, device)}))
+            kept = self._kept()
+            if (model, device) not in kept:
+                self._release(kept | (self._busy_keys() - {(model, device)}))
             return segments, used
 
         job = Job(work, NORMAL, "transcribe", on_done, on_error, pipeline_key=(model, device))

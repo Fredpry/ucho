@@ -334,17 +334,24 @@ def peak_rms(chunk: np.ndarray) -> float:
     return float(windows.max())
 
 
-def _silence_boundaries(audio: np.ndarray) -> list[int]:
-    """Indices of the middles of long enough pauses - candidates for a cut."""
+def frame_energy(audio: np.ndarray) -> np.ndarray:
+    """RMS of every whole VAD_FRAME_S frame (the tail shorter than a frame is ignored)."""
     frame = int(VAD_FRAME_S * SAMPLE_RATE)
     count = len(audio) // frame
-    if count < 2:
-        return []
-
-    energy = np.sqrt(
+    return np.sqrt(
         np.square(audio[: count * frame].reshape(count, frame)).mean(axis=1)
     )
-    threshold = max(float(energy.max()) * RELATIVE_SILENCE_THRESHOLD, 1e-4)
+
+
+def silence_threshold(energy: np.ndarray) -> float:
+    """Frames below this RMS count as quiet: relative to the loudest frame of the track."""
+    return max(float(energy.max()) * RELATIVE_SILENCE_THRESHOLD, 1e-4)
+
+
+def boundaries_from_energy(energy: np.ndarray, threshold: float) -> list[int]:
+    """Sample indices of the middles of quiet runs of at least MIN_SILENCE_S."""
+    frame = int(VAD_FRAME_S * SAMPLE_RATE)
+    count = len(energy)
     quiet = energy < threshold
     min_frames = max(1, int(MIN_SILENCE_S / VAD_FRAME_S))
 
@@ -361,6 +368,18 @@ def _silence_boundaries(audio: np.ndarray) -> list[int]:
             boundaries.append((i + j) // 2 * frame)
         i = j
     return boundaries
+
+
+def _silence_boundaries(audio: np.ndarray) -> list[int]:
+    """Indices of the middles of long enough pauses - candidates for a cut.
+
+    The threshold depends on the loudest frame of the whole track, so the
+    cuts of a growing track can still move (see ucho/live_meeting.py).
+    """
+    energy = frame_energy(audio)
+    if len(energy) < 2:
+        return []
+    return boundaries_from_energy(energy, silence_threshold(energy))
 
 
 def shorten_pauses(audio: np.ndarray, max_pause_s: float = 0.6,
@@ -418,16 +437,22 @@ def shorten_pauses(audio: np.ndarray, max_pause_s: float = 0.6,
 
 def split_at_silence(audio: np.ndarray, max_s: float) -> list[tuple[int, int]]:
     """Cuts into chunks no longer than `max_s`, sticking to boundaries in silence."""
+    return ranges_at_boundaries(_silence_boundaries(audio), len(audio), max_s)
+
+
+def ranges_at_boundaries(boundaries: list[int], length: int, max_s: float
+                         ) -> list[tuple[int, int]]:
+    """Chunks of a `length`-sample track cut at `boundaries` (sorted sample indices)."""
     max_len = int(max_s * SAMPLE_RATE)
     ranges: list[tuple[int, int]] = []
     start = 0
 
-    for boundary in _silence_boundaries(audio) + [len(audio)]:
+    for boundary in boundaries + [length]:
         if boundary <= start:
             continue
         # A too short piece is joined to the next one - otherwise we would chop
         # utterances to shreds and the model would lose the sentence context.
-        if boundary - start < max_len * 0.4 and boundary != len(audio):
+        if boundary - start < max_len * 0.4 and boundary != length:
             continue
         while boundary - start > max_len:
             ranges.append((start, start + max_len))
@@ -505,6 +530,48 @@ def new_report() -> dict:
     return {"cancelled": False, "errors": 0}
 
 
+def segments_from_result(result, begin: int, end: int, speaker: str) -> list[Segment]:
+    """Segments of one chunk `audio[begin:end]` with timestamps in the whole track."""
+    offset = begin / SAMPLE_RATE
+    end_s = end / SAMPLE_RATE
+    segments: list[Segment] = []
+    chunks = _chunks(result)
+    if chunks:
+        last_end = offset
+        for item in chunks:
+            start = float(getattr(item, "start_ts", -1.0))
+            stop = float(getattr(item, "end_ts", -1.0))
+            text = str(getattr(item, "text", "")).strip()
+            if not text:
+                continue
+            # Whisper sometimes returns -1 when it does not know the timestamp.
+            start = last_end if start < 0 else offset + start
+            stop = start + 2.0 if stop < 0 else offset + stop
+            # On silence the model can return a timestamp outside the
+            # processed chunk - clamp it to the chunk boundaries.
+            start = min(max(start, offset), end_s)
+            stop = min(max(stop, start), end_s)
+            last_end = stop
+            segments.append(Segment(start, stop, text, speaker))
+    else:
+        text = str(result).strip()
+        if text:
+            segments.append(Segment(offset, end_s, text, speaker))
+    return segments
+
+
+def transcribe_chunk(engine: Engine, chunk: np.ndarray, begin: int, end: int,
+                     language: str | None, speaker: str) -> list[Segment]:
+    """One chunk exactly as `iter_transcribe_file` does it (for live transcription).
+
+    A silent chunk gives [] without touching the model. Model errors propagate.
+    """
+    if peak_rms(chunk) < SPEECH_RMS_THRESHOLD:
+        return []
+    engine.load()
+    return segments_from_result(engine.generate(chunk, language), begin, end, speaker)
+
+
 def iter_transcribe_file(
     file: Path,
     engine: Engine,
@@ -514,10 +581,15 @@ def iter_transcribe_file(
     cancel: threading.Event | None = None,
     weight: tuple[float, float] = (0.0, 1.0),
     report: dict | None = None,
+    cache=None,
+    track: str | None = None,
 ) -> Steps:
     """`transcribe_file` as steps: yields after every chunk sent to the model.
 
-    `report` (see `new_report`) records a cancel and failed chunks.
+    `report` (see `new_report`) records a cancel and failed chunks. `cache`
+    (live_meeting.ChunkCache) holds chunks of this track (`track`, default
+    `speaker`) recognized while it was recorded; a chunk is taken from it
+    only when its range and samples are exactly the ones cut here.
     """
     audio, sr = sf.read(str(file), dtype="float32", always_2d=False)
     if audio.ndim > 1:
@@ -551,7 +623,6 @@ def iter_transcribe_file(
                 report["cancelled"] = True
             break
 
-        offset = begin / SAMPLE_RATE
         chunk = audio[begin:end]
 
         if peak_rms(chunk) < SPEECH_RMS_THRESHOLD:
@@ -559,43 +630,24 @@ def iter_transcribe_file(
                 progress(weight_from + span * (i + 1) / len(ranges), "")
             continue
 
-        try:
-            result = engine.generate(chunk, language)
-        except Exception as error:
-            log.exception("Transcription error in chunk %d of file %s", i, file.name)
-            if report is not None:
-                report["errors"] = report.get("errors", 0) + 1
-            if progress:
-                progress(weight_from + span * (i + 1) / len(ranges),
-                         f"[segment {i + 1} error: {error}]")
-            yield
-            continue
-
-        end_s = end / SAMPLE_RATE
-        chunks = _chunks(result)
-        if chunks:
-            last_end = offset
-            for item in chunks:
-                start = float(getattr(item, "start_ts", -1.0))
-                stop = float(getattr(item, "end_ts", -1.0))
-                text = str(getattr(item, "text", "")).strip()
-                if not text:
-                    continue
-                # Whisper sometimes returns -1 when it does not know the timestamp.
-                start = last_end if start < 0 else offset + start
-                stop = start + 2.0 if stop < 0 else offset + stop
-                # On silence the model can return a timestamp outside the
-                # processed chunk - clamp it to the chunk boundaries.
-                start = min(max(start, offset), end_s)
-                stop = min(max(stop, start), end_s)
-                last_end = stop
-                segments.append(Segment(start, stop, text, speaker))
+        cached = cache.get(track or speaker, begin, end, chunk) if cache is not None else None
+        if cached is not None:
+            # Recognized while recording (ucho/live_meeting.py): the same samples
+            # of the same chunk, so the same text the model would give now.
+            segments.extend(cached)
         else:
-            text = str(result).strip()
-            if text:
-                segments.append(
-                    Segment(offset, end / SAMPLE_RATE, text, speaker)
-                )
+            try:
+                result = engine.generate(chunk, language)
+            except Exception as error:
+                log.exception("Transcription error in chunk %d of file %s", i, file.name)
+                if report is not None:
+                    report["errors"] = report.get("errors", 0) + 1
+                if progress:
+                    progress(weight_from + span * (i + 1) / len(ranges),
+                             f"[segment {i + 1} error: {error}]")
+                yield
+                continue
+            segments.extend(segments_from_result(result, begin, end, speaker))
 
         if progress:
             last_text = segments[-1].text if segments else ""
@@ -638,8 +690,11 @@ def iter_transcribe_session(
     cancel: threading.Event | None = None,
     status: Callable[[str], None] | None = None,
     report: dict | None = None,
+    cache=None,
 ) -> Steps:
     """All tracks of a session as steps (one per chunk). Returns the merged segments.
+
+    `cache` (live_meeting.ChunkCache): chunks already recognized while recording.
 
     `report` (see `new_report`) says whether the run was cancelled or had
     failed chunks: the segments alone do not tell a partial transcript apart.
@@ -672,6 +727,7 @@ def iter_transcribe_session(
         segments = yield from iter_transcribe_file(
             Path(file), engine, speakers.get(name, name), language,
             progress=progress, cancel=cancel, weight=(i * step, (i + 1) * step), report=report,
+            cache=cache, track=name,
         )
         results.append(segments)
     return merge_tracks(*results)
