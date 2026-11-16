@@ -970,7 +970,8 @@ def smoke_test(options: Options) -> int:
         app = App(settings, options)
         session_dir = next(recordings.iterdir())
         steps: list[Callable[[], None]] = [
-            lambda: app.show_wizard(1), lambda: app.show_wizard(2), lambda: app.show_wizard(3),
+            lambda: app.show_wizard(1), lambda: app.show_wizard(2),
+            lambda: app.show_wizard(3), lambda: app.show_wizard(4),
             lambda: app.wizard().finish(),
             lambda: app.show("dictation"), lambda: app.show("recordings"),
             lambda: app.show("transcript", folder=session_dir, query="budget"),

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **One language model for meeting names and summaries, with custom model support** (`ucho/llm.py`, new settings key `analysis_model`): a shared `LanguageModelPicker` in a new Settings → *Language model (optional)* section and in a new optional step 4 of 5 in the first-run wizard (*Meeting names and summaries*). Choose *No language model*, one of the built-in Qwen models (`OpenVINO/Qwen3-8B-int4-ov` ~5.0 GB, `OpenVINO/Qwen3-4B-int4-ov` ~2.3 GB, `OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov` ~0.95 GB, downloaded on demand), or your own local model (*My own model: folder…* for an OpenVINO IR directory exported with `optimum-cli`, or *My own model: .gguf file…* for a `.gguf` file with `Q4_0`, `Q4_1`, `Q8_0`, `F16` or `F32` quantization; unsupported K-quant `.gguf` files such as `Q4_K_M` are rejected after checking the GGUF header). Custom models are read in place and never copied; `meta.json` and logs record only the model name (`llm.label`), never the full local path. Settings from v0.4 keep working (`llm.chosen` derives the active model from the already-downloaded summary or title model).
+
+### Changed
+
+- Automatic meeting titles now use the chosen language model (`analysis_model`) instead of the fixed `OpenVINO/Qwen3-4B-int4-ov`, and the language model picker moved from *AI summary* and *Meeting names* into the new *Language model (optional)* section above them.
+
 ## v0.4.0 (2026-11-16)
 
 ### Added

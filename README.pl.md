@@ -22,6 +22,7 @@ Nagrywa spotkania w Teams, Zoomie czy Meet oraz dyktowanie i zamienia je w tekst
 | <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>R</kbd> | nagrywaj spotkanie, z dowolnego programu |
 | <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Spacja</kbd> | dyktuj tam, gdzie stoi kursor |
 | **Mówcy** | „Ja” i „Spotkanie” z dwóch ścieżek; opcjonalne eksperymentalne rozpoznawanie mówców wewnątrz ścieżki („Mówca 1”, „Mówca 2”…) i nazywanie ich kliknięciem na transkrypcie |
+| **Tytuły i podsumowania** | opcjonalnie: jeden lokalny model językowy (wybierany w kreatorze pierwszego uruchomienia albo w Ustawieniach → Model językowy) nadaje nienazwanym spotkaniom krótkie tytuły i może je podsumowywać; wbudowane modele Qwen albo własny model OpenVINO / `.gguf` |
 | **MCP** | Claude Code, Cursor czy Codex czytają Twoje transkrypty |
 | **1 h → 4–7 min** | transkrypcja godziny rozmowy na grafice Intel Arc ([pomiary](docs/benchmarks.md)) |
 
@@ -46,8 +47,8 @@ Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami)
 <summary>Opcje instalatora i gdy coś nie działa</summary>
 
 - Z PowerShella zamiast dwukliku, w folderze programu: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
-- `-WithSummary`: lokalne podsumowania (model Qwen, ok. 5 GB). Domyślnie wyłączone.
-- Automatyczne nazwy spotkań: krótkie tytuły dla spotkań bez nazwy z lokalnego modelu językowego (Qwen3 4B, ok. 2,3 GB, pobierany w Ustawieniach → Nazwy spotkań).
+- `-WithSummary`: pobiera od razu domyślny model językowy (`OpenVINO/Qwen3-8B-int4-ov`, ok. 5,0 GB) i włącza podsumowania. Domyślnie wyłączone.
+- **Model językowy (nazwy spotkań i podsumowania)**: jeden lokalny model językowy, wybierany w opcjonalnym kroku kreatora pierwszego uruchomienia albo w Ustawieniach → Model językowy, obsługuje zarówno automatyczne nazwy spotkań, jak i podsumowania. Wbudowane modele (`OpenVINO/Qwen3-8B-int4-ov` ok. 5,0 GB, `OpenVINO/Qwen3-4B-int4-ov` ok. 2,3 GB, `OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov` ok. 0,95 GB) są pobierane na żądanie. Możesz też wskazać własny model („Własny model”): folder OpenVINO IR wyeksportowany przez `optimum-cli` (`openvino_model.xml`/`.bin` + `openvino_tokenizer.xml` + `openvino_detokenizer.xml`) albo pojedynczy plik `.gguf` (sprawdzone `Q4_0` i `Q8_0`, przyjmowane też `Q4_1` i `F16`/`F32`; `Q4_K_M` i pozostałe K-quanty nie ładują się w OpenVINO GenAI 2026.4.1, więc Ucho ich nie przyjmuje). Własny model nie jest nigdzie kopiowany ani wysyłany; dla innych modeli nie gwarantujemy jakości polskich tytułów i podsumowań. Ustawienia z wersji v0.4 działają nadal (wybór jest wyprowadzany z pobranych wcześniej modeli).
 - `-WithParakeet`: dodatkowy silnik NVIDIA Parakeet, szybki na samym procesorze. Słabiej radzi sobie z angielskimi wtrąceniami. Wybierasz go w Ustawieniach → Sprzęt.
 - `-WithSpeakers`: opcjonalny pakiet `sherpa-onnx` do rozpoznawania mówców wewnątrz ścieżki (Ustawienia → Transkrypcja → Mówcy; dwa małe modele, ok. 33 MB, pobierane przy włączeniu opcji).
 - `-Force`: instalacja w folderze OneDrive bez pytania. Odradzamy: modele, ustawienia i log z podyktowanym tekstem trafiłyby do chmury.

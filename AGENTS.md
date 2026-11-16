@@ -40,6 +40,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/diarize.py` | Optional speaker detection inside a track (`install.ps1 -WithSpeakers`): sherpa-onnx diarization in a short-lived worker process, largest-overlap assignment to Whisper segments, codes `meeting:N`/`me:N`; off by default |
 | `ucho/merge.py` | `Segment`, speaker codes and labels, merging tracks, hallucination filter, `transcript.md/.srt/.txt`, `meta.json` |
 | `ucho/session.py` | The one reader of session folders, for the app and the MCP server; maps v0.1 Polish file names and `meta.json` keys to the current ones |
+| `ucho/llm.py` | Analysis language model choice (`analysis_model`, shared by summaries and automatic titles), derivation from v0.4 settings, validation of custom OpenVINO IR folders and `.gguf` files (header quantization check), privacy-safe `label()` for `meta.json` and logs |
 | `ucho/summary.py` | Optional LLM summary: JSON schema output, map-reduce for long meetings, name and date filters, folder naming |
 | `ucho/titles.py` | Automatic meeting titles: small LLM pass on an excerpt, filters, `wants_title`; run by meeting.py after the transcription queue is empty |
 | `ucho/dictate.py` | Compatibility: `main()` opens dictation in the app, reading the old `dictate.json`, last dictated text from the log |
