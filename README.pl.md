@@ -20,10 +20,11 @@ Nagrywa spotkania w Teams, Zoomie czy Meet oraz dyktowanie i zamienia je w tekst
 | | |
 |---|---|
 | <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>R</kbd> | nagrywaj spotkanie, z dowolnego programu |
-| <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Spacja</kbd> | dyktuj tam, gdzie stoi kursor |
+| <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Spacja</kbd> | dyktuj tam, gdzie stoi kursor; rozpoznawane w trakcie mówienia, wklejane ok. sekundy po zatrzymaniu |
+| **Na żywo** | spotkanie jest transkrybowane w trakcie nagrywania, więc transkrypt jest gotowy kilka sekund po zatrzymaniu (na karcie graficznej lub NPU) |
 | **Mówcy** | „Ja” i „Spotkanie” z dwóch ścieżek; opcjonalne eksperymentalne rozpoznawanie mówców wewnątrz ścieżki („Mówca 1”, „Mówca 2”…) i nazywanie ich kliknięciem na transkrypcie |
 | **MCP** | Claude Code, Cursor czy Codex czytają Twoje transkrypty |
-| **1 h → 4–7 min** | transkrypcja godziny rozmowy na grafice Intel Arc ([pomiary](docs/benchmarks.md)) |
+| **1 h → 4–7 min** | transkrypcja godziny rozmowy po zatrzymaniu, na grafice Intel Arc ([pomiary](docs/benchmarks.md)) |
 
 <p align="center">
   <img src="docs/screens/meeting-recording-light-pl-1366x768.png" alt="Nagrywanie spotkania" width="49%">
@@ -101,11 +102,11 @@ Zamknij Ucho (ikona w zasobniku → Zakończ). Po instalacji instalatorem: Ustaw
 
 ## Więcej
 
-- [Jak to działa](docs/architecture.md): dwie ścieżki zamiast diaryzacji, wycinanie ciszy, wykrywanie języka, OpenVINO
+- [Jak to działa](docs/architecture.md): dwie ścieżki, opcjonalne rozpoznawanie mówców, transkrypcja na żywo, wycinanie ciszy, wykrywanie języka, OpenVINO
 - [Pomiary](docs/benchmarks.md) i [dobór sprzętu](docs/hardware.md)
 - [Prywatność](PRIVACY.md) i jak sprawdzić, że nic nie wychodzi z komputera
 - [Zrzuty ekranu](docs/screens), [design system](design/README.md), [jak pomóc](CONTRIBUTING.md)
 
-Ograniczenia: tylko Windows; wszyscy rozmówcy zdalni mają jedną etykietę „Spotkanie”; transkrypcja rusza po zatrzymaniu nagrania; aplikacja nie jest jeszcze podpisana cyfrowo.
+Ograniczenia: tylko Windows (macOS: [#22](../../issues/22)); transkrypcję przyspiesza tylko grafika Intel, więc z kartą NVIDIA albo AMD działa na procesorze ([#21](../../issues/21)), gdzie transkrypcja spotkania na żywo jest domyślnie wyłączona; rozpoznawanie mówców wewnątrz ścieżki jest eksperymentalne i domyślnie wyłączone; aplikacja nie jest jeszcze podpisana cyfrowo ([#18](../../issues/18)).
 
 Apache-2.0 · [NOTICE](NOTICE) · [licencje modeli i bibliotek](THIRD_PARTY.md) · Fryderyk Pryjma

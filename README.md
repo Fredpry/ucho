@@ -20,10 +20,11 @@ Records Teams, Zoom and Meet calls and your dictation, and turns them into text 
 | | |
 |---|---|
 | <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>R</kbd> | record a meeting, from any app |
-| <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Space</kbd> | dictate wherever your cursor is |
+| <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Space</kbd> | dictate wherever your cursor is; recognized while you speak, pasted about a second after you stop |
+| **Live** | the meeting is transcribed while you record, so the transcript is ready seconds after the stop (on a GPU or NPU) |
 | **Speakers** | "Me" and "Meeting" from two tracks; optional experimental speaker detection inside a track ("Speaker 1", "Speaker 2"…) and naming speakers by clicking them on the transcript |
 | **MCP** | Claude Code, Cursor or Codex read your transcripts |
-| **1 h → 4–7 min** | to transcribe an hour of talk on Intel Arc graphics ([measured](docs/benchmarks.md)) |
+| **1 h → 4–7 min** | to transcribe an hour of talk after the stop on Intel Arc graphics ([measured](docs/benchmarks.md)) |
 
 <p align="center">
   <img src="docs/screens/meeting-recording-light.png" alt="Recording a meeting" width="49%">
@@ -101,11 +102,11 @@ Quit Ucho (tray icon → Quit). Installed with Setup: Settings → Apps → **Uc
 
 ## More
 
-- [How it works](docs/architecture.md): two tracks instead of diarization, silence trimming, language detection, OpenVINO
+- [How it works](docs/architecture.md): two tracks, optional speaker detection, live transcription, silence trimming, language detection, OpenVINO
 - [Benchmarks](docs/benchmarks.md) and [hardware selection](docs/hardware.md)
 - [Privacy](PRIVACY.md), including how to check that nothing leaves your computer
 - [Screenshots](docs/screens), [design system](design/README.md), [contributing](CONTRIBUTING.md)
 
-Limits: Windows only; everyone on the far end shares one "Meeting" label; transcription starts when you stop recording; the app is not code-signed yet.
+Limits: Windows only (macOS: [#22](../../issues/22)); only Intel graphics speed up transcription, so with NVIDIA or AMD graphics it runs on the CPU ([#21](../../issues/21)), where live meeting transcription is off by default; speaker detection inside a track is experimental and off by default; the app is not code-signed yet ([#18](../../issues/18)).
 
 Apache-2.0 · [NOTICE](NOTICE) · [model and library licenses](THIRD_PARTY.md) · Fryderyk Pryjma
