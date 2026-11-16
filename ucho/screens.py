@@ -508,7 +508,7 @@ class TranscriptScreen(Screen):
         self.live = False
         self.query = ""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)
+        self.grid_rowconfigure(5, weight=1)
 
         back = ui.ghost(self, t("Recordings"), lambda: app.show("recordings"), "back",
                         color=C.text_muted, width=10)
@@ -518,28 +518,43 @@ class TranscriptScreen(Screen):
         self.subtitle = ui.muted(self, "", theme.SM - 1, anchor="w")
         self.subtitle.grid(row=2, column=0, sticky="ew", padx=PAD)
 
-        actions = ctk.CTkFrame(self, fg_color="transparent")
-        actions.grid(row=3, column=0, sticky="ew", padx=PAD, pady=(12, 12))
-        self.copy = ui.secondary(actions, t("Copy all"), self._copy, "copy", width=10)
+        # One row used to hold the buttons, the progress bar and its text, packed
+        # left and right; in a narrow window pack squeezed the text under the
+        # Delete button and cut both its ends, the percentage too (#14). Now the
+        # progress has its own row and Delete wraps under the buttons when the
+        # row is too narrow for both.
+        self.actions = ctk.CTkFrame(self, fg_color="transparent")
+        self.actions.grid(row=3, column=0, sticky="ew", padx=PAD, pady=(12, 12))
+        self.actions.grid_columnconfigure(0, weight=1)
+        self.buttons = ctk.CTkFrame(self.actions, fg_color="transparent")
+        self.buttons.grid(row=0, column=0, sticky="w")
+        self.copy = ui.secondary(self.buttons, t("Copy all"), self._copy, "copy", width=10)
         self.copy.pack(side="left", padx=(0, 8))
-        self.open = ui.secondary(actions, t("Open folder"), self._open, "folder", width=10)
+        self.open = ui.secondary(self.buttons, t("Open folder"), self._open, "folder", width=10)
         self.open.pack(side="left", padx=(0, 8))
-        self.again = ui.secondary(actions, t("Transcribe again"), self._again, "refresh", width=10)
+        self.again = ui.secondary(self.buttons, t("Transcribe again"), self._again, "refresh",
+                                  width=10)
         self.again.pack(side="left", padx=(0, 8))
-        self.summarize = ui.secondary(actions, t("Summarize"), self._summarize, "summary", width=10)
+        self.summarize = ui.secondary(self.buttons, t("Summarize"), self._summarize, "summary",
+                                      width=10)
+        self.stop = ui.secondary(self.buttons, t("Stop"), self.meeting.cancel, "stop", width=10)
         # Right-aligned, away from the everyday actions.
-        self.delete = ui.danger(actions, t("Delete recording"), self._delete, "delete", width=10)
-        self.delete.pack(side="right")
-        self.stop = ui.secondary(actions, t("Stop"), self.meeting.cancel, "stop", width=10)
-        self.progress_row = ctk.CTkFrame(actions, fg_color="transparent")
+        self.delete = ui.danger(self.actions, t("Delete recording"), self._delete, "delete",
+                                width=10)
+        self._delete_wrapped: bool | None = None
+        self.actions.bind("<Configure>", self._fit_actions, add="+")
+        self.buttons.bind("<Configure>", self._fit_actions, add="+")
+
+        self.progress_row = ctk.CTkFrame(self, fg_color="transparent")
         self.progress = ctk.CTkProgressBar(self.progress_row, width=160, height=8)
-        self.progress.pack(side="left", padx=(8, 8))
+        self.progress.pack(side="left", padx=(0, 12))
         self.progress.set(0)
-        self.progress_label = ui.muted(self.progress_row, "")
-        self.progress_label.pack(side="left")
+        self.progress_label = ui.muted(self.progress_row, "", anchor="w", justify="left")
+        self.progress_label.pack(side="left", fill="x", expand=True)
+        self.progress_row.bind("<Configure>", self._wrap_progress, add="+")
 
         self.text = ui.TranscriptText(self)
-        self.text.grid(row=4, column=0, sticky="nsew", padx=PAD, pady=(0, PAD - 8))
+        self.text.grid(row=5, column=0, sticky="nsew", padx=PAD, pady=(0, PAD - 8))
         self.meeting.listen(self._event)
 
     # --- showing ------------------------------------------------------------
@@ -629,19 +644,43 @@ class TranscriptScreen(Screen):
         self.again.pack_forget()
         self.summarize.pack_forget()
         self.stop.pack_forget()
-        self.progress_row.pack_forget()
+        self.progress_row.grid_remove()
         if busy:
             self.stop.pack(side="left", padx=(0, 8))
-            self.progress_row.pack(side="left")
+            self.progress_row.grid(row=4, column=0, sticky="ew", padx=PAD, pady=(0, 12))
         elif position:
             self.progress.set(0)
             self.progress_label.configure(text=t("Queued, #{n}", n=position))
-            self.progress_row.pack(side="left")
+            self.progress_row.grid(row=4, column=0, sticky="ew", padx=PAD, pady=(0, 12))
         else:
             if has_audio:
                 self.again.pack(side="left", padx=(0, 8))
             if self.segments and not has_summary:
                 self.summarize.pack(side="left", padx=(0, 8))
+        self.after_idle(self._fit_actions)
+
+    def _fit_actions(self, _event=None) -> None:
+        """Delete next to the buttons when both fit in one row, under them otherwise."""
+        if not self.winfo_exists():  # an after_idle call that outlived the window
+            return
+        width = self.actions.winfo_width()
+        if width <= 1:  # not laid out yet; the <Configure> event comes back
+            return
+        gap = round(16 * ctk.ScalingTracker.get_widget_scaling(self))
+        wrapped = self.buttons.winfo_reqwidth() + gap + self.delete.winfo_reqwidth() > width
+        if wrapped == self._delete_wrapped:
+            return
+        self._delete_wrapped = wrapped
+        if wrapped:
+            self.delete.grid(row=1, column=0, sticky="e", pady=(8, 0))
+        else:
+            self.delete.grid(row=0, column=1, sticky="e")
+
+    def _wrap_progress(self, event) -> None:
+        # Long status texts (an error, a summary step) wrap instead of running off the edge.
+        width = ui.logical(self.progress_row, event.width) - self.progress.cget("width") - 12
+        if width > 50:
+            self.progress_label.configure(wraplength=width)
 
     # --- events ----------------------------------------------------------------
 

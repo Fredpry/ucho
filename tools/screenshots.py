@@ -82,6 +82,10 @@ def synthetic_archive(folder: Path) -> None:
             meta["segments"] = [{"start": 3, "end": 8, "text": "Krótki fragment rozmowy o planie.",
                                  "speaker": "me"}]
             (session / "transcript.md").write_text("# transcript", encoding="utf-8")
+            if name.endswith("Przeglad-sprintu"):
+                # An (empty) audio track and no summary: the transcript screen then
+                # shows its widest action row, "Transcribe again" and "Summarize" too.
+                (session / "microphone.flac").write_bytes(b"")
         (session / "meta.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
 
 
@@ -157,6 +161,16 @@ def main(argv: list[str]) -> int:
         d.recording_start = time.monotonic() - 7
         d.microphone.level = 0.21 if on else 0.0
 
+    def transcribing(on: bool):
+        # The live transcript screen of a running transcription, without a model:
+        # only the controller state the screen reads (#14: the progress row).
+        m = app.meeting
+        m.transcribing, m.session_dir = on, session_dir if on else None
+        m.progress = 0.12
+        m.status_text = i18n.t("Transcribing on {device}...", device="GPU")
+        m.live_text = [text for _start, _who, text in TRANSCRIPT[:4]] if on else []
+        m.last_meta = {"name": "Budżet na pierwszy kwartał"} if on else {}
+
     shots: list[tuple[str, callable, object]] = []
 
     def shot(name, prepare, window=None):
@@ -168,7 +182,13 @@ def main(argv: list[str]) -> int:
         shot(f"dictation-{mode}", lambda: (recording(False), app.show("dictation")))
         shot(f"recordings-search-{mode}", lambda: app.show("recordings", query="budżet"))
         shot(f"transcript-{mode}", lambda: app.show("transcript", folder=session_dir, query=""))
-        shot(f"settings-hardware-{mode}", lambda: app.show("settings", section="hardware"))
+        shot(f"transcript-transcribing-{mode}",
+             lambda: (transcribing(True), app.show("transcript", live=True)))
+        shot(f"settings-hardware-{mode}",
+             lambda: (transcribing(False), app.show("settings", section="hardware")))
+    shot("transcript-all-actions-light",
+         lambda: (app.set_theme("light"),
+                  app.show("transcript", folder=recordings / "2026-11-07_09-15_Przeglad-sprintu")))
     shot("wizard-language-light", lambda: (app.set_theme("light"), app.show_wizard(0)))
     shot("wizard-hardware-light", lambda: app.show_wizard(2))
     shot("wizard-consent-dark", lambda: (app.set_theme("dark"), app.show_wizard(3)))
