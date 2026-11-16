@@ -18,7 +18,8 @@ import json
 import logging
 from pathlib import Path
 
-from .merge import META_FILE, TRANSCRIPT_MD, TRANSCRIPT_SRT, TRANSCRIPT_TXT, Segment, normalize_speaker
+from .merge import (META_FILE, TRANSCRIPT_MD, TRANSCRIPT_SRT, TRANSCRIPT_TXT, Segment,
+                    clean_speaker_names, normalize_speaker)
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +107,29 @@ def normalize_meta(raw) -> dict:
         meta["segments"] = [s for s in map(normalize_segment, segments) if s is not None]
     elif "segments" in meta:
         meta["segments"] = []
+    if "speaker_names" in meta:
+        meta["speaker_names"] = clean_speaker_names(meta["speaker_names"])
     return meta
+
+
+def speaker_names(meta: dict) -> dict[str, str]:
+    """Cleaned speaker name mapping from a meta dict."""
+    if not isinstance(meta, dict):
+        return {}
+    return clean_speaker_names(meta.get("speaker_names"))
+
+
+def speaker_codes(segments_list) -> list[str]:
+    """Distinct speaker codes of a list of Segment objects or segment dicts, in order of first appearance."""
+    codes: list[str] = []
+    seen: set[str] = set()
+    for seg in segments_list or []:
+        raw = seg.get("speaker") if isinstance(seg, dict) else getattr(seg, "speaker", "")
+        code = normalize_speaker(raw)
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes
 
 
 def read_meta(session: Path) -> dict:

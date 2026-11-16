@@ -85,10 +85,65 @@ def normalize_speaker(value) -> str:
     return LEGACY_SPEAKERS.get(value, value)
 
 
-def speaker_label(speaker: str) -> str:
-    """Localized label for a speaker code; unknown values are shown as they are."""
+MAX_SPEAKER_NAME = 40
+
+
+def split_speaker(code) -> tuple[str, int | None]:
+    """Splits a diarized code like 'meeting:3' into ('meeting', 3); else (code, None)."""
+    code = str(code or "")
+    base, sep, rest = code.partition(":")
+    if sep and base in (SPEAKER_ME, SPEAKER_MEETING) and rest.isascii() and rest.isdigit():
+        n = int(rest)
+        if n > 0:
+            return base, n
+    return code, None
+
+
+def speaker_track(code: str) -> str:
+    """Base track code of a diarized code ('meeting:2' -> 'meeting'), else `code`."""
+    return split_speaker(code)[0]
+
+
+def diarized_code(track_speaker: str, n: int) -> str:
+    """Diarized speaker code for the `n`-th voice (1-based) on `track_speaker`."""
+    return f"{track_speaker}:{n}"
+
+
+def clean_speaker_name(value) -> str:
+    """Collapses whitespace and control chars to single spaces, stripped and capped at 40 chars."""
+    text = re.sub(r"[\s\x00-\x1f\x7f-\x9f]+", " ", str(value or "")).strip()
+    return text[:MAX_SPEAKER_NAME].strip()
+
+
+def clean_speaker_names(raw) -> dict[str, str]:
+    """Cleaned {speaker_code: name} mapping; drops empty keys and values."""
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for key, value in raw.items():
+        code = normalize_speaker(str(key or ""))
+        name = clean_speaker_name(value)
+        if code and name:
+            cleaned[code] = name
+    return cleaned
+
+
+def speaker_label(speaker: str, names: dict | None = None, translate: bool = True) -> str:
+    """Localized (or custom) label for a speaker code; unknown values are shown as they are."""
+    if isinstance(names, dict):
+        custom = clean_speaker_name(names.get(speaker))
+        if custom:
+            return custom
+    base, n = split_speaker(speaker)
+    if n is not None:
+        if base == SPEAKER_MEETING:
+            return t("Speaker {n}", n=n) if translate else f"Speaker {n}"
+        if base == SPEAKER_ME:
+            return t("Microphone {n}", n=n) if translate else f"Microphone {n}"
     label = SPEAKER_LABELS.get(speaker)
-    return t(label) if label else speaker
+    if label:
+        return t(label) if translate else label
+    return speaker
 
 
 def is_hallucination(text: str) -> bool:
@@ -223,19 +278,21 @@ def as_markdown(segments: list[Segment], meta: dict) -> str:
         lines.append("_" + t("No speech was recognized.") + "_")
         return "\n".join(lines) + "\n"
 
+    names = clean_speaker_names(meta.get("speaker_names"))
     for seg in segments:
-        lines.append(f"**[{format_hms(seg.start)}] {speaker_label(seg.speaker)}:** {seg.text}")
+        lines.append(f"**[{format_hms(seg.start)}] {speaker_label(seg.speaker, names)}:** {seg.text}")
         lines.append("")
     return "\n".join(lines)
 
 
-def as_srt(segments: list[Segment]) -> str:
+def as_srt(segments: list[Segment], names: dict | None = None) -> str:
+    cleaned = clean_speaker_names(names)
     lines: list[str] = []
     for i, seg in enumerate(segments, start=1):
         end = max(seg.end, seg.start + 0.5)
         lines.append(str(i))
         lines.append(f"{_srt_time(seg.start)} --> {_srt_time(end)}")
-        lines.append(f"{speaker_label(seg.speaker)}: {seg.text}")
+        lines.append(f"{speaker_label(seg.speaker, cleaned)}: {seg.text}")
         lines.append("")
     return "\n".join(lines)
 
@@ -267,11 +324,20 @@ def save_results(folder: Path, segments: list[Segment], meta: dict) -> dict[str,
         "txt": folder / TRANSCRIPT_TXT,
         "meta": folder / META_FILE,
     }
+    names = clean_speaker_names(meta.get("speaker_names"))
     files["md"].write_text(as_markdown(segments, meta), encoding="utf-8")
-    files["srt"].write_text(as_srt(segments), encoding="utf-8")
-    files["txt"].write_text(as_text(segments), encoding="utf-8")
+    files["srt"].write_text(as_srt(segments, names), encoding="utf-8")
+    files["txt"].write_text(
+        as_text(segments, label=lambda code: speaker_label(code, names)),
+        encoding="utf-8",
+    )
 
     full_meta = dict(meta)
+    if "speaker_names" in full_meta:
+        if names:
+            full_meta["speaker_names"] = names
+        else:
+            full_meta.pop("speaker_names", None)
     full_meta["saved"] = datetime.now().isoformat(timespec="seconds")
     full_meta["segment_count"] = len(segments)
     full_meta["segments"] = [asdict(s) for s in segments]

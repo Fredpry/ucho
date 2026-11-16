@@ -162,6 +162,42 @@ Notes:
 - Prompt lessons: example titles in the prompt were copied into unrelated meetings ("Odbiór prac remontowych..."), and a list of meeting kinds made every title start with "Planowanie" or "Negocjacje".
 - Next step: check on real meetings locally (not in the repo).
 
+## Speaker detection (#15)
+
+Optional speaker detection inside a track (`ucho/diarize.py`), measured with `tools/benchmark_diarization.py` on synthetic multi-voice meetings built from three offline Windows TTS voices (*Microsoft Paulina* in Polish, *Adam* in Polish, *Microsoft Zira* in English) plus two pitch/formant-shifted copies (`paulina_lo` shifted by 0.92, `adam_hi` shifted by 1.10) as extra synthetic "speakers". Each scenario is a 6-minute meeting with 1 to 3 sentences per turn, 0.15 to 0.45 s between sentences inside a turn, 0.2 to 1.2 s between turns, and 10 % of turns overlapping the previous one by 0.6 s. The `+8kHz+noise` variant resamples the track to 8 kHz and back to 16 kHz and adds white noise (sigma 0.01) to simulate a narrow-band, noisy call. We score frame-based diarization error rate (DER, 10 ms frames) without and with a 0.25 s collar around reference boundaries, and "utterances right": the share of reference sentences assigned to the right speaker by the largest-overlap rule Ucho uses for Whisper segments. Core Ultra 7 258V, sherpa-onnx 2.0.1, 2 CPU threads, pyannote segmentation-3.0 + 3D-Speaker ERes2Net VoxCeleb, clustering threshold 0.5, window shift 0.5, 16.11.2026.
+
+| Scenario | Minutes | Voices | Found | DER | DER, 0.25 s collar | Miss | False alarm | Confusion | Utterances right | CPU time | Real-time factor |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2 voices M/F | 6.0 | 2 | 2 | 6.5 % | 0.3 % | 0.2 % | 6.1 % | 0.3 % | 100.0 % | 27.2 s | 0.076 |
+| 2 voices M/F +8kHz+noise | 6.0 | 2 | 2 | 7.0 % | 0.5 % | 0.9 % | 5.6 % | 0.4 % | 100.0 % | 24.3 s | 0.067 |
+| 3 voices | 6.1 | 3 | 3 | 11.8 % | 4.9 % | 0.4 % | 6.8 % | 4.6 % | 96.0 % | 35.9 s | 0.098 |
+| 3 voices +8kHz+noise | 6.1 | 3 | 4 | 15.7 % | 8.1 % | 1.0 % | 6.6 % | 8.0 % | 90.9 % | 33.5 s | 0.092 |
+| 4 voices | 6.1 | 4 | 5 | 15.3 % | 9.1 % | 0.3 % | 6.1 % | 8.8 % | 92.8 % | 32.0 s | 0.087 |
+| 4 voices +8kHz+noise | 6.1 | 4 | 4 | 18.1 % | 11.8 % | 0.8 % | 5.6 % | 11.8 % | 91.8 % | 23.2 s | 0.063 |
+| 5 voices | 6.0 | 5 | 5 | 19.6 % | 12.9 % | 0.2 % | 6.8 % | 12.6 % | 89.6 % | 23.9 s | 0.066 |
+| 5 voices +8kHz+noise | 6.0 | 5 | 6 | 17.8 % | 10.6 % | 0.7 % | 6.3 % | 10.8 % | 90.6 % | 14.3 s | 0.039 |
+| 2 similar (F, F-8%) | 6.1 | 2 | 2 | 19.7 % | 13.0 % | 0.7 % | 6.0 % | 13.0 % | 89.4 % | 18.5 s | 0.051 |
+| 2 similar (F, F-8%) +8kHz+noise | 6.1 | 2 | 2 | 37.7 % | 31.3 % | 0.9 % | 6.2 % | 30.6 % | 69.1 % | 18.3 s | 0.050 |
+| 4 voices, 30 minutes | 30.1 | 4 | 6 | 14.7 % | 7.9 % | – | – | – | 92.9 % | 109.3 s | 0.061 |
+
+What the numbers say:
+
+- **False alarm without collar.** The DER without collar includes about 6 % false alarm that is a measurement artifact: the short pauses (0.15 to 0.45 s) between a speaker's own sentences inside a turn count as non-speech in the reference, while the diarization bridges them into one turn (`min_duration_off = 0.5`). With the 0.25 s collar that part disappears.
+- **Voice separation.** Distinct voices are told apart well: 2 to 3 voices get 96 to 100 % of utterances right in clean audio and 91 to 100 % in the noisy narrow-band variant. Four or five voices (of which some are pitch-shifted copies of the same base voice) get 90 to 93 % of utterances right. Two very similar voices (the same female voice and a copy shifted by 8 %) get 89 % in clean audio, but drop to 69 % in a noisy narrow-band call.
+- **Speaker count.** Extra speakers appear now and then (5 found for 4 voices, 6 for 5 in the noisy call, 6 in the 30-minute meeting). When that happens on a real transcript, giving two speaker numbers the same name makes them one person in the transcript, the files and the summary.
+- **Clustering threshold.** The threshold matters in noisy audio: at 0.6 instead of 0.5 the noisy 5-voice call fell to 71 % of utterances right and the noisy similar pair to 49 %; in clean audio thresholds from 0.5 to 0.7 gave the same result.
+- **Embedding model and window shift.** On the same synthetic set (threshold 0.5 to 0.6), NeMo TitaNet-S was about 3x faster than 3D-Speaker ERes2Net VoxCeleb, but much worse with 4 and 5 voices (DER 35 % and 44 %) and with the similar pair (55 %). 3D-Speaker CAM++ VoxCeleb was unusable here (DER 33 to 47 % already with 3 voices). ERes2Net zh-cn and WeSpeaker ResNet34 were similar to ERes2Net VoxCeleb on 3 voices, but slower or less stable across thresholds. Setting `window_shift_ratio = 0.5` instead of the sherpa-onnx default `0.1` made segmentation about 4x faster with the same or lower DER.
+- **Runtime.** The 6-minute meetings took 14 to 36 s of CPU time on 2 threads (real-time factor 0.04 to 0.10 while other work was running on the machine), and the 30-minute meeting took 109 s (0.061), so roughly 4 to 6 minutes of CPU time per hour of a track plus 1 to 2 s to start the worker process. The pass runs after the text is recognized and before the transcript is saved, so with speaker detection turned on the transcript appears that much later.
+- **Why a worker process.** `sherpa-onnx` holds the Python GIL during the whole diarization call: a 10 ms ticker on another thread saw one 16.9 s gap for 2 minutes of audio without a progress callback and gaps up to 3.2 s even with one. Running the pass in a short-lived worker process kept the app's ticker gap at about 0.1 s, so the window and dictation stay responsive.
+
+Limits: all numbers above are on synthetic TTS voices, and single runs are sensitive: trimming every TTS clip by one sample more turned the clean 3-voice meeting into 4 found speakers, 13.3 % DER and 94.9 % of utterances right (11.8 % and 96.0 % in the table). Real meetings (call codecs, crosstalk, room acoustics, genuinely similar human voices) are harder, so speaker detection stays experimental and off by default; check the result before relying on it. Real-meeting DER is still to be measured locally.
+
+```powershell
+.\.venv\Scripts\python.exe tools\benchmark_diarization.py --make-voices C:\bench\voices
+.\.venv\Scripts\python.exe tools\benchmark_diarization.py C:\bench\voices --telephony --json C:\bench\diarization.json
+.\.venv\Scripts\python.exe tools\benchmark_diarization.py C:\bench\voices --scenarios "4 voices" --minutes 30
+```
+
 ## Parakeet TDT 0.6B v3 as an optional backend (v0.2)
 
 Plan v0.2, W6: is NVIDIA's Parakeet TDT 0.6B v3 (25 European languages, Polish among them), run through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), good enough to offer as an alternative to Whisper? Measure first; Whisper stays the default whatever the result.

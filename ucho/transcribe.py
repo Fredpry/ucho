@@ -572,6 +572,18 @@ def transcribe_chunk(engine: Engine, chunk: np.ndarray, begin: int, end: int,
     return segments_from_result(engine.generate(chunk, language), begin, end, speaker)
 
 
+def load_audio(file: Path) -> np.ndarray:
+    """Reads an audio file into a 16 kHz mono contiguous float32 array."""
+    audio, sr = sf.read(str(file), dtype="float32", always_2d=False)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+    if sr != SAMPLE_RATE:
+        import soxr
+
+        audio = soxr.resample(audio, sr, SAMPLE_RATE, quality="HQ")
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
 def iter_transcribe_file(
     file: Path,
     engine: Engine,
@@ -591,14 +603,7 @@ def iter_transcribe_file(
     `speaker`) recognized while it was recorded; a chunk is taken from it
     only when its range and samples are exactly the ones cut here.
     """
-    audio, sr = sf.read(str(file), dtype="float32", always_2d=False)
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
-    if sr != SAMPLE_RATE:
-        import soxr
-
-        audio = soxr.resample(audio, sr, SAMPLE_RATE, quality="HQ")
-    audio = np.ascontiguousarray(audio, dtype=np.float32)
+    audio = load_audio(file)
 
     if audio.size < SAMPLE_RATE // 2:
         return []
@@ -691,10 +696,14 @@ def iter_transcribe_session(
     status: Callable[[str], None] | None = None,
     report: dict | None = None,
     cache=None,
+    speakers: Callable | None = None,
 ) -> Steps:
     """All tracks of a session as steps (one per chunk). Returns the merged segments.
 
     `cache` (live_meeting.ChunkCache): chunks already recognized while recording.
+    `speakers` (diarize.track_pass): optional post-transcription step generator
+    `(name, file, segments, speaker_code, cancel) -> segments` run once per track
+    before `merge_tracks`.
 
     `report` (see `new_report`) says whether the run was cancelled or had
     failed chunks: the segments alone do not tell a partial transcript apart.
@@ -703,7 +712,7 @@ def iter_transcribe_session(
     (the shared engine keeps it when dictation uses the same model).
     """
     language = config.LANGUAGES.get(language_code)
-    speakers = {"microphone": SPEAKER_ME, "system": SPEAKER_MEETING}
+    track_speakers = {"microphone": SPEAKER_ME, "system": SPEAKER_MEETING}
     to_do = [(n, p) for n, p in files.items() if p and Path(p).exists()]
     if not to_do:
         return []
@@ -718,19 +727,34 @@ def iter_transcribe_session(
     yield
 
     step = 1.0 / len(to_do)
-    results: list[list[Segment]] = []
+    transcribed: list[tuple[str, Path, str, list[Segment]]] = []
     for i, (name, file) in enumerate(to_do):
         if cancel is not None and cancel.is_set():
             if report is not None:
                 report["cancelled"] = True
             break
+        path = Path(file)
+        speaker_code = track_speakers.get(name, name)
         segments = yield from iter_transcribe_file(
-            Path(file), engine, speakers.get(name, name), language,
+            path, engine, speaker_code, language,
             progress=progress, cancel=cancel, weight=(i * step, (i + 1) * step), report=report,
             cache=cache, track=name,
         )
-        results.append(segments)
-    return merge_tracks(*results)
+        transcribed.append((name, path, speaker_code, segments))
+
+    if speakers is not None and not (cancel is not None and cancel.is_set()):
+        if status:
+            status(t("Detecting speakers..."))
+        for idx, (name, path, speaker_code, segments) in enumerate(transcribed):
+            if cancel is not None and cancel.is_set():
+                if report is not None:
+                    report["cancelled"] = True
+                break
+            if segments:
+                segments = yield from speakers(name, path, segments, speaker_code, cancel)
+                transcribed[idx] = (name, path, speaker_code, segments)
+
+    return merge_tracks(*(segments for _, _, _, segments in transcribed))
 
 
 # --- dictation ------------------------------------------------------------

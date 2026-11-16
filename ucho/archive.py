@@ -140,6 +140,7 @@ class Hit:
     start: float
     speaker: str  # speaker code ("me" / "meeting" / other)
     text: str
+    name: str = ""
 
 
 @dataclass
@@ -160,6 +161,7 @@ class Archive:
         self._index: sqlite3.Connection | None = None
         self._index_state: tuple | None = None
         self._titles: dict[str, str] = {}
+        self._names: dict[str, dict[str, str]] = {}
         self._lock = threading.RLock()
 
     # Security: the id is only a folder name directly inside the archive.
@@ -190,6 +192,9 @@ class Archive:
         }
         if meta.get("participants"):
             description["participants"] = meta["participants"]
+        names = sessions.speaker_names(meta)
+        if names:
+            description["speakers"] = list(names.values())
         if meta.get("tldr"):
             description["tldr"] = meta["tldr"]
         return description
@@ -227,10 +232,14 @@ class Archive:
                 db.execute("CREATE TABLE u (session, start, speaker, text, folded)")
                 self.fts = False
             titles = []
+            speaker_names: dict[str, dict[str, str]] = {}
             for name, _ in state:
                 meta = self.meta(self.folder / name)
+                names = sessions.speaker_names(meta)
+                speaker_names[name] = names
                 titles.append((name, fold(" ".join(str(meta.get(k) or "") for k in (
-                    "topic", "name", "tldr")) + " " + " ".join(meta.get("participants") or []))))
+                    "topic", "name", "tldr")) + " " + " ".join(meta.get("participants") or [])
+                    + " " + " ".join(names.values()))))
                 for seg in meta.get("segments") or []:
                     if seg.get("text"):
                         text = str(seg["text"])
@@ -242,6 +251,7 @@ class Archive:
                 self._index.close()
             self._index, self._index_state = db, state
             self._titles = dict(titles)
+            self._names = speaker_names
             return db
 
     def search(self, query: str, limit: int) -> list[Hit]:
@@ -263,7 +273,11 @@ class Archive:
                     f"SELECT session, start, speaker, text, folded FROM u WHERE {condition}",
                     [f"%{_like_escape(w)}%" for w in words]).fetchall()
                 rows = [row[:4] for row in candidates if _matches_words(row[4], words)][:limit]
-        return [Hit(s, float(st), str(sp or ""), str(tx)) for s, st, sp, tx in rows]
+            names = dict(self._names)
+        return [
+            Hit(s, float(st), str(sp or ""), str(tx), names.get(s, {}).get(str(sp or ""), ""))
+            for s, st, sp, tx in rows
+        ]
 
     def find(self, query: str, limit: int = 60, hits_per_session: int = 3) -> list[Match]:
         """Sessions matching `query`, newest first, for the app's search box.

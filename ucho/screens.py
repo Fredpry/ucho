@@ -22,7 +22,8 @@ from .archive import Match, fold, hms, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .meeting import same_folder
-from .merge import TRANSCRIPT_MD, TRANSCRIPT_PARTIAL, display_title, format_hms, speaker_label
+from .merge import (TRANSCRIPT_MD, TRANSCRIPT_PARTIAL, display_title, format_hms, speaker_label,
+                    speaker_track)
 from .theme import C
 
 log = logging.getLogger(__name__)
@@ -415,9 +416,9 @@ class RecordingCard(ctk.CTkFrame):
             ui.label(hit_row, format_hms(hit.start), theme.XS, color=C.text_muted,
                      family="mono").grid(row=0, column=0, sticky="nw", padx=(0, 8))
             code = hit.speaker
-            ui.label(hit_row, speaker_label(code), theme.XS + 1, "bold",
-                     color=C.action if code == "me" else C.info).grid(row=0, column=1, sticky="nw",
-                                                                      padx=(0, 6))
+            ui.label(hit_row, hit.name or speaker_label(code), theme.XS + 1, "bold",
+                     color=C.action if speaker_track(code) == "me" else C.info).grid(
+                row=0, column=1, sticky="nw", padx=(0, 6))
             excerpt = hit.text if len(hit.text) < 160 else hit.text[:157] + "…"
             excerpt_label = ui.label(hit_row, excerpt, theme.XS + 1, anchor="w", justify="left",
                                      wraplength=440)
@@ -580,10 +581,11 @@ class TranscriptScreen(Screen):
         self.meeting = app.meeting
         self.folder: Path | None = None
         self.segments: list = []
+        self.names: dict[str, str] = {}
         self.live = False
         self.query = ""
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(5, weight=1)
+        self.grid_rowconfigure(6, weight=1)
 
         back = ui.ghost(self, t("Recordings"), lambda: app.show("recordings"), "back",
                         color=C.text_muted, width=10)
@@ -629,8 +631,10 @@ class TranscriptScreen(Screen):
         self.progress_label.pack(side="left", fill="x", expand=True)
         self.progress_row.bind("<Configure>", self._wrap_progress, add="+")
 
+        self.speakers_row = ctk.CTkFrame(self, fg_color="transparent")
+
         self.text = ui.TranscriptText(self)
-        self.text.grid(row=5, column=0, sticky="nsew", padx=PAD, pady=(0, PAD - 8))
+        self.text.grid(row=6, column=0, sticky="nsew", padx=PAD, pady=(0, PAD - 8))
         self.meeting.listen(self._event)
 
     # --- showing ------------------------------------------------------------
@@ -648,6 +652,7 @@ class TranscriptScreen(Screen):
         self.live = True
         self.folder = m.session_dir
         self.segments = []
+        self.names = {}
         self.title.configure(text=m.last_meta.get("name") or (self.folder.name if self.folder else ""))
         model = self.app.settings["model"].split("/")[-1]
         self.subtitle.configure(text=f"{self.app.settings['device']}  ·  {model}")
@@ -670,9 +675,40 @@ class TranscriptScreen(Screen):
         self.title.configure(text=title)
         self.subtitle.configure(text="  ·  ".join(details))
         self.segments = session.segments(meta)
+        self.names = session.speaker_names(meta)
         self._render(meta)
 
+    def _can_rename_speakers(self) -> bool:
+        return (not self.live and self.folder is not None and bool(self.segments)
+                and not self.meeting.in_use(self.folder))
+
+    def _update_speakers(self) -> None:
+        for child in self.speakers_row.winfo_children():
+            child.destroy()
+        if not self._can_rename_speakers():
+            self.speakers_row.grid_remove()
+            return
+        codes = session.speaker_codes(self.segments)
+        if not codes:
+            self.speakers_row.grid_remove()
+            return
+        ui.muted(self.speakers_row, t("Speakers:"), theme.XS + 1, anchor="w").pack(
+            side="left", padx=(0, 8))
+        for code in codes[:8]:
+            ui.secondary(
+                self.speakers_row,
+                speaker_label(code, self.names),
+                lambda c=code: self._rename(c),
+                height=28,
+                width=10,
+            ).pack(side="left", padx=(0, 6))
+        if len(codes) > 8:
+            ui.muted(self.speakers_row, f"+{len(codes) - 8}", theme.XS + 1, anchor="w").pack(
+                side="left", padx=(2, 0))
+        self.speakers_row.grid(row=5, column=0, sticky="ew", padx=PAD, pady=(0, 10))
+
     def _render(self, meta: dict) -> None:
+        self._update_speakers()
         text = self.text
         text.clear()
         if meta.get("tldr") or meta.get("key_points") or meta.get("decisions"):
@@ -689,9 +725,11 @@ class TranscriptScreen(Screen):
                 for decision in meta["decisions"]:
                     text.write(("→  " + decision + "\n", "summary"))
             text.write(("\n", "body"), (t("Transcript") + "\n", "title"))
+        on_click = self._rename if self._can_rename_speakers() else None
         if self.segments:
             for seg in self.segments:
-                text.line(format_hms(seg.start), seg.speaker, speaker_label(seg.speaker), seg.text)
+                text.line(format_hms(seg.start), seg.speaker,
+                          speaker_label(seg.speaker, self.names), seg.text, on_click=on_click)
         elif self.folder is not None:
             file = session.find_file(self.folder, TRANSCRIPT_MD)
             if file is not None:
@@ -736,6 +774,7 @@ class TranscriptScreen(Screen):
                 self.again.pack(side="left", padx=(0, 8))
             if self.segments and not has_summary:
                 self.summarize.pack(side="left", padx=(0, 8))
+        self._update_speakers()
         self.after_idle(self._fit_actions)
 
     def _fit_actions(self, _event=None) -> None:
@@ -783,6 +822,9 @@ class TranscriptScreen(Screen):
                     # This session waited in the queue and has just started.
                     self._show_live()
                 self._update_actions()
+            elif event == "speakers" and same_folder(data, self.folder):
+                self._show_session(self.folder)
+                self._update_actions()
             return
         if event == "state" and not m.is_active(self.folder):
             # Finished or failed; what comes next belongs to another session.
@@ -795,6 +837,8 @@ class TranscriptScreen(Screen):
         elif event == "transcribed":
             folder, segments, meta, _expected = data
             self.folder, self.segments = folder, segments
+            self.names = session.speaker_names(meta)
+            self.live = bool(_expected)
             self.title.configure(text=meta.get("name") or folder.name)
             self._render(meta)
             self._update_actions()
@@ -816,11 +860,35 @@ class TranscriptScreen(Screen):
 
     # --- actions ---------------------------------------------------------------
 
+    def _rename(self, code: str) -> None:
+        if self.folder is None:
+            return
+        if self.meeting.in_use(self.folder):
+            self.app.toast(t("This recording is busy. Try again when it is finished."), "warning")
+            return
+        current = speaker_label(code, self.names)
+        value = ui.ask_text(
+            self,
+            t("Rename speaker"),
+            t("Name for “{label}” in this recording. Leave it empty to go back to “{default}”.",
+              label=current, default=speaker_label(code)),
+            self.names.get(code, ""),
+            t("Save"),
+        )
+        if value is None or self.folder is None:
+            return
+        if self.meeting.rename_speaker(self.folder, code, value):
+            self._show_session(self.folder)
+            self._update_actions()
+            self.app.toast(t("Speaker renamed"))
+        else:
+            self.app.toast(t("Could not rename the speaker."), "warning")
+
     def _copy(self) -> None:
         from . import dictation
 
         if self.segments:
-            text = "\n".join(f"[{format_hms(s.start)}] {speaker_label(s.speaker)}: {s.text}"
+            text = "\n".join(f"[{format_hms(s.start)}] {speaker_label(s.speaker, self.names)}: {s.text}"
                              for s in self.segments)
         else:
             text = self.text.all_text()
@@ -860,7 +928,7 @@ class TranscriptScreen(Screen):
 
     def _delete(self) -> None:
         if self.folder is not None and delete_recording(self.app, self.folder, self):
-            self.folder, self.segments, self.live = None, [], False
+            self.folder, self.segments, self.names, self.live = None, [], {}, False
 
 
 # --- Dictation --------------------------------------------------------------------------

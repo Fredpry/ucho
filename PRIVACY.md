@@ -36,6 +36,10 @@ Ucho keeps a recording until you delete it. **Delete recording** on the transcri
 
 **Delete audio after** in Settings (Never, 7, 30 or 90 days; default Never) removes only the audio files of recordings that already have a transcript, at start and then once a day. Transcripts, summaries and `meta.json` stay, and `meta.json` notes that the audio was removed. The log records only how many files were removed.
 
+### Speaker detection and names
+
+Optional speaker detection (Settings → Transcription → *Speakers*, off by default) runs locally on the CPU in a short-lived worker process. The two small models (~33 MB) are downloaded from Hugging Face only when you turn the feature on (or click *Download models*). Voice embeddings (biometric voice characteristics used to group utterances of the same speaker) exist only in memory during the pass over one track and are never saved to disk; Ucho keeps no voice profiles across meetings. Speaker names you enter on the transcript screen are stored only in that meeting's `meta.json` (`speaker_names`) and transcript files (`transcript.md`, `transcript.srt`, `transcript.txt`).
+
 ### Dictation and the clipboard
 
 Paste mode puts the dictated text on the clipboard for a moment and presses Ctrl+V. The text is marked so that Windows keeps it out of clipboard history (Win+V) and cloud clipboard sync, and the text you had copied before is put back right after the paste (only text: an image or copied files on the clipboard are not restored). Text Ucho copies on request (*Copy all*, *Copy*) is marked the same way. If the window you dictated into is closed or does not come back to the front, nothing is pasted: the text stays on the clipboard for you to paste with Ctrl+V.
@@ -106,6 +110,10 @@ Domyślny folder nagrań celowo **nie** leży w Dokumentach: na wielu firmowych 
 Ucho przechowuje nagranie, dopóki go nie usuniesz. **Usuń nagranie** na ekranie transkryptu (albo klawisz Delete na nagraniu zaznaczonym na liście) po potwierdzeniu usuwa cały folder sesji: dźwięk, transkrypt i podsumowanie. Pliki są kasowane od razu, nie trafiają do Kosza. Kopie zrobione poza Ucho (kopie zapasowe, folder synchronizowany) zostają bez zmian.
 
 **Usuwaj nagrania audio po** w Ustawieniach (Nigdy, 7, 30 albo 90 dniach; domyślnie Nigdy) usuwa przy starcie, a potem raz dziennie, tylko pliki audio nagrań, które mają już transkrypt. Transkrypty, podsumowania i `meta.json` zostają, a w `meta.json` zapisuje się informacja o usunięciu dźwięku. Log odnotowuje tylko liczbę usuniętych plików.
+
+### Rozpoznawanie mówców i imiona
+
+Opcjonalne rozpoznawanie mówców (Ustawienia → Transkrypcja → *Mówcy*, domyślnie wyłączone) działa lokalnie na procesorze w osobnym, krótkotrwałym procesie. Dwa małe modele (ok. 33 MB) są pobierane z Hugging Face tylko wtedy, gdy włączysz tę funkcję (albo klikniesz *Pobierz modele*). Wektory cech głosu (dane biometryczne używane do pogrupowania wypowiedzi jednej osoby) istnieją wyłącznie w pamięci RAM podczas przebiegu po jednej ścieżce i nigdy nie są zapisywane na dysku; Ucho nie tworzy ani nie zachowuje profili głosowych między spotkaniami. Imiona nadane mówcom na ekranie transkryptu są zapisywane wyłącznie w `meta.json` (`speaker_names`) i plikach transkryptu (`transcript.md`, `transcript.srt`, `transcript.txt`) tego jednego spotkania.
 
 ### Dyktowanie a schowek
 

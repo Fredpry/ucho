@@ -30,9 +30,10 @@ import time
 import unicodedata
 from typing import Callable
 
-from . import config, transcribe
+from . import config, session, transcribe
 from .i18n import t
-from .merge import SPEAKER_ME, SPEAKER_MEETING, Segment, as_text, format_hms, slug
+from .merge import (SPEAKER_ME, SPEAKER_MEETING, Segment, as_text, clean_speaker_name,
+                    clean_speaker_names, format_hms, slug, split_speaker)
 
 log = logging.getLogger(__name__)
 
@@ -71,8 +72,10 @@ _PROMPT_LABELS = {SPEAKER_ME: "Ja", SPEAKER_MEETING: "Spotkanie"}
 # Audio track labels and Polish role words - the model likes to take them for
 # names, so they are filtered out hard. Polish data, matched against Polish output.
 NOT_NAMES = {
-    "ja", "spotkanie", "uczestnik", "uczestnicy", "rozmowca", "rozmowcy",
+    "ja", "spotkanie", "mikrofon", "uczestnik", "uczestnicy", "rozmowca", "rozmowcy",
     "mowca", "prowadzacy", "nieznany", "brak", "wszyscy", "gosc", "user",
+    # The same words with Polish letters: "Mówca N" is the label of a detected voice.
+    "mówca", "mówcy", "rozmówca", "rozmówcy", "prowadzący", "gość",
     # Functions and roles - the model gives them instead of a name when no name was said.
     "dyrektor", "dyrektorka", "prezes", "kierownik", "kierowniczka", "szef",
     "szefowa", "klient", "klientka", "zespol", "zespół", "zarzad", "zarząd",
@@ -138,8 +141,20 @@ SYSTEM = (
 
 _LABEL_NOTE = (
     'Etykiety "Ja:" i "Spotkanie:" oznaczają źródło dźwięku (mikrofon i głośniki), '
-    "a NIE imiona — nigdy nie traktuj ich jako uczestników."
+    'a "Mówca N:" i "Mikrofon N:" rozpoznany głos — to NIE są imiona i nigdy nie '
+    "traktuj ich jako uczestników."
 )
+
+
+def _label_note(known: list[str] | tuple[str, ...] = ()) -> str:
+    if not known:
+        return _LABEL_NOTE
+    names = ", ".join(known)
+    return (
+        f"{_LABEL_NOTE} Imiona przed dwukropkiem nadał użytkownik ({names}): "
+        "to są uczestnicy spotkania."
+    )
+
 
 CHUNK_PROMPT = """Fragment {number} z {total} transkryptu spotkania. {note}
 
@@ -481,11 +496,40 @@ def _name_in_text(name: str, words: set[str]) -> bool:
                                           cutoff=NAME_SIMILARITY))
 
 
-def _names(value, transcript: str | None = None) -> list[str]:
+def known_names(segments: list[Segment], speaker_names: dict | None) -> list[str]:
+    """Distinct non-empty cleaned names of speaker codes occurring in `segments`, in first-appearance order."""
+    if not segments or not isinstance(speaker_names, dict):
+        return []
+    cleaned = clean_speaker_names(speaker_names)
+    if not cleaned:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for code in session.speaker_codes(segments):
+        name = cleaned.get(code)
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            result.append(name)
+    return result
+
+
+def _known_keys(known) -> set[str]:
+    keys: set[str] = set()
+    for item in known or ():
+        clean = " ".join(str(item).split()).strip()
+        if clean:
+            lower = clean.lower()
+            keys.add(lower)
+            keys.add(lower.split()[0])
+    return keys
+
+
+def _names(value, transcript: str | None = None, known=()) -> list[str]:
     """Keeps only what looks like a name - the rest of the model output is dropped.
 
     With `transcript`, names are also checked for whether they were said in it
-    at all.
+    at all. Names already covered by `known` are skipped here and added by
+    `_participants`.
     """
     result: list[str] = []
     seen: set[str] = set()
@@ -493,6 +537,7 @@ def _names(value, transcript: str | None = None) -> list[str]:
         return result
 
     comparable = _words(transcript) if transcript else None
+    covered = _known_keys(known)
 
     for item in value:
         name = " ".join(str(item).split()).strip(" -,.")
@@ -503,7 +548,7 @@ def _names(value, transcript: str | None = None) -> list[str]:
             continue
         # The first word too, otherwise "Kierownik produkcji" or "Dyrektor
         # finansowy" slip past the single-word filter.
-        if name.lower() in seen:
+        if name.lower() in seen or name.lower() in covered:
             continue
         if {name.lower(), name.lower().split()[0]} & NOT_NAMES:
             continue
@@ -517,7 +562,23 @@ def _names(value, transcript: str | None = None) -> list[str]:
     return result
 
 
-def _normalize(data: dict, transcript: str | None = None) -> dict:
+def _participants(known: list[str], found: list[str]) -> list[str]:
+    """User-given `known` names first (verbatim, never dropped), then uncovered `found` names up to MAX_PARTICIPANTS."""
+    result = list(known or [])
+    covered = _known_keys(result)
+    for name in found or []:
+        if len(result) >= MAX_PARTICIPANTS:
+            break
+        cleaned = _HONORIFICS.sub("", " ".join(str(name).split()).strip(" -,.")).strip()
+        lower = cleaned.lower()
+        if not lower or lower in covered:
+            continue
+        covered.add(lower)
+        result.append(name)
+    return result
+
+
+def _normalize(data: dict, transcript: str | None = None, known=()) -> dict:
     """Model answer (Polish schema fields) -> cleaned result with English keys."""
     topic = " ".join(str(data.get("temat", "")).split()).strip(" .-\"'")
     tldr = " ".join(str(data.get("tldr", "")).split())
@@ -530,16 +591,27 @@ def _normalize(data: dict, transcript: str | None = None) -> dict:
         key_points = [_without_invented_dates(p, words, transcript) for p in key_points]
         decisions = [_without_invented_dates(d, words, transcript) for d in decisions]
 
+    known_list = list(known or [])
     return {
         "topic": topic[:MAX_TOPIC_CHARS],
-        "participants": _names(data.get("uczestnicy"), transcript),
+        "participants": _participants(known_list, _names(data.get("uczestnicy"), transcript, known_list)),
         "tldr": tldr,
         "key_points": key_points,
         "decisions": decisions,
     }
 
 
-def _prompt_label(speaker: str) -> str:
+def _prompt_label(speaker: str, names: dict | None = None) -> str:
+    if isinstance(names, dict):
+        custom = clean_speaker_name(names.get(speaker))
+        if custom:
+            return custom
+    base, n = split_speaker(speaker)
+    if n is not None:
+        if base == SPEAKER_MEETING:
+            return f"Mówca {n}"
+        if base == SPEAKER_ME:
+            return f"Mikrofon {n}"
     return _PROMPT_LABELS.get(speaker, speaker)
 
 
@@ -552,6 +624,7 @@ def summarize(
     device: str = "GPU",
     status: StatusFn | None = None,
     cancel: threading.Event | None = None,
+    speaker_names: dict | None = None,
 ) -> dict:
     """Returns {topic, participants, tldr, key_points, decisions, summary_model,
     summary_device, summary_time_s}.
@@ -559,9 +632,14 @@ def summarize(
     An empty dict means there was nothing to summarize or the model returned
     nothing useful - the caller should then leave everything as it was.
     """
-    text = as_text(segments, label=_prompt_label).strip() if segments else ""
+    text = (
+        as_text(segments, label=lambda code: _prompt_label(code, speaker_names)).strip()
+        if segments else ""
+    )
     if not text:
         return {}
+    known = known_names(segments, speaker_names)
+    note = _label_note(known)
 
     engine = LLMEngine(model, device)
     start = time.monotonic()
@@ -584,7 +662,7 @@ def summarize(
                 part = engine.generate_json(
                     CHUNK_PROMPT.format(
                         number=i, total=len(chunks),
-                        note=_LABEL_NOTE, material=chunk,
+                        note=note, material=chunk,
                     ),
                     CHUNK_SCHEMA,
                     MAX_TOKENS_CHUNK,
@@ -592,7 +670,7 @@ def summarize(
                 )
                 notes.extend(_sentences(part.get("punkty"), 3))
                 decisions.extend(_sentences(part.get("ustalenia"), MAX_DECISIONS))
-                names.extend(_names(part.get("uczestnicy"), text))
+                names.extend(_names(part.get("uczestnicy"), text, known))
 
             if not notes and not decisions:
                 return {}
@@ -622,18 +700,19 @@ def summarize(
         result = _normalize(
             engine.generate_json(
                 SUMMARY_PROMPT.format(
-                    source=source, note=_LABEL_NOTE, material=material
+                    source=source, note=note, material=material
                 ),
                 SUMMARY_SCHEMA,
                 MAX_TOKENS_FINAL,
                 cancel,
             ),
             text,
+            known,
         )
         if cancel is not None and cancel.is_set():
             return {}
-        if not result["participants"] and names:
-            result["participants"] = _names(names, text)
+        if len(result["participants"]) <= len(known) and names:
+            result["participants"] = _participants(known, _names(names, text, known))
         if not result["topic"] and not result["tldr"]:
             return {}
 

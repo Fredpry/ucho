@@ -21,6 +21,7 @@ Nagrywa spotkania w Teams, Zoomie czy Meet oraz dyktowanie i zamienia je w tekst
 |---|---|
 | <kbd>Ctrl</kbd> <kbd>Alt</kbd> <kbd>R</kbd> | nagrywaj spotkanie, z dowolnego programu |
 | <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Spacja</kbd> | dyktuj tam, gdzie stoi kursor |
+| **Mówcy** | „Ja” i „Spotkanie” z dwóch ścieżek; opcjonalne eksperymentalne rozpoznawanie mówców wewnątrz ścieżki („Mówca 1”, „Mówca 2”…) i nazywanie ich kliknięciem na transkrypcie |
 | **MCP** | Claude Code, Cursor czy Codex czytają Twoje transkrypty |
 | **1 h → 4–7 min** | transkrypcja godziny rozmowy na grafice Intel Arc ([pomiary](docs/benchmarks.md)) |
 
@@ -48,6 +49,7 @@ Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami)
 - `-WithSummary`: lokalne podsumowania (model Qwen, ok. 5 GB). Domyślnie wyłączone.
 - Automatyczne nazwy spotkań: krótkie tytuły dla spotkań bez nazwy z lokalnego modelu językowego (Qwen3 4B, ok. 2,3 GB, pobierany w Ustawieniach → Nazwy spotkań).
 - `-WithParakeet`: dodatkowy silnik NVIDIA Parakeet, szybki na samym procesorze. Słabiej radzi sobie z angielskimi wtrąceniami. Wybierasz go w Ustawieniach → Sprzęt.
+- `-WithSpeakers`: opcjonalny pakiet `sherpa-onnx` do rozpoznawania mówców wewnątrz ścieżki (Ustawienia → Transkrypcja → Mówcy; dwa małe modele, ok. 33 MB, pobierane przy włączeniu opcji).
 - `-Force`: instalacja w folderze OneDrive bez pytania. Odradzamy: modele, ustawienia i log z podyktowanym tekstem trafiłyby do chmury.
 - Opcje działają też z plikiem do dwukliku: `install.cmd -WithSummary`.
 - Przebieg każdej instalacji trafia do `install.log` w folderze programu. Ucho nie ma jeszcze podpisu cyfrowego, więc Windows może ostrzec przed uruchomieniem `Ucho-Setup.exe` albo `install.cmd`.

@@ -8,6 +8,8 @@ Ucho records the microphone and the system audio (WASAPI loopback, i.e. whatever
 
 Both tracks are transcribed separately and merged by timestamp. The microphone becomes "Me" and the system audio "Meeting". This gives a speaker split for free, without a diarization model, and without the classic diarization errors when two people have similar voices. The cost: everyone on the far end is one speaker. With speakers instead of headphones, the microphone hears the others too, so headphones are required for clean results.
 
+Optional speaker detection inside a track (`ucho/diarize.py`, experimental, off by default) can split "Meeting" (and, when several people share a room microphone, "Me") into numbered voices. It runs only after the transcription as one extra pass per track in a worker process: every Whisper segment takes the voice with the largest time overlap (segments without overlap keep the track speaker), giving codes `meeting:1`, `meeting:2`, … or `me:1`, `me:2`, …, while segment text and timestamps never change. User-given speaker names are stored separately in a `speaker_names` mapping. The two tracks remain the base because separating "Me" from "Meeting" by hardware never confuses similar voices.
+
 ## 2. Silence never reaches Whisper
 
 Whisper invents text on silence and noise: Polish recordings produce "Napisy stworzone przez społeczność Amara.org", English ones "Thank you." or "Thanks for watching". Ucho detects silence by RMS and cuts it before the model sees it. Remaining known phantoms are removed by patterns in `merge.py` (and a test found that the Polish "Dziękuję za uwagę" pattern had never matched because of a missing "ę"; fixed in v0.1).
@@ -65,6 +67,16 @@ Measured on a Core Ultra 7 258V (Arc 140V, 32 GB), 6 minutes of synthetic Polish
 
 NVIDIA Parakeet TDT 0.6B v3 runs through sherpa-onnx (ONNX Runtime) on the CPU only; the PyPI wheel has no GPU execution provider. It is installed only with `install.ps1 -WithParakeet` and appears in the model list only when `sherpa_onnx` is importable. `transcribe.create_engine` returns a `parakeet.Engine` for its model id; that class has the same surface as the Whisper engine and returns results shaped like OpenVINO's (`.texts`, `.chunks` with timestamps, one chunk per sentence), so the engine thread, silence gate, chunking, hallucination filter, `merge_tracks` and the MCP server are shared. Two things differ: the model has no language setting (it picks among 25 European languages itself), and long audio has to be cut into pieces of at most 20 s, so the 5-minute chunks of forced-language mode are split again. Measured on synthetic speech it is close to Whisper on Polish and much faster on the CPU, but weak with English phrases inside Polish sentences, so it is never chosen automatically ([benchmarks.md](benchmarks.md#parakeet-tdt-06b-v3-as-an-optional-backend-v02)).
 
+## 9. Speaker detection and names
+
+Optional speaker detection (`ucho/diarize.py`, issue #15) tells voices apart inside a track with `sherpa-onnx` on the CPU, using two small ONNX models (~33 MB in all, pinned in `config.REVISIONS` and downloaded only when the feature is turned on in Settings → Transcription → *Speakers*): `pyannote/segmentation-3.0` (~6 MB, MIT, CNRS) and the 3D-Speaker project's `ERes2Net` trained on VoxCeleb (~27 MB, Apache-2.0; only the single ONNX file is downloaded from `csukuangfj/speaker-embedding-models` via `config.DOWNLOAD_PATTERNS`).
+
+- **Worker process because of the GIL.** `sherpa-onnx` holds the Python GIL for seconds at a time during diarization (up to 3.2 s even with a progress callback, or the whole run without one), which would freeze the UI and delay dictation. Ucho runs each track pass in a short-lived subprocess (`python -m ucho.diarize --worker <track>`) at below-normal priority without a console window. Meanwhile `iter_diarize_track` yields on the engine thread every 0.1 s, so a dictation can overtake it between steps. Cancelling the transcription kills the worker immediately; if the worker fails, the segments keep their plain track speaker (`me` or `meeting`) and the transcript is still saved.
+- **Text and timestamps never change.** `assign_speakers` only relabels each already-recognized Whisper segment to the diarized speaker turn with the largest summed time overlap (ordered 1, 2, … by first appearance on that track: `meeting:1`, `meeting:2` rendered as "Speaker 1", "Speaker 2", or `me:1`, `me:2` rendered as "Microphone 1", "Microphone 2"). If a track has fewer than two assigned speakers, its segments keep the plain track code.
+- **Speaker names (`speaker_names`).** Clicking a speaker button or label on the transcript screen saves a `{speaker_code: name}` entry in `meta.json` and rewrites `transcript.md`, `transcript.srt`, `transcript.txt` and `meta.json` without touching the segments themselves. Two speaker numbers can be given the same name, so one person split into two voices reads as one person (the lines are not joined). *Transcribe again* drops names of numbered speakers (`meeting:N`, `me:N`) because a new diarization pass may number voices differently, and keeps names given to plain `me` or `meeting`.
+- **Summaries, search and MCP.** When a summary runs, user-given names of speakers present in the segments are passed to the prompt and prepended to `participants` as known participants, while the mechanical name filters (`_names`, `_name_in_text`) still reject any extra names the LLM invents that were not said in the transcript. Full-text search (`ucho/archive.py`) indexes speaker names alongside titles and participants, and the MCP server (`ucho_mcp/server.py`) shows them in `list_meetings`, `get_transcript` and `search_transcripts`.
+- **No voice profiles.** Voice embeddings exist only in the worker's memory during a single pass over one track and are never written to disk or reused across meetings. Benchmarks and model comparisons are in [benchmarks.md](benchmarks.md#speaker-detection-15).
+
 ## Files per meeting
 
 ```
@@ -74,6 +86,6 @@ recordings\2026-11-14_10-00_Budget-Q4\
     transcript.md      transcript with speakers and timestamps
     transcript.srt     subtitles
     transcript.txt     plain text
-    meta.json          session parameters + structured segments
+    meta.json          session parameters, structured segments + optional speaker_names
     summary.md         only if summaries are enabled
 ```

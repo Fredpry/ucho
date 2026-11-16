@@ -29,7 +29,7 @@ from ucho import session as sessions
 from ucho.archive import Archive, ArchiveError
 from ucho.archive import hms as _hms
 from ucho.config import VERSION  # one version for the app and the server
-from ucho.merge import SPEAKER_LABELS, TRANSCRIPT_MD
+from ucho.merge import TRANSCRIPT_MD, speaker_label
 
 log = logging.getLogger("ucho_mcp")
 
@@ -65,7 +65,10 @@ TOOLS = [
         "name": "get_transcript",
         "description": (
             "Meeting transcript with timestamps and speakers ('Me' = the microphone of "
-            "the person who recorded, 'Meeting' = system audio, i.e. everyone else). "
+            "the person who recorded, 'Meeting' = system audio (everyone else), "
+            "'Speaker N' = a voice told apart inside the system audio, "
+            "'Microphone N' = a voice told apart inside the microphone track; "
+            "a person's name instead of a label was given by the user). "
             "Optionally only a range of minutes."
         ),
         "inputSchema": {
@@ -119,8 +122,8 @@ ARGUMENT_ALIASES = {"od": "from", "do": "to", "fraza": "query",
 ToolError = ArchiveError
 
 
-def _speaker(code) -> str:
-    return SPEAKER_LABELS.get(code, str(code or ""))
+def _speaker(code, names: dict | None = None) -> str:
+    return speaker_label(str(code or ""), names, translate=False)
 
 
 def _date(text: str | None) -> datetime | None:
@@ -136,7 +139,7 @@ def _date(text: str | None) -> datetime | None:
 
 def search(archive: Archive, query: str, limit: int) -> list[dict]:
     """search_transcripts result rows (the search itself lives in ucho.archive)."""
-    return [{"id": h.id, "time": _hms(h.start), "speaker": _speaker(h.speaker),
+    return [{"id": h.id, "time": _hms(h.start), "speaker": h.name or _speaker(h.speaker),
              "excerpt": h.text[:400]} for h in archive.search(query, limit)]
 
 
@@ -196,12 +199,13 @@ def call_tool(archive: Archive, name: str, args: dict) -> str:
                 return file.read_text(encoding="utf-8")
             return "This meeting has no transcript yet."
         description = archive.describe(session)
+        names = sessions.speaker_names(archive.meta(session))
         lines = [f"# {description['title']} ({description['date']})", ""]
         for seg in segments:
             at = float(seg.get("start", 0))
             if (start is not None and at < start) or (end is not None and at > end):
                 continue
-            lines.append(f"[{_hms(at)}] {_speaker(seg.get('speaker'))}: {seg['text']}")
+            lines.append(f"[{_hms(at)}] {_speaker(seg.get('speaker'), names)}: {seg['text']}")
         return "\n".join(lines)
 
     if name == "get_summary":

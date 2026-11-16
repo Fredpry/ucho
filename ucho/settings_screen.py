@@ -14,7 +14,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, hardware, i18n, retention, theme, transcribe, ui, winshell
+from . import config, diarize, hardware, i18n, retention, theme, transcribe, ui, winshell
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .screens import PAD, Screen, header, open_path
@@ -346,7 +346,68 @@ class SettingsScreen(Screen):
               "is the same. Needs the automatic transcription after stopping. On by default in "
               "Auto language mode on a GPU; with a forced language a dictation may wait for a "
               "5-minute piece. It stops by itself when the computer cannot keep up."))
+        self.speaker_switch = s.row(
+            t("Speakers"),
+            lambda m: ui.switch(
+                m, t("Detect speakers (experimental)"), self.settings["speaker_detection"],
+                self._speaker_detection),
+            t("After the transcription, the voices inside each track are told apart (“Speaker 1”, "
+              "“Speaker 2”…); click a speaker on the transcript to give it a name. Experimental: "
+              "similar voices get mixed up, so check the result. Runs on the CPU after the text is "
+              "ready and does not change the text. Voice data is not kept."),
+        )
+        if not diarize.available():
+            self.speaker_switch.configure(state="disabled")
+        self.speaker_note = s.full(lambda m: None, pady=(0, 8))
+        self.speaker_state = ui.muted(self.speaker_note, "", theme.XS + 1, anchor="w")
+        self.speaker_state.pack(side="left")
+        self.speaker_download = ui.secondary(
+            self.speaker_note, t("Download models ({size})", size=config.SPEAKER_MODELS_SIZE),
+            self._download_speakers, width=10, height=30)
         s.end()
+        self.after(400, self._refresh_speakers)
+
+    def _speaker_detection(self, value: bool) -> None:
+        self._save("speaker_detection", value)
+        if value and diarize.available() and not diarize.models_downloaded():
+            self._download_speakers()
+
+    def _refresh_speakers(self) -> None:
+        size = config.SPEAKER_MODELS_SIZE
+        self.speaker_download.pack_forget()
+        if not diarize.available():
+            self.speaker_state.configure(
+                text=t("Needs the optional sherpa-onnx package: run the installer again with -WithSpeakers."),
+                text_color=C.warning,
+            )
+        elif diarize.models_downloaded():
+            self.speaker_state.configure(
+                text=t("Models downloaded ({size})", size=size),
+                text_color=C.success,
+            )
+        else:
+            self.speaker_state.configure(
+                text=t("Models not downloaded ({size})", size=size),
+                text_color=C.text_muted,
+            )
+            self.speaker_download.configure(
+                text=t("Download models ({size})", size=size), state="normal")
+            self.speaker_download.pack(side="left", padx=(12, 0))
+
+    def _download_speakers(self) -> None:
+        self.speaker_download.configure(state="disabled", text=t("Downloading..."))
+
+        def job():
+            try:
+                diarize.download_models()
+            except Exception as error:
+                message = str(error)
+                log.exception("Speaker model download failed")
+                self.app.post(lambda: self.app.toast(
+                    t("Speaker model download failed: {error}", error=message), "warning"))
+            self.app.post(self._refresh_speakers)
+
+        threading.Thread(target=job, daemon=True).start()
 
     # --- dictation --------------------------------------------------------------------
 

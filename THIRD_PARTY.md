@@ -19,7 +19,7 @@ Ucho's own code is Apache-2.0. The installer downloads the components below; the
 | pillow | 13.0.0 | MIT-CMU |
 | pystray | 0.19.5 | LGPL-3.0 |
 
-Optional, only with `install.ps1 -WithParakeet` (`requirements-parakeet.txt`):
+Optional, only with `install.ps1 -WithParakeet` or `install.ps1 -WithSpeakers` (`requirements-parakeet.txt`):
 
 | Package | Version | License |
 |---|---|---|
@@ -39,13 +39,16 @@ The LGPL libraries are installed as separate, unmodified packages in a normal vi
 | OpenVINO/Qwen3-8B-int4-ov | summaries, optional | Apache-2.0 |
 | OpenVINO/Qwen3-4B-int4-ov | summaries and meeting titles, optional | Apache-2.0 |
 | OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov | summaries, optional | Apache-2.0 |
-
 | csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3 | transcription and dictation, optional (Parakeet backend, only with `-WithParakeet`) | CC BY 4.0 |
 | csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8 | measurements only (`tools/benchmark_wer.py`), not offered in the app | CC BY 4.0 |
+| csukuangfj/sherpa-onnx-pyannote-segmentation-3-0 | speaker detection, optional (ONNX export of `pyannote/segmentation-3.0`; file `model.onnx`, only with `-WithSpeakers`) | MIT (Copyright (c) 2022 CNRS) |
+| csukuangfj/speaker-embedding-models | speaker detection, optional (only the file `3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx` is downloaded; the 3D-Speaker project's ERes2Net trained on VoxCeleb, ModelScope `iic/speech_eres2net_sv_en_voxceleb_16k`, only with `-WithSpeakers`) | Apache-2.0 |
 
 Whisper was created by OpenAI; the OpenVINO conversions are published by Intel. Qwen models are by the Qwen team, Alibaba Cloud.
 
 **Parakeet attribution (CC BY 4.0).** The Parakeet models are [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) by NVIDIA, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) ("ready for commercial/non-commercial use" per the model card). The ONNX exports Ucho downloads were made by the sherpa-onnx project, unmodified by Ucho. NVIDIA does not endorse Ucho. CC BY 4.0 lets anyone use and redistribute the weights, also commercially, as long as this credit and the license link are kept.
+
+**Speaker detection models attribution (MIT, Apache-2.0).** Speaker segmentation uses [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) by CNRS (MIT License, Copyright (c) 2022 CNRS), and speaker embeddings use ERes2Net trained on VoxCeleb (`iic/speech_eres2net_sv_en_voxceleb_16k`) by the 3D-Speaker project / Alibaba (Apache-2.0). The ONNX exports in `csukuangfj/sherpa-onnx-pyannote-segmentation-3-0` and `csukuangfj/speaker-embedding-models` were published by the sherpa-onnx project and are used unmodified by Ucho; their revisions are pinned in `ucho/config.py`.
 
 ## Installer
 
