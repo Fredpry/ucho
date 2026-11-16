@@ -142,6 +142,7 @@ Notes:
 - Loading from the OpenVINO cache took 1.4-2.8 s on the GPU and 4.4 s on the CPU; the first load ever (compilation) took about 30 s on the GPU.
 - With 1,450 prompt tokens the CPU took 40-47 s, hence the smaller excerpt (1,800 + 900 characters).
 - CPU numbers vary because the machine was shared with other work during the test.
+- Through the app's code path (`titles.generate_title`: load, one generation, release, filters), all 10 meetings got a usable title. One title took 3-4 s on the GPU including the model load (15 s the first time, with compilation), and 26-58 s on the CPU including the load. The CPU misses the 30 s target; the title runs in the background and steps aside for user work, so this only delays the name.
 - Example titles by Qwen3-4B: "Plan wdrożenia systemu magazynowego", "Przełożenie czwartkowego spotkania", "Przenoszenie pipeline'ów na GitHub Actions", "Analytics Dashboard Roadmap Review", "Xero Invoice Sync Issue Resolution".
 - Prompt lessons: example titles in the prompt were copied into unrelated meetings ("Odbiór prac remontowych..."), and a list of meeting kinds made every title start with "Planowanie" or "Negocjacje".
 - Next step: check on real meetings locally (not in the repo).
