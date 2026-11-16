@@ -19,12 +19,23 @@ Models and licenses (CPU only via sherpa-onnx):
 
 No voice profiles are kept: embeddings live only in memory during one pass over
 a track and are never written anywhere.
+
+The pass runs in a separate short-lived process (`python -m ucho.diarize --worker <track>`)
+because sherpa-onnx holds the GIL for seconds at a time (measured up to 3.2 s with a
+progress callback, the whole run without one), which would freeze the window and delay
+a dictation; the worker runs at below-normal priority, gets only the path of the track,
+prints only the turns (times and speaker numbers), and exits, so no voice data outlives
+the pass.
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
 import logging
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -48,7 +59,13 @@ WINDOW_SHIFT = 0.5
 MIN_DURATION_ON = 0.3
 MIN_DURATION_OFF = 0.5
 STEP_WAIT_S = 0.1
+WORKER_POLL_S = 0.2
 MIN_AUDIO_S = 2.0
+# No console window; below-normal priority keeps the UI and dictation responsive.
+_CREATION_FLAGS = (
+    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+)
 
 
 def available() -> bool:
@@ -122,7 +139,13 @@ class Diarizer:
     ):
         self.threshold = threshold
         self.threads = threads or parakeet.default_threads()
+        self.in_process = factory is not None
         self._factory = factory or _sherpa_diarization
+
+    def diarize_file(self, file: Path, cancel: threading.Event | None = None) -> list[Turn]:
+        if self.in_process:
+            return self.diarize(transcribe.load_audio(Path(file)), cancel)
+        return run_worker(Path(file), self.threshold, self.threads, cancel)
 
     def diarize(self, audio: np.ndarray, cancel: threading.Event | None = None) -> list[Turn]:
         audio = np.asarray(audio, dtype=np.float32)
@@ -215,6 +238,87 @@ def assign_speakers(segments: list[Segment], turns: list[Turn], track_speaker: s
     ]
 
 
+def worker_python() -> str:
+    """Python interpreter with standard streams (`python.exe` when the app runs under `pythonw.exe`)."""
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe":
+        console = exe.with_name("python.exe")
+        if console.is_file():
+            return str(console)
+    return sys.executable
+
+
+def run_worker(
+    file: Path,
+    threshold: float,
+    threads: int,
+    cancel: threading.Event | None = None,
+    popen: Callable = subprocess.Popen,
+) -> list[Turn]:
+    """Runs speaker detection on `file` in a short-lived worker process and returns its turns."""
+    started = time.monotonic()
+    command = [
+        worker_python(),
+        "-m",
+        "ucho.diarize",
+        "--worker",
+        "--threshold",
+        repr(float(threshold)),
+        "--threads",
+        str(int(threads)),
+        str(file),
+    ]
+    # No console window; below-normal priority keeps the UI and dictation responsive.
+    # The environment is inherited (HF_HOME is set by ucho.config).
+    proc = popen(
+        command,
+        cwd=str(config.PROJECT_DIR),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=_CREATION_FLAGS,
+    )
+    while True:
+        try:
+            out_bytes, err_bytes = proc.communicate(timeout=WORKER_POLL_S)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel is not None and cancel.is_set():
+                proc.kill()
+                proc.communicate()
+                return []
+
+    stdout = (out_bytes or b"").decode("utf-8", errors="replace")
+    stderr = (err_bytes or b"").decode("utf-8", errors="replace")
+    if proc.returncode != 0:
+        err_lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+        detail = (err_lines[-1] if err_lines else "")[:200]
+        raise RuntimeError(f"Speaker detection worker failed (exit {proc.returncode}): {detail}")
+
+    out_lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if not out_lines:
+        raise RuntimeError("Speaker detection worker returned no result")
+    try:
+        payload = json.loads(out_lines[-1])
+        if not isinstance(payload, dict) or not isinstance(payload.get("turns"), list):
+            raise ValueError("missing turns list")
+        turns: list[Turn] = []
+        for item in payload["turns"]:
+            start, end, speaker = item
+            start_f = float(start)
+            end_f = float(end)
+            if end_f > start_f:
+                turns.append(Turn(start_f, end_f, int(speaker)))
+    except (ValueError, TypeError, KeyError) as error:
+        raise RuntimeError("Speaker detection worker returned no result") from error
+
+    turns.sort(key=lambda t: (t.start, t.end))
+    if cancel is not None and cancel.is_set():
+        return []
+    log.info("Speaker detection worker: %d turns in %.1f s", len(turns), time.monotonic() - started)
+    return turns
+
+
 def iter_diarize_track(
     file: Path,
     segments: list[Segment],
@@ -229,19 +333,13 @@ def iter_diarize_track(
     if cancel is not None and cancel.is_set():
         return copied
 
-    try:
-        audio = transcribe.load_audio(Path(file))
-    except Exception as error:
-        log.warning("Speaker detection failed on a %s track: %s", track_speaker, type(error).__name__)
-        return copied
-
     turns: list[Turn] = []
     failure: BaseException | None = None
 
     def run() -> None:
         nonlocal turns, failure
         try:
-            turns = diarizer.diarize(audio, cancel=cancel)
+            turns = diarizer.diarize_file(Path(file), cancel=cancel)
         except BaseException as error:  # noqa: BLE001 - logged on the engine thread
             failure = error
 
@@ -308,3 +406,35 @@ def _sherpa_diarization(threshold: float, threads: int):
     if not sd_config.validate():
         raise RuntimeError("Speaker detection model files are not valid")
     return so.OfflineSpeakerDiarization(sd_config)
+
+
+def worker_main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the short-lived speaker detection worker process."""
+    parser = argparse.ArgumentParser(prog="python -m ucho.diarize", add_help=False)
+    parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--threshold", type=float, default=CLUSTER_THRESHOLD)
+    parser.add_argument("--threads", type=int, default=parakeet.default_threads())
+    parser.add_argument("file", nargs="?")
+    try:
+        args, unknown = parser.parse_known_args(argv)
+    except SystemExit:
+        sys.stderr.write("Usage: python -m ucho.diarize --worker [--threshold FLOAT] [--threads INT] <file>\n")
+        return 2
+    if not args.worker or not args.file or unknown:
+        sys.stderr.write("Usage: python -m ucho.diarize --worker [--threshold FLOAT] [--threads INT] <file>\n")
+        return 2
+
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    try:
+        turns = Diarizer(args.threshold, args.threads).diarize(transcribe.load_audio(Path(args.file)))
+    except Exception as error:  # noqa: BLE001 - worker reports any error to stderr and exits 1
+        sys.stderr.write(f"{type(error).__name__}: {error}\n")
+        return 1
+
+    sys.stdout.write(json.dumps({"turns": [[t.start, t.end, t.speaker] for t in turns]}) + "\n")
+    sys.stdout.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(worker_main())
