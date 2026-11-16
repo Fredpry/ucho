@@ -16,7 +16,10 @@ every chunk (~12 s of audio in "auto" mode, about 1 s of work on an Arc GPU).
 After each step the worker picks the highest-priority job again, so a
 dictation submitted in the middle of an hour-long transcription waits for at
 most one chunk. With a forced language the chunks are up to 5 minutes long
-(see transcribe.CHUNK_S), so the wait can be longer there.
+(see transcribe.CHUNK_S), so the wait can be longer there. While a dictation
+is being spoken (`pause_for_dictation`), the engine starts no other job and no
+new transcription step, so a dictation waits at most for the step that was
+already running when the recording started.
 
 Models ("pipelines") are cached by (model, device). When dictation uses the
 transcription model ("shared", the low-memory option) both jobs use the same
@@ -42,6 +45,10 @@ BACKGROUND = 2
 
 # Without preloading, the dictation model is released after this idle time.
 IDLE_RELEASE_S = 120.0
+# Safety limit, longer than the default dictation limit (dictation_max_s = 300 s);
+# a pause that is never ended (a crashed controller) cannot stop the meeting
+# transcription for longer.
+DICTATION_PAUSE_MAX_S = 600.0
 
 Key = tuple[str, str]  # (model repo id, device)
 
@@ -100,6 +107,8 @@ class Engine:
         self._cv = threading.Condition()
         self._thread: threading.Thread | None = None
         self._stopping = False
+        self._paused_until = 0.0
+        self._paused_at: float | None = None
         self.current: Job | None = None
 
     # --- life cycle -----------------------------------------------------------
@@ -128,6 +137,55 @@ class Engine:
         with self._cv:
             return len(self._heap) + (1 if self.current is not None else 0)
 
+    def pause_for_dictation(self, max_s: float = DICTATION_PAUSE_MAX_S) -> None:
+        """Stops starting new non-dictation jobs and transcription steps until dictation ends."""
+        with self._cv:
+            now = time.monotonic()
+            was_paused = now < self._paused_until
+            self._paused_until = now + max_s
+            if not was_paused:
+                self._paused_at = now
+                waiting = sum(1 for _, _, job in self._heap if job.priority != DICTATION)
+                if self.current is not None and self.current.priority != DICTATION:
+                    waiting += 1
+                log.info("Engine paused for a dictation (%d job(s) waiting)", waiting)
+            self._cv.notify_all()
+
+    def resume_after_dictation(self) -> None:
+        """Ends a dictation pause; safe and idempotent when not paused."""
+        with self._cv:
+            now = time.monotonic()
+            was_paused = self._paused_at is not None and now < self._paused_until
+            paused_at = self._paused_at
+            self._paused_until = 0.0
+            self._paused_at = None
+            if was_paused and paused_at is not None:
+                log.info("Engine resumed after a dictation pause of %.1f s", now - paused_at)
+            self._cv.notify_all()
+
+    @property
+    def paused(self) -> bool:
+        with self._cv:
+            return time.monotonic() < self._paused_until
+
+    @property
+    def dictation_active(self) -> bool:
+        with self._cv:
+            if time.monotonic() < self._paused_until:
+                return True
+            if self.current is not None and self.current.priority == DICTATION:
+                return True
+            return any(job.priority == DICTATION for _, _, job in self._heap)
+
+    def waiting_behind(self) -> str | None:
+        """Name of the running non-dictation job while a dictation job waits in the queue."""
+        with self._cv:
+            if self.current is None or self.current.priority == DICTATION:
+                return None
+            if any(job.priority == DICTATION for _, _, job in self._heap):
+                return self.current.name
+            return None
+
     # --- jobs -----------------------------------------------------------------
 
     def submit(self, work: Callable[[Job], Any], priority: int = NORMAL, name: str = "",
@@ -144,11 +202,25 @@ class Engine:
             heapq.heappush(self._heap, (job.priority, seq, job))
             self._cv.notify_all()
 
+    def _is_paused_locked(self, now: float) -> bool:
+        if now < self._paused_until:
+            return True
+        if self._paused_at is not None:
+            log.warning("Dictation pause expired after %.0f s", now - self._paused_at)
+            self._paused_at = None
+            self._paused_until = 0.0
+        return False
+
     def _loop(self) -> None:
         while True:
             with self._cv:
-                while not self._heap and not self._stopping:
-                    self._cv.wait(timeout=10.0)
+                while not self._stopping:
+                    now = time.monotonic()
+                    paused = self._is_paused_locked(now)
+                    if self._heap and (not paused or self._heap[0][0] == DICTATION):
+                        break
+                    timeout = min(10.0, max(0.0, self._paused_until - now)) if paused else 10.0
+                    self._cv.wait(timeout=timeout)
                     self._release_idle()
                 if self._stopping and not self._heap:
                     break
@@ -157,7 +229,8 @@ class Engine:
             try:
                 more = self._step(job)
             finally:
-                self.current = None
+                with self._cv:
+                    self.current = None
             if more:
                 # Same sequence number: the job keeps its place among equals,
                 # but anything more urgent submitted meanwhile goes first.

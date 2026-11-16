@@ -969,6 +969,32 @@ class DictationController:
             self._downloaded[model] = cached
         return cached[0]
 
+    def _engine_call(self, name: str) -> None:
+        fn = getattr(self.app.engine, name, None)
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception:
+            log.exception("Engine %s failed", name)
+
+    def _waiting_text(self) -> str | None:
+        fn = getattr(self.app.engine, "waiting_behind", None)
+        if fn is None:
+            return None
+        try:
+            name = fn()
+        except Exception:
+            log.debug("waiting_behind failed", exc_info=True)
+            return None
+        if name is None:
+            return None
+        if name in ("transcribe", "live-chunk"):
+            return t("Waiting for the transcription…")
+        if name == "summary":
+            return t("Waiting for the summary…")
+        return t("Waiting for the model…")
+
     def status(self) -> tuple[str, str, str]:
         """(headline, pill style, hint) for the UI."""
         hotkey = self.app.dictation_hotkey_label()
@@ -976,10 +1002,11 @@ class DictationController:
         error = self.app.hotkey_errors.get("dictate")
         if self.recording:
             elapsed = time.monotonic() - self.recording_start
+            waiting = self._waiting_text()
             return (t("Recording  {time}", time=f"{int(elapsed) // 60}:{int(elapsed) % 60:02d}"),
-                    "recording", t("{shortcut} finishes, Esc cancels", shortcut=hotkey))
+                    "recording", waiting or t("{shortcut} finishes, Esc cancels", shortcut=hotkey))
         if self.queued:
-            return t("Recognizing…"), "working", hint
+            return self._waiting_text() or t("Recognizing…"), "working", hint
         if self._message and time.monotonic() < self._message_until:
             return self._message[0], self._message[1], hint
         if error:
@@ -1049,6 +1076,7 @@ class DictationController:
             return False
         log.info("Dictation from: %s", self.microphone.name)
         self.recording = True
+        self._engine_call("pause_for_dictation")
         self.recording_start = time.monotonic()
         self.live_text = ""
         self._live = self._shown = None
@@ -1151,22 +1179,25 @@ class DictationController:
             self.app.post(lambda: self._failed(str(error)))
 
         session, self._live = self._live, None
-        if session is not None:
-            try:
-                session.feed(recording[taken:])
-                pieces = session.submitted
-                session.finish(recording, on_done=done, on_error=failed)
-                log.info("Live dictation finished (%d piece(s) submitted)", pieces)
-            except Exception:
-                log.exception("Live dictation finish failed - falling back to full recognition")
-                session.cancel()
+        try:
+            if session is not None:
+                try:
+                    session.feed(recording[taken:])
+                    pieces = session.submitted
+                    session.finish(recording, on_done=done, on_error=failed)
+                    log.info("Live dictation finished (%d piece(s) submitted)", pieces)
+                except Exception:
+                    log.exception("Live dictation finish failed - falling back to full recognition")
+                    session.cancel()
+                    self.app.engine.dictate(recording, model, device, language,
+                                            self.settings["dictation_dictionary"],
+                                            on_done=done, on_error=failed)
+            else:
                 self.app.engine.dictate(recording, model, device, language,
                                         self.settings["dictation_dictionary"],
                                         on_done=done, on_error=failed)
-        else:
-            self.app.engine.dictate(recording, model, device, language,
-                                    self.settings["dictation_dictionary"],
-                                    on_done=done, on_error=failed)
+        finally:
+            self._engine_call("resume_after_dictation")
         self._emit("state")
 
     def _recognized(self, text: str, seconds: float, where: str | None) -> None:
@@ -1209,6 +1240,7 @@ class DictationController:
         self.live_text = ""
         self.microphone.stop()
         self.recording = self.finishing = False
+        self._engine_call("resume_after_dictation")
         self.app.hotkeys.escape(False)
         if self.settings["dictation_sounds"]:
             beep(330, 120)
@@ -1245,4 +1277,5 @@ class DictationController:
                 self._live = None
             self.microphone.stop()
             self.recording = False
+            self._engine_call("resume_after_dictation")
         self.microphone.close()

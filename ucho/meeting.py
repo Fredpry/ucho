@@ -104,6 +104,17 @@ class MeetingController:
         return self.transcribing or self.summarizing
 
     @property
+    def shown_status(self) -> str:
+        if self.transcribing:
+            try:
+                paused = bool(getattr(self.app.engine, "dictation_active", False))
+            except Exception:
+                paused = False
+            if paused:
+                return t("Paused for a dictation")
+        return self.status_text
+
+    @property
     def queued(self) -> int:
         """Sessions waiting for their transcription."""
         return len(self._queue)

@@ -793,7 +793,7 @@ class TranscriptScreen(Screen):
         m = self.meeting
         if self.live and m.busy:
             self.progress.set(m.progress if m.transcribing else 1.0)
-            label = f"{int(m.progress * 100)}%  ·  {m.status_text}" if m.transcribing else m.status_text
+            label = f"{int(m.progress * 100)}%  ·  {m.shown_status}" if m.transcribing else m.status_text
             if self.progress_label.cget("text") != label:
                 self.progress_label.configure(text=label)
 

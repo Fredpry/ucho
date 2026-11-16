@@ -45,6 +45,21 @@ $env:HF_HOME = "C:\path\to\models"   # where the models are downloaded
 
 Run each scenario in its own process (`--only`), otherwise the memory numbers of the second include the first.
 
+### Dictation first while speaking (#13)
+
+Where a dictation's time goes during a meeting transcription, from the engine's own job times: a 28.1 s live dictation (6 sentences by *Microsoft Paulina*, separate FP16 model, both models loaded) during a 10-minute synthetic meeting (INT8), Arc 140V, 16.11.2026. Running a piece between transcription chunks costs nothing extra: a piece took 0.8-1.0 s during the transcription and 0.8-0.9 s alone, so there is no model-switch penalty. All the delay is waiting for a running chunk. In Auto mode a step takes 0.7 s (median, at most 1.8 s), so pieces waited at most 1.1 s and the text came 1.0-1.5 s after the stop (alone 0.95 s). With Polish forced the chunks took 29.5-31.3 s, pieces waited up to 24.4 s and the text came 4.7 and 6.5 s after the stop. Reloading the meeting model from the OpenVINO cache took under 2 s. The 15.5 s from the issue did not appear with both models loaded on an otherwise idle GPU.
+
+Since #13 the engine starts no new transcription step while the dictation hotkey records (`Engine.pause_for_dictation`). The same day other benchmarks loaded the CPU and GPU, so wall-clock runs of `--dictation-priority` varied 3x between rounds (the transcripts were identical in every round). The ordering was therefore replayed with the real `Engine` and sleeps of the measured lengths (30 trials per row, random start of the dictation relative to the chunks; pieces every 5.5 s of speech, 0.9 s each, final 1.0 s). Time from the stop to the text:
+
+| Meeting language | Dictation | Before: median / max | With the pause: median / max | Meeting time lost per dictation |
+|---|---|---|---|---|
+| Polish (30 s chunks) | 10 s | 15.2 s / 29.1 s | 4.8 s / 21.9 s | 1.6 s |
+| Polish (30 s chunks) | 28 s | 13.4 s / 31.3 s | 1.4 s / 7.0 s | 6.9 s |
+| Auto (0.5-1.8 s steps) | 10 s | 1.7 s / 2.5 s | 1.1 s / 1.1 s | 8.5 s |
+| Auto (0.5-1.8 s steps) | 28 s | 2.0 s / 3.0 s | 1.4 s / 1.7 s | 23.2 s |
+
+With the pause no transcription step starts while you speak, so a dictation waits only for the chunk that was already running when it started, and that wait overlaps with the speaking. A short dictation started right after a 5-minute chunk began still waits for most of it (#12 stays open for forced languages). The price is meeting time: the GPU idles while you speak once the running chunk is done. Repeat on a quiet machine with `tools\benchmark_engine.py --dictation-priority --meeting-language pl --rounds 3` (the arms alternate, so a changing load hits both).
+
 ## INT8 vs FP16 for dictation (v0.2)
 
 Plan v0.2, W3: "measure the quality difference on 20 dictations before deciding". 20 short Polish dictation sentences (made up: e-mails, tasks, terminal requests) spoken by *Microsoft Paulina*, `tools/benchmark_engine.py --make-wer-set`, then `tools/benchmark_wer.py --language pl --device GPU`:

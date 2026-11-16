@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- A dictation spoken while a meeting is being transcribed goes first: no new transcription chunk starts while you speak, the meeting screen says the transcription is paused for a dictation, and the dictation window says when it waits for the transcription (#13).
+
 ## v0.3.0 (2026-11-16)
 
 ### Added

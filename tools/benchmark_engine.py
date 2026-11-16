@@ -12,6 +12,7 @@ and fed straight into the engine.
     python tools/benchmark_engine.py --device CPU --meeting-min 4
     python tools/benchmark_engine.py --live [--live-during-meeting] [--json out.json]
     python tools/benchmark_engine.py --live-meeting --meeting-min 8 --meeting-language pl
+    python tools/benchmark_engine.py --dictation-priority [--meeting-language pl] [--json out.json]
     python tools/benchmark_engine.py --make-wer-set C:\\bench\\tts-pl   # 20 sentences + .txt
     python tools/benchmark_wer.py C:\\bench\\tts-pl --language pl --model OpenVINO/whisper-large-v3-fp16-ov
 
@@ -584,6 +585,123 @@ def live_meeting_benchmark(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_live_priority(eng, model: str, device: str, audio, *, pause: bool,
+                       block_s: float = 0.25) -> tuple[float, float, float, str]:
+    from ucho import live
+
+    session = live.LiveDictation(eng, model, device, "auto")
+    block_n = int(block_s * live.SAMPLE_RATE)
+    if pause:
+        eng.pause_for_dictation()
+    try:
+        started = time.monotonic()
+        for k, offset in enumerate(range(0, audio.size, block_n)):
+            due = started + k * block_s
+            now = time.monotonic()
+            if due > now:
+                time.sleep(due - now)
+            session.feed(audio[offset: offset + block_n])
+        t_finish = time.monotonic()
+        final_job = session.finish(audio)
+    finally:
+        if pause:
+            eng.resume_after_dictation()
+    text, _compute_s, _used = final_job.wait(600)
+    stop_to_text_s = time.monotonic() - t_finish
+    final_wait_s = (final_job.started - final_job.submitted) if final_job.started is not None else 0.0
+    waits = [(j.started - j.submitted) for j in session._jobs if j.started is not None]
+    max_wait_s = max(waits) if waits else 0.0
+    return stop_to_text_s, final_wait_s, max_wait_s, text
+
+
+def dictation_priority_benchmark(args: argparse.Namespace) -> int:
+    """Dictation latency during a meeting transcription, without and with pause_for_dictation."""
+    import shutil
+
+    from ucho import engine as engine_mod
+
+    temp = Path(tempfile.mkdtemp(prefix="ucho-priority-bench-"))
+    eng = engine_mod.Engine()
+    try:
+        meeting_file, meeting_min = _build_meeting(temp, args.meeting_min)
+        wav = temp / "dictation.wav"
+        speak(SENTENCES[:6], wav)
+        dict_audio = _trim_end(load(wav))
+        dict_s = dict_audio.size / 16_000
+        print(f"dictation: {dict_s:.1f} s ({len(SENTENCES[:6])} sentences)")
+
+        eng.start()
+        eng.configure((args.live_model, args.device), preload=True).wait(900)
+        eng.submit(lambda _j: eng.pipeline(INT8, args.device).load()).wait(900)
+
+        t0 = time.monotonic()
+        ref_job = eng.transcribe({"system": meeting_file}, INT8, args.device, args.meeting_language)
+        ref_segments, ref_device = ref_job.wait(3600)
+        ref_s = time.monotonic() - t0
+        ref_key = [(s.start, s.end, s.speaker, s.text) for s in ref_segments]
+        print(f"reference ({args.meeting_language}, {ref_device}): {ref_s:.1f} s, {len(ref_segments)} segments")
+
+        arms: dict[str, dict] = {}
+        lists: dict[str, tuple[list, list, list, list]] = {"off": ([], [], [], []), "on": ([], [], [], [])}
+        # Arms alternate (off, on, off, on...), so a load that changes during the run hits both.
+        for arm in ("off", "on") * args.rounds:
+            meeting_job = eng.transcribe({"system": meeting_file}, INT8, args.device, args.meeting_language)
+            stop_to_text, final_waits, max_waits, meeting_runs = lists[arm]
+            time.sleep(args.spacing)
+            while not meeting_job.done.is_set():
+                lat, f_wait, m_wait, _text = _run_live_priority(
+                    eng, args.live_model, args.device, dict_audio, pause=(arm == "on"))
+                stop_to_text.append(lat)
+                final_waits.append(f_wait)
+                max_waits.append(m_wait)
+                time.sleep(args.spacing)
+            segments, _used = meeting_job.wait(3600)
+            meeting_runs.append((meeting_job.finished or time.monotonic()) - meeting_job.submitted)
+            meeting_s = statistics.mean(meeting_runs)
+            identical = ([(s.start, s.end, s.speaker, s.text) for s in segments] == ref_key
+                         and arms.get(arm, {}).get("identical", True))
+            arms[arm] = {
+                "meeting_runs_s": [round(x, 2) for x in meeting_runs],
+                "dictations": len(stop_to_text),
+                "stop_to_text_s": [round(x, 3) for x in stop_to_text],
+                "stop_to_text_median_s": round(statistics.median(stop_to_text), 3) if stop_to_text else None,
+                "stop_to_text_max_s": round(max(stop_to_text), 3) if stop_to_text else None,
+                "final_wait_s": [round(x, 3) for x in final_waits],
+                "max_wait_s": round(max(max_waits), 3) if max_waits else None,
+                "max_waits_s": [round(x, 3) for x in max_waits],
+                "meeting_s": round(meeting_s, 2),
+                "identical": identical,
+                "segments": len(segments),
+            }
+
+        print(f"\n== Dictation priority ({args.meeting_language}, {args.device})")
+        print(f"{'arm':<4}  {'n':>3}  {'med(s)':>7}  {'max(s)':>7}  {'wait_max(s)':>11}  {'meeting(s)':>10}  {'identical':>9}")
+        for arm in ("off", "on"):
+            row = arms[arm]
+            med = f"{row['stop_to_text_median_s']:.2f}" if row["stop_to_text_median_s"] is not None else "n/a"
+            mx = f"{row['stop_to_text_max_s']:.2f}" if row["stop_to_text_max_s"] is not None else "n/a"
+            wm = f"{row['max_wait_s']:.2f}" if row["max_wait_s"] is not None else "n/a"
+            print(f"{arm:<4}  {row['dictations']:>3}  {med:>7}  {mx:>7}  {wm:>11}  {row['meeting_s']:>10.1f}  {str(row['identical']):>9}")
+
+        report = {
+            "meeting_min": round(meeting_min, 2),
+            "meeting_language": args.meeting_language,
+            "transcription_model": INT8,
+            "dictation_model": args.live_model,
+            "device": ref_device,
+            "dictation_s": round(dict_s, 2),
+            "reference_s": round(ref_s, 2),
+            "reference_segments": len(ref_segments),
+            "arms": arms,
+        }
+        if args.json:
+            args.json.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    finally:
+        eng.stop()
+        shutil.rmtree(temp, ignore_errors=True)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="GPU")
@@ -613,6 +731,10 @@ def main(argv: list[str]) -> int:
                         help="--live-meeting: transcriptions after the stop only, for comparison")
     parser.add_argument("--louder-from", type=float, default=None,
                         help="--live-meeting: minute from which the system track is 1.6x louder")
+    parser.add_argument("--dictation-priority", action="store_true",
+                        help="dictation latency during a meeting transcription, without and with the engine pause while speaking")
+    parser.add_argument("--rounds", type=int, default=1,
+                        help="--dictation-priority: transcriptions per arm (the arms alternate)")
     args = parser.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -621,6 +743,8 @@ def main(argv: list[str]) -> int:
         return live_benchmark(args)
     if args.live_meeting:
         return live_meeting_benchmark(args)
+    if args.dictation_priority:
+        return dictation_priority_benchmark(args)
 
     if args.make_wer_set:
         args.make_wer_set.mkdir(parents=True, exist_ok=True)
