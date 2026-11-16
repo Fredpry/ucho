@@ -6,8 +6,8 @@ Same runtime as Whisper - OpenVINO GenAI on the same integrated GPU - so there
 is no Ollama, HTTP server or background process here. The model loads only
 after transcription has finished and is released right after the summary is
 generated (`LLMEngine.release`), so ~2 GB of memory is not held for the whole
-life of the app. No network: the model is read from `models\\hub` through
-`transcribe.model_path(..., download=False)`.
+life of the app. No network: the model is read from `models\\hub` or from the
+user's own model folder/file (`llm.location`), never downloaded here.
 
 The model returns JSON constrained by a schema (`StructuredOutputConfig`), not
 free text to parse - so the folder name and the summary do not depend on
@@ -30,7 +30,7 @@ import time
 import unicodedata
 from typing import Callable
 
-from . import config, session, transcribe
+from . import config, llm, session
 from .i18n import t
 from .merge import (SPEAKER_ME, SPEAKER_MEETING, Segment, as_text, clean_speaker_name,
                     clean_speaker_names, format_hms, slug, split_speaker)
@@ -203,7 +203,7 @@ class LLMEngine:
 
         import openvino_genai as ov_genai
 
-        folder = str(transcribe.model_path(self.repo_id, download=False))
+        folder = str(llm.location(self.repo_id))
         cache = str(config.OV_CACHE_DIR)
         config.OV_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -220,7 +220,7 @@ class LLMEngine:
                     self.device = device
                     log.info(
                         "LLM ready on %s in %.1fs (%s, cache=%s)",
-                        device, time.monotonic() - start, self.repo_id, bool(kwargs),
+                        device, time.monotonic() - start, llm.label(self.repo_id), bool(kwargs),
                     )
                     return
                 except Exception as error:
@@ -716,7 +716,7 @@ def summarize(
         if not result["topic"] and not result["tldr"]:
             return {}
 
-        result["summary_model"] = model
+        result["summary_model"] = llm.label(model)
         result["summary_device"] = engine.device
         result["summary_time_s"] = round(time.monotonic() - start, 1)
         log.info("Summary ready in %.1fs: %s",

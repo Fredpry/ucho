@@ -246,3 +246,12 @@ def test_generate_title_releases_on_error_and_handles_cancel_unusable_empty():
 def test_llm_engine_system_parameter():
     assert summary.LLMEngine("x", "CPU").system == summary.SYSTEM
     assert summary.LLMEngine("x", "CPU", system="Custom system").system == "Custom system"
+
+
+def test_generate_title_stores_short_label_for_custom_path():
+    created: list[FakeEngine] = []
+    factory = _make_factory(created, result={"title": "Budżet i plan prac"})
+    custom_path = "C:\\Users\\SecretUser\\models\\custom-q4_0.gguf"
+    result = titles.generate_title(PL_SEGMENTS, custom_path, device="CPU", engine_factory=factory)
+    assert result["title_model"] == "custom-q4_0.gguf"
+    assert "SecretUser" not in result["title_model"]

@@ -28,7 +28,7 @@ Events (name, data):
     live           segments recognized so far in the recording (live transcription)
 
 Automatic titles (ucho/titles.py, setting "auto_title"): sessions the user did
-not name and that have no summary get a short title from the local language
+not name and that have no summary get a short title from the chosen analysis
 model after the transcription queue is empty. Title jobs run through
 `engine.exclusive` and yield immediately (and retry later) when a recording,
 dictation, transcription or summary starts, so naming never delays user work.
@@ -54,7 +54,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
 
-from . import config, session, titles, transcribe
+from . import config, llm, session, titles, transcribe
 from .i18n import t
 from .merge import (META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
                     TRANSCRIPTION_ERRORS, Segment, clean_speaker_name, save_results, slug,
@@ -563,7 +563,7 @@ class MeetingController:
 
     def _summary_expected(self, segments: list[Segment]) -> bool:
         return bool(segments and self.settings["summary_enabled"]
-                    and transcribe.model_downloaded(self.settings["summary_model"]))
+                    and llm.available(llm.chosen(self.settings)))
 
     def summarize_again(self, folder: Path) -> bool:
         """Summary on its own, without running the audio through Whisper again."""
@@ -587,10 +587,10 @@ class MeetingController:
         """
         from . import summary as summary_mod
 
-        model = self.settings["summary_model"]
-        if not transcribe.model_downloaded(model):
+        model = llm.chosen(self.settings)
+        if not llm.available(model):
             self.summarizing = False
-            self._emit("summary_error", t("The summary model is not downloaded — see Settings."))
+            self._emit("summary_error", t("No language model is available — choose one in Settings."))
             self._emit("state")
             self._finished()
             return
@@ -654,7 +654,7 @@ class MeetingController:
         value = self.settings.get("auto_title")
         if value is False:
             return False
-        return transcribe.model_downloaded(config.TITLE_MODEL)
+        return llm.available(llm.chosen(self.settings))
 
     def _title_should_yield(self) -> bool:
         dictating = bool(getattr(getattr(self.app, "dictation", None), "recording", False))
@@ -683,6 +683,7 @@ class MeetingController:
         if chosen is None:
             return
         folder, meta, segments = chosen
+        model = llm.chosen(self.settings)
         self._titling = folder
 
         def work(job):
@@ -690,7 +691,7 @@ class MeetingController:
             if cancel.is_set():
                 return (True, {})
             result = titles.generate_title(
-                segments, config.TITLE_MODEL, self.settings["device"],
+                segments, model, self.settings["device"],
                 cancel=cancel, language=meta.get("language"))
             return (cancel.is_set(), result)
 

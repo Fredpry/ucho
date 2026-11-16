@@ -101,10 +101,11 @@ MODELS = {
 
 DEFAULT_MODEL = "OpenVINO/whisper-large-v3-int8-ov"
 
-# Optional language models for the summary and folder naming. Same runtime as
-# Whisper (OpenVINO GenAI), same models folder: no Ollama and no background
-# server. The model loads only after transcription and is released right away.
-# Summaries are off by default: transcription is the core of Ucho.
+# Optional built-in language models for meeting analysis (summary, folder
+# naming and automatic meeting titles; ucho/llm.py). Same runtime as Whisper
+# (OpenVINO GenAI), same models folder: no Ollama and no background server. The
+# model loads only after transcription and is released right away. Users can
+# also point `analysis_model` to their own OpenVINO IR folder or .gguf file.
 LLM_MODELS = {
     "OpenVINO/Qwen3-8B-int4-ov": {
         "description": "Qwen3 8B INT4 — best summaries, slower",
@@ -122,13 +123,12 @@ LLM_MODELS = {
 
 DEFAULT_LLM_MODEL = "OpenVINO/Qwen3-8B-int4-ov"
 
-# Model for automatic meeting titles (ucho/titles.py). Measured on 10 synthetic
-# Polish and English meetings (docs/benchmarks.md, "Meeting titles"): Qwen3-1.7B
-# and Qwen2.5-1.5B gave a wrong or ungrammatical Polish title in 3-4 of 10,
-# Qwen3-0.6B in most; Qwen3-4B in none. 4B takes about 1 s on the Arc iGPU and
-# 7-27 s on the CPU per title. It is the same pinned model as the 4B summary
-# option, so one download serves both. Offered in Settings, never downloaded by
-# the installer.
+# Fallback analysis model derived by `llm.chosen` for v0.4 users who had
+# downloaded it for automatic meeting titles (ucho/titles.py). Measured on 10
+# synthetic Polish and English meetings (docs/benchmarks.md, "Meeting titles"):
+# Qwen3-1.7B and Qwen2.5-1.5B gave a wrong or ungrammatical Polish title in 3-4
+# of 10, Qwen3-0.6B in most; Qwen3-4B in none. 4B takes about 1 s on the Arc
+# iGPU and 7-27 s on the CPU per title.
 TITLE_MODEL = "OpenVINO/Qwen3-4B-int4-ov"
 TITLE_MODEL_SIZE = LLM_MODELS[TITLE_MODEL]["size"]
 
@@ -270,9 +270,15 @@ DEFAULTS = {
     "speaker_detection": False,
     "summary_enabled": False,
     "summary_model": DEFAULT_LLM_MODEL,
+    # The one local language model for summaries and automatic titles: a repo id
+    # from LLM_MODELS, an absolute path to the user's own model (OpenVINO IR
+    # folder or .gguf file), or "" for none. None = not chosen yet (v0.4
+    # settings), derived by `llm.chosen` from `summary_model` and the downloaded
+    # models.
+    "analysis_model": None,
     "rename_folder": False,
-    # Name meetings the user did not name with a short title from the title model
-    # (ucho/titles.py); None = automatic: on when the title model is downloaded;
+    # Name meetings the user did not name with a short title from the analysis
+    # model (ucho/titles.py); None = automatic: on when that model is available;
     # True/False = the user's choice.
     "auto_title": None,
     # Delete the audio of transcribed recordings after this many days (0 = never).

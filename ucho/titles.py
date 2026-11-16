@@ -9,7 +9,7 @@ import re
 import time
 import unicodedata
 
-from . import summary
+from . import llm, summary
 from .merge import Segment, as_text
 
 log = logging.getLogger(__name__)
@@ -288,7 +288,7 @@ def generate_title(
     log.info("Title ready in %.1fs (%d words, lang=%s)", elapsed, len(title.split()), lang)
     return {
         "name": title,
-        "title_model": model,
+        "title_model": llm.label(model),
         "title_device": getattr(engine, "device", device),
         "title_time_s": round(elapsed, 1),
     }

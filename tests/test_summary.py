@@ -5,6 +5,14 @@
 The cases come from the description in the README: each of them was once a
 real bug. Test data is Polish because the filters work on Polish speech.
 """
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+from types import SimpleNamespace
+
+from ucho import config, llm, summary
+from ucho.merge import Segment
 from ucho.summary import (_load_json, _name_in_text, _normalize, _without_invented_dates,
                           _words, folder_name)
 
@@ -65,3 +73,36 @@ def test_folder_name_keeps_the_timestamp():
     assert new.startswith("2026-09-08_09-15_")
     assert "Anna" in new and "Marek" in new
     assert folder_name("bez-znacznika", {"topic": "X"}) is None
+
+
+def test_llm_engine_load_and_summarize_use_custom_location_and_short_label(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(config, "OV_CACHE_DIR", tmp_path / "ovcache")
+    custom_dir = tmp_path / "PrivateUser" / "MyCustomModel-ov"
+    custom_dir.mkdir(parents=True)
+    for name in llm.REQUIRED_FILES:
+        (custom_dir / name).write_bytes(b"")
+
+    loaded_args: list[tuple[str, str]] = []
+
+    class FakePipe:
+        def get_tokenizer(self):
+            return SimpleNamespace(apply_chat_template=lambda *_a, **_kw: "prompt")
+
+        def generate(self, *_a, **_kw):
+            return '{"temat": "Budżet Q4", "uczestnicy": [], "tldr": "Omówiono budżet.", "punkty": [], "ustalenia": []}'
+
+    def fake_pipeline(folder: str, device: str, **_kwargs):
+        loaded_args.append((folder, device))
+        return FakePipe()
+
+    fake_ov = SimpleNamespace(
+        LLMPipeline=fake_pipeline,
+        GenerationConfig=lambda: SimpleNamespace(max_new_tokens=0, do_sample=False),
+        StructuredOutputConfig=lambda json_schema: json_schema,
+    )
+    monkeypatch.setitem(sys.modules, "openvino_genai", fake_ov)
+
+    res = summary.summarize([Segment(0.0, 2.0, TRANSCRIPT, "me")], str(custom_dir), device="CPU")
+    assert loaded_args == [(str(llm.location(str(custom_dir))), "CPU")]
+    assert res["summary_model"] == "MyCustomModel-ov"
+    assert "PrivateUser" not in res["summary_model"]

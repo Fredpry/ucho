@@ -203,7 +203,8 @@ def test_title_skipped_when_summary_or_user_name_or_disabled_or_missing_model(en
     app.pump()
     assert [j.name for j in app.engine.jobs] == ["transcribe"]
 
-    # Title model not downloaded.
+    # Analysis model not downloaded.
+    env.downloaded["LLM"] = False
     env.downloaded[config.TITLE_MODEL] = False
     app, m, _events = env.make(auto_title=True)
     f4 = _session(tmp_path, "2026-11-16_10-15_Meeting")
@@ -405,3 +406,66 @@ def test_stop_writes_name_source_user_only_when_typed(env, tmp_path):
     meta_default = json.loads((default_folder / "meta.json").read_text(encoding="utf-8"))
     assert meta_default["name"] == "Meeting"
     assert "name_source" not in meta_default
+
+
+def _make_custom_ov(folder: Path) -> Path:
+    from ucho import llm
+
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in llm.REQUIRED_FILES:
+        (folder / name).write_bytes(b"")
+    return folder
+
+
+def test_titles_and_summaries_use_chosen_analysis_model_and_custom_folder(env, tmp_path, monkeypatch):
+    # Explicit analysis_model="LLM" and derived from summary_model="LLM" when analysis_model is None
+    for overrides in ({"analysis_model": "LLM"}, {"analysis_model": None, "summary_model": "LLM"}):
+        env.calls.clear()
+        app, m, _events = env.make(**overrides)
+        folder = _session(tmp_path, f"2026-11-16_10-00_{len(env.calls)}_{overrides['analysis_model']}")
+        _start(m, folder)
+        _finish_transcription(app.engine.jobs[-1])
+        app.pump()
+        _run_title_job(app.engine.jobs[-1])
+        assert env.calls[-1]["model"] == "LLM"
+
+    # titles_enabled is False when analysis_model is "" or unavailable
+    _app, m_none, _events = env.make(analysis_model="")
+    assert m_none.titles_enabled() is False
+    _app, m_missing, _events = env.make(analysis_model=str(tmp_path / "missing_model"))
+    assert m_missing.titles_enabled() is False
+
+    # Valid custom folder enables titles and is passed to generate_title
+    custom_dir = _make_custom_ov(tmp_path / "custom_ov")
+    env.calls.clear()
+    app, m_custom, _events = env.make(analysis_model=str(custom_dir))
+    assert m_custom.titles_enabled() is True
+    folder_c = _session(tmp_path, "2026-11-16_11-00_Meeting")
+    _start(m_custom, folder_c)
+    _finish_transcription(app.engine.jobs[-1])
+    app.pump()
+    _run_title_job(app.engine.jobs[-1])
+    assert env.calls[-1]["model"] == str(custom_dir)
+
+    # Summary with analysis_model="" emits summary_error and creates no engine job
+    app_no_llm, m_no_llm, events_no_llm = env.make(analysis_model="", summary_enabled=True)
+    m_no_llm.summarize(folder_c, [Segment(0.0, 1.0, "Tekst", "me")], {"name": "Meeting"})
+    app_no_llm.pump()
+    assert app_no_llm.engine.jobs == []
+    assert any(ev == "summary_error" for ev, _ in events_no_llm)
+
+    # Summary with valid custom folder runs summary job and passes custom path to summary.summarize
+    summary_calls: list[str] = []
+    monkeypatch.setattr(
+        "ucho.summary.summarize",
+        lambda segments, model, *_a, **_kw: summary_calls.append(model) or {"topic": "T", "tldr": "S"},
+    )
+    app_sum, m_sum, _events_sum = env.make(analysis_model=str(custom_dir), summary_enabled=True)
+    folder_s = _session(tmp_path, "2026-11-16_11-30_Meeting")
+    _start(m_sum, folder_s)
+    _finish_transcription(app_sum.engine.jobs[-1])
+    app_sum.pump()
+    assert [j.name for j in app_sum.engine.jobs] == ["transcribe", "summary"]
+    sum_job = app_sum.engine.jobs[-1]
+    sum_job.on_done(sum_job.fn(sum_job))
+    assert summary_calls == [str(custom_dir)]
