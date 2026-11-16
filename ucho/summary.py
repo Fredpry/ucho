@@ -175,10 +175,11 @@ class LLMEngine:
     (requested device, then CPU; with the compile cache, then without).
     """
 
-    def __init__(self, repo_id: str, device: str = "GPU"):
+    def __init__(self, repo_id: str, device: str = "GPU", system: str | None = None):
         self.repo_id = repo_id
         self.requested_device = device
         self.device = device
+        self.system = system or SYSTEM
         self._pipe = None
 
     def load(self) -> None:
@@ -231,7 +232,7 @@ class LLMEngine:
         enable_thinking=False.
         """
         history = [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": self.system},
             {"role": "user", "content": user},
         ]
         tokenizer = self._pipe.get_tokenizer()
@@ -244,7 +245,7 @@ class LLMEngine:
                 log.debug("apply_chat_template(%s) failed: %s", kwargs, error)
 
         prompt = (
-            f"<|im_start|>system\n{SYSTEM}<|im_end|>\n"
+            f"<|im_start|>system\n{self.system}<|im_end|>\n"
             f"<|im_start|>user\n{user}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
