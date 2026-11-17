@@ -381,5 +381,13 @@
   "Rename speaker": "Zmień nazwę mówcy",
   "Name for “{label}” in this recording. Leave it empty to go back to “{default}”.": "Nazwa dla „{label}” w tym nagraniu. Zostaw puste, aby wrócić do „{default}”.",
   "Speaker renamed": "Zmieniono nazwę mówcy",
-  "Could not rename the speaker.": "Nie udało się zmienić nazwy mówcy."
+  "Could not rename the speaker.": "Nie udało się zmienić nazwy mówcy.",
+  "Less than 8 GB RAM ({ram} GB): only the smallest language model fits.": "Mniej niż 8 GB RAM ({ram} GB): zmieści się tylko najmniejszy model językowy.",
+  "Graphics {gpu} with {gb} GB of its own memory: the largest language model fits.": "Karta {gpu} z własną pamięcią {gb} GB: zmieści się największy model językowy.",
+  "Graphics {gpu} and {ram} GB RAM: the largest language model runs fast enough.": "Karta {gpu} i {ram} GB RAM: największy model językowy działa wystarczająco szybko.",
+  "{ram} GB RAM: the 8B model (5 GB) would leave too little memory; the 4B model writes good Polish.": "{ram} GB RAM: model 8B (5 GB) zostawiłby za mało pamięci, a model 4B dobrze pisze po polsku.",
+  "No usable GPU: the 8B model would be slow on the CPU; the 4B model writes good Polish.": "Brak karty graficznej, z której Ucho może korzystać: model 8B byłby na procesorze wolny, a model 4B dobrze pisze po polsku.",
+  "Language model (optional, for meeting names and summaries)": "Model językowy (opcjonalny, do nazw i podsumowań spotkań)",
+  " (recommended)": " (zalecany)",
+  "Recommended for this computer: {model}. {reason}": "Zalecany dla tego komputera: {model}. {reason}"
 }

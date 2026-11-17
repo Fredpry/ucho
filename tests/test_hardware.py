@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sys
 
 import pytest
@@ -253,3 +254,77 @@ def test_synthetic_speech_passes_silence_threshold():
     assert audio.dtype == np.float32 and audio.size == 48_000
     assert np.abs(audio).max() <= 0.31
     assert np.array_equal(audio, hardware.synthetic_speech(3.0))
+
+
+# --- language model recommendation (#24) ---
+
+A770 = OvDevice("GPU.1", "Intel(R) Arc(TM) A770 Graphics", "discrete", 16.0, "12.55.8")
+A380 = OvDevice("GPU.1", "Intel(R) Arc(TM) A380 Graphics", "discrete", 6.0, "12.56.5")
+L, M, S = hardware.LLM_LARGE, hardware.LLM_MEDIUM, hardware.LLM_SMALL
+
+def test_llm_constants():
+    assert (L, M, S) == ("OpenVINO/Qwen3-8B-int4-ov", "OpenVINO/Qwen3-4B-int4-ov",
+                         "OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov")
+    assert all(m in config.LLM_MODELS for m in (L, M, S))
+
+
+@pytest.mark.parametrize("p,model", [
+    (make(31.6, 32, devices=(CPU, ARC_140V)), L),
+    (make(15.6, None, devices=(CPU, IRIS_XE)), L),
+    (make(15.7, 16, devices=(CPU, IRIS_XE)), L),
+    (make(11.8, 12, devices=(CPU, IRIS_XE)), M),
+    (make(7.8, 8, devices=(CPU, IRIS_XE)), M),
+    (make(7.8, 8, devices=(CPU, A770)), L),
+    (make(7.8, 8, devices=(CPU, A380)), M),
+    (make(31.8, 32), M),
+    (make(63.8, 64), M),
+    (make(15.7, 16, devices=(CPU, UHD_620)), M),
+    (make(15.7, 16, adapters=(GraphicsAdapter("NVIDIA GeForce RTX 4060"),)), M),
+    (make(5.8, 6, devices=(CPU, IRIS_XE)), S),
+    (make(3.8, None), S),
+    (make(7.0, 8), M),
+    (HardwareProfile(), S),
+])
+def test_llm_rules(p, model):
+    rec = hardware.recommend_llm(p)
+    assert rec.model == model
+    assert rec.reasons and all(isinstance(r, str) and r for r in rec.reasons)
+
+
+def test_llm_nvidia_and_amd_named():
+    p = make(15.7, 16, adapters=(GraphicsAdapter("NVIDIA GeForce RTX 4070"),
+                                 GraphicsAdapter("AMD Radeon RX 7600")))
+    text = " ".join(hardware.recommend_llm(p).reasons)
+    assert "NVIDIA GeForce RTX 4070" in text and "AMD Radeon RX 7600" in text
+
+
+def test_llm_intel_adapter_not_reported_as_unusable():
+    p = make(15.7, 16, devices=(CPU, IRIS_XE),
+             adapters=(GraphicsAdapter("Intel(R) Iris(R) Xe Graphics"),))
+    reasons = hardware.recommend_llm(p).reasons
+    assert not any("OpenVINO" in r and "Iris" in r for r in reasons)
+
+
+def test_llm_gpu_named_in_reasons():
+    text = " ".join(hardware.recommend_llm(make(31.6, 32, devices=(CPU, A770))).reasons)
+    assert "A770" in text
+
+
+def test_llm_cli_prints_only_the_id(monkeypatch, capsys):
+    monkeypatch.setattr(hardware, "profile", lambda: make(31.6, 32, devices=(CPU, ARC_140V)))
+    assert hardware.main(["--llm"]) == 0
+    assert capsys.readouterr().out.strip() == L
+
+
+def test_llm_cli_does_not_save(monkeypatch, capsys):
+    monkeypatch.setattr(hardware, "profile", lambda: make(3.8))
+    called = []
+    monkeypatch.setattr(hardware, "save", lambda *a, **k: called.append(1) or [])
+    assert hardware.main(["--llm"]) == 0
+    assert capsys.readouterr().out.strip() == S and not called
+
+
+def test_llm_polish_translations_exist():
+    pl = json.loads((Path(hardware.__file__).parent / "locale" / "pl.json").read_text(encoding="utf-8"))
+    assert "Recommended for this computer: {model}. {reason}" in pl
+    assert " (recommended)" in pl

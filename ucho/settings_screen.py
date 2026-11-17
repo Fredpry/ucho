@@ -41,10 +41,12 @@ class LanguageModelPicker(ctk.CTkFrame):
     """Picker for the local analysis language model (built-in, custom folder/.gguf, or none)."""
 
     def __init__(self, master, app, value: str, on_change: Callable[[str], None],
-                 width: int = 340, wraplength: int = 520):
+                 width: int = 340, wraplength: int = 520, recommended: str | None = None):
         super().__init__(master, fg_color="transparent")
         self.app = app
         self.value = value or llm.NONE
+        # Built-in model suggested by hardware.recommend_llm, marked in the list.
+        self.recommended = recommended
         self._on_change = on_change
         self._labels: dict[str, str] = {}
         values, current = self._menu_items()
@@ -62,7 +64,8 @@ class LanguageModelPicker(ctk.CTkFrame):
     def _menu_items(self) -> tuple[list[str], str]:
         labels: dict[str, str] = {t("No language model"): llm.NONE}
         for repo, info in config.LLM_MODELS.items():
-            labels[f"{repo.split('/')[-1]}  ({info['size']})"] = repo
+            mark = t(" (recommended)") if repo == self.recommended else ""
+            labels[f"{repo.split('/')[-1]}  ({info['size']}){mark}"] = repo
         if self.value and self.value not in labels.values():
             if llm.is_custom(self.value):
                 custom_name = llm.label(self.value).split("/")[-1]
@@ -77,6 +80,13 @@ class LanguageModelPicker(ctk.CTkFrame):
             t("My own model: .gguf file…"),
         ]
         return values, current
+
+    def set_recommended(self, model: str | None) -> None:
+        """Marks `model` in the list (the hardware profile may arrive after the picker)."""
+        if not self.winfo_exists() or model == self.recommended:
+            return
+        self.recommended = model
+        self._sync_menu()
 
     def _sync_menu(self) -> None:
         values, current = self._menu_items()
@@ -685,6 +695,9 @@ class SettingsScreen(Screen):
             ),
         )
         s.end()
+        # The hardware profile loads in the background (OpenVINO import).
+        self.app.load_hardware(lambda: self.llm_picker.set_recommended(
+            hardware.recommend_llm(self.app.hardware_profile).model))
 
     def _analysis_model(self, value: str) -> None:
         llm.set_choice(self.settings, value)

@@ -38,6 +38,20 @@ Details:
 
 The dictation model column is a default, not a rule you must follow: Settings → Dictation → *Dictation model* can be "Same as transcription" (one model in memory) or any model. On 20 synthetic Polish dictations INT8 and FP16 gave the same text (see [benchmarks.md](benchmarks.md#int8-vs-fp16-for-dictation-v02)), while FP16 needs about 3 GB more memory and took 37 % longer.
 
+## Language model
+
+The language model for meeting names and summaries is optional. `hardware.recommend_llm` suggests one of the built-in models; the wizard and Settings mark it as *(recommended)* in the list, and `install.ps1 -WithSummary` downloads it (`python -m ucho.hardware --llm` prints its id). Nothing is downloaded or switched on without the user.
+
+| Condition (checked in this order) | Language model |
+|---|---|
+| RAM < 8 GB | Qwen2.5 1.5B INT4 (~0.95 GB) |
+| discrete Intel GPU with >= 8 GB of its own memory | Qwen3 8B INT4 (~5 GB) |
+| usable Intel GPU, RAM >= 16 GB | Qwen3 8B INT4 |
+| usable Intel GPU, RAM 8-15 GB | Qwen3 4B INT4 (~2.3 GB) |
+| no usable GPU | Qwen3 4B INT4 |
+
+The model runs on the transcription device, with a fallback to the CPU. An integrated GPU shares the system RAM, so RAM decides unless a discrete card brings its own memory. On the CPU the 8B model is too slow for everyday use (4B already takes 7-27 s per title, [benchmarks.md](benchmarks.md)). NVIDIA and AMD cards are named in the reasons: OpenVINO cannot use them (see issue #25).
+
 ## Step down after the measurement
 
 The rule is accepted when the measurement is at least **1.5x faster than real time**. Otherwise the recommendation moves one row down:
