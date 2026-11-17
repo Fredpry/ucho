@@ -80,11 +80,13 @@ begin
     WizardForm.StatusLabel.Caption := CustomMessage('RunningInstaller');
     Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\install.ps1') + '"';
     // Silent: the window is hidden, so install.ps1 must not wait for an answer
-    // (it treats -NonInteractive like a non-interactive run).
+    // (it treats -NonInteractive like a non-interactive run). Otherwise the
+    // console waits only after a failure; after success it closes and the
+    // wizard advances to its finish page.
     if WizardSilent then
       Params := '-NonInteractive ' + Params
     else
-      Params := Params + ' -Pause';
+      Params := Params + ' -PauseOnError';
     if WizardSilent then
       ShowCmd := SW_HIDE
     else
