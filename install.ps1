@@ -323,6 +323,16 @@ if ((-not (Test-Path $Settings)) -and (Test-Path $LegacySettings)) {
     }
 }
 
+# -WithSummary takes the language model that fits this hardware (ucho.hardware
+# --llm, docs/hardware.md); the 8B default only when that check fails.
+$LlmModel = $DefaultLlmModel
+if ($WithSummary) {
+    try {
+        $picked = & $VenvPy -m ucho.hardware --llm | Where-Object { "$_".Trim() -like 'OpenVINO/*' } | Select-Object -Last 1
+        if ($LASTEXITCODE -eq 0 -and $picked) { $LlmModel = "$picked".Trim() }
+    } catch { }
+}
+
 # First the file with defaults (keys as in config.DEFAULTS), then step 6 writes
 # the hardware recommendation into it. The other order would overwrite the
 # recommendation with the defaults.
@@ -342,7 +352,7 @@ if ($newSettings) {
         tray                    = $true
         transcribe_after_stop   = $true
         summary_enabled         = [bool]$WithSummary
-        summary_model           = $DefaultLlmModel
+        summary_model           = $LlmModel
         rename_folder           = [bool]$WithSummary
         dictation_model         = 'OpenVINO/whisper-large-v3-fp16-ov'
         hardware_profile        = $null
@@ -460,8 +470,12 @@ if (-not $SkipModel) {
 
 # Summaries are optional and off by default: transcription is the core of Ucho.
 if ($WithSummary) {
-    Step (T "Pobieram model podsumowan $DefaultLlmModel (~5 GB, tylko raz)" "Downloading summary model $DefaultLlmModel (~5 GB, only once)")
-    $code = Invoke-Logged $VenvPy @($modelScript, $Root, $DefaultLlmModel, $progressText)
+    $llmSize = & $VenvPy -c "from ucho import config; print(config.LLM_MODELS.get(r'$LlmModel', {}).get('size', '?'))"
+    if ($LASTEXITCODE -ne 0 -or -not $llmSize) { $llmSize = '?' }
+    $llmSize = "$llmSize".Trim()
+    if ($PL) { $llmSize = $llmSize -replace '\.', ',' }
+    Step (T "Pobieram model podsumowan $LlmModel ($llmSize, tylko raz)" "Downloading summary model $LlmModel ($llmSize, only once)")
+    $code = Invoke-Logged $VenvPy @($modelScript, $Root, $LlmModel, $progressText)
     if ($code -ne 0) {
         Warn (T 'Pobieranie nie powiodlo sie - transkrypcja dziala, tylko bez podsumowan' 'Download failed - transcription works, just without summaries')
     } else {

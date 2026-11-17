@@ -40,6 +40,12 @@ LARGE_FP16 = "OpenVINO/whisper-large-v3-fp16-ov"
 TURBO_INT8 = "OpenVINO/whisper-large-v3-turbo-int8-ov"
 TURBO_INT4 = "OpenVINO/whisper-large-v3-turbo-int4-ov"
 
+# Language models for meeting names and summaries. The recommendation never
+# changes their device: they use the transcription device, with CPU fallback.
+LLM_LARGE = "OpenVINO/Qwen3-8B-int4-ov"
+LLM_MEDIUM = "OpenVINO/Qwen3-4B-int4-ov"
+LLM_SMALL = "OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov"
+
 # The rule table accepts its choice when the measurement is at least this many
 # times faster than the recording. Below that a long meeting takes noticeably
 # longer to transcribe than it lasted, and the margin covers a busy machine.
@@ -438,10 +444,55 @@ def recommend(p: HardwareProfile) -> Recommendation:
     if npu is not None:
         rec.reasons.append(t("NPU found ({npu}). You can try it in Settings "
                              "as an experimental option.", npu=npu.name or npu.id))
-    for adapter in p.adapters:
-        if any(word in adapter.name.upper() for word in ("NVIDIA", "RADEON")):
-            rec.reasons.append(t("{gpu} is not supported by OpenVINO, "
-                                 "so Ucho will not use it.", gpu=adapter.name))
+    rec.reasons += _unsupported_adapters(p)
+    return rec
+
+
+def _unsupported_adapters(p: HardwareProfile) -> list[str]:
+    """Reasons naming graphics cards OpenVINO cannot drive (NVIDIA, AMD)."""
+    return [
+        t("{gpu} is not supported by OpenVINO, so Ucho will not use it.", gpu=adapter.name)
+        for adapter in p.adapters
+        if any(word in adapter.name.upper() for word in ("NVIDIA", "RADEON", "AMD"))
+    ]
+
+
+@dataclass
+class LlmRecommendation:
+    model: str
+    reasons: list[str] = field(default_factory=list)
+
+
+def recommend_llm(p: HardwareProfile) -> LlmRecommendation:
+    """Analysis language model (meeting names and summaries) for a hardware profile.
+
+    Pure, like `recommend`. Only the model is chosen: the language model runs on
+    the transcription device (with CPU fallback), and an integrated GPU shares
+    the system RAM, so RAM decides unless a discrete GPU brings its own memory.
+    """
+    ram = p.ram_gb
+    gpu = p.usable_gpu()
+    if ram < 8:
+        rec = LlmRecommendation(LLM_SMALL, [t(
+            "Less than 8 GB RAM ({ram} GB): only the smallest language model fits.",
+            ram=_num(ram))])
+    elif gpu is not None and gpu.type == "discrete" and (gpu.memory_gb or 0) >= 8:
+        rec = LlmRecommendation(LLM_LARGE, [t(
+            "Graphics {gpu} with {gb} GB of its own memory: the largest language model fits.",
+            gpu=gpu.name or gpu.id, gb=_num(gpu.memory_gb or 0))])
+    elif gpu is not None and ram >= 16:
+        rec = LlmRecommendation(LLM_LARGE, [t(
+            "Graphics {gpu} and {ram} GB RAM: the largest language model runs fast enough.",
+            gpu=gpu.name or gpu.id, ram=_num(ram))])
+    elif gpu is not None:
+        rec = LlmRecommendation(LLM_MEDIUM, [t(
+            "{ram} GB RAM: the 8B model (5 GB) would leave too little memory; "
+            "the 4B model writes good Polish.", ram=_num(ram))])
+    else:
+        rec = LlmRecommendation(LLM_MEDIUM, [t(
+            "No usable GPU: the 8B model would be slow on the CPU; "
+            "the 4B model writes good Polish.")])
+    rec.reasons += _unsupported_adapters(p)
     return rec
 
 
@@ -704,6 +755,15 @@ def _describe_rec(rec: Recommendation) -> list[str]:
     return lines
 
 
+def _describe_llm(rec: LlmRecommendation) -> list[str]:
+    lines = [
+        t("Language model (optional, for meeting names and summaries)"),
+        f"  {t('Model')}: {rec.model}",
+        f"  {t('Reasons')}:",
+    ]
+    return lines + [f"    - {reason}" for reason in rec.reasons]
+
+
 def main(argv: list[str] | None = None) -> int:
     from . import i18n
 
@@ -720,6 +780,8 @@ def main(argv: list[str] | None = None) -> int:
                              "(model must be downloaded)")
     parser.add_argument("--seconds", type=float, default=10.0,
                         help="length of the synthetic signal for --benchmark")
+    parser.add_argument("--llm", action="store_true",
+                        help="print only the recommended language model id")
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -730,6 +792,10 @@ def main(argv: list[str] | None = None) -> int:
     i18n.set_language(settings["ui_language"])
 
     p = profile()
+    if args.llm:
+        # install.ps1 -WithSummary reads this one line.
+        print(recommend_llm(p).model)
+        return 0
     rec = recommend(p)
     measured: BenchmarkResult | None = None
     if args.benchmark:
@@ -758,6 +824,8 @@ def main(argv: list[str] | None = None) -> int:
     print("\n".join(_describe(p)))
     print()
     print("\n".join(_describe_rec(rec)))
+    print()
+    print("\n".join(_describe_llm(recommend_llm(p))))
 
     if args.save:
         changed = save(settings, p, rec, measured, keep_choice=args.keep_choice)

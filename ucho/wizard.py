@@ -265,11 +265,21 @@ class Wizard(ctk.CTkFrame):
         holder.grid(row=2, column=0, sticky="ew")
         ui.label(holder, t("Language model"), theme.SM, "bold", anchor="w").pack(
             anchor="w", pady=(0, 6))
+        profile = self.app.hardware_profile
+        advice = hardware.recommend_llm(profile) if profile is not None else None
         self.analysis_picker = LanguageModelPicker(
             holder, self.app, self.state["analysis_model"], self._set_analysis,
-            width=360, wraplength=540,
+            width=360, wraplength=540, recommended=advice.model if advice else None,
         )
         self.analysis_picker.pack(anchor="w")
+        if advice is not None:
+            # A suggestion only: the step stays optional and nothing is downloaded.
+            ui.muted(
+                holder,
+                t("Recommended for this computer: {model}. {reason}",
+                  model=advice.model.split("/")[-1], reason=advice.reasons[0]),
+                theme.XS + 1, anchor="w", justify="left", wraplength=540,
+            ).pack(anchor="w", pady=(8, 0))
         self.summary_switch = ui.switch(
             self.body, t("Also summarize every meeting"), bool(self.state["summary"]),
             lambda v: self.state.update(summary=bool(v)),

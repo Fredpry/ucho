@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Language model recommended for the hardware** (#24): `hardware.recommend_llm` picks Qwen3 8B, Qwen3 4B or Qwen2.5 1.5B from RAM and the usable Intel GPU (a discrete card with at least 8 GB of its own memory counts on its own), and names NVIDIA/AMD cards that OpenVINO cannot use. The wizard shows the recommendation with its reason, the language model list in the wizard and Settings marks it as *(recommended)*, and `install.ps1 -WithSummary` downloads the recommended model instead of always Qwen3 8B (`python -m ucho.hardware --llm`). Nothing is downloaded or switched on by itself. Rules in `docs/hardware.md`.
+
 ## v0.5.0 (2026-11-16)
 
 ### Added
