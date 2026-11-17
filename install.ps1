@@ -22,7 +22,8 @@ param(
     [switch]$WithSpeakers,         # optional speaker detection (CPU) / opcjonalne rozpoznawanie mowcow (CPU)
     [switch]$ReinstallPackages,    # force reinstall of packages / wymus ponowna instalacje
     [switch]$Force,                # install inside OneDrive without asking / instaluj w OneDrive bez pytania
-    [switch]$Pause                 # wait for Enter before closing (install.cmd) / czekaj na Enter przed zamknieciem
+    [switch]$Pause,                # wait for Enter before closing (install.cmd) / czekaj na Enter przed zamknieciem
+    [switch]$PauseOnError          # wait for Enter only after a failure (Setup) / czekaj na Enter tylko po bledzie
 )
 
 # First thing: tell install.cmd that the script did start (it shows its own
@@ -148,15 +149,16 @@ function Stop-Log {
 }
 
 # install.cmd passes -Pause: a double-clicked window would otherwise close
-# before anyone can read the result or the error.
-function Wait-Close {
-    if ($Pause -and (Test-Interactive)) {
+# before anyone can read the result or the error. Setup passes -PauseOnError:
+# its wizard shows the successful result itself, so only an error needs a wait.
+function Wait-Close([int]$Code) {
+    if ((Test-Interactive) -and ($Pause -or ($PauseOnError -and $Code -ne 0))) {
         Write-Host ''
         try { [void](Read-Host (T 'Nacisnij Enter, aby zamknac to okno' 'Press Enter to close this window')) } catch { }
     }
 }
 
-# Every exit goes through here: the log is closed, the window waits (-Pause).
+# Every exit goes through here: the log is closed, then Wait-Close applies.
 function Exit-Installer([int]$Code, [switch]$Cancelled) {
     Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
     if ($Code -ne 0 -and -not $Cancelled) {
@@ -168,7 +170,7 @@ function Exit-Installer([int]$Code, [switch]$Cancelled) {
         }
     }
     Stop-Log
-    Wait-Close
+    Wait-Close $Code
     exit $Code
 }
 

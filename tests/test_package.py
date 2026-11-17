@@ -64,6 +64,19 @@ def test_install_cmd_runs_the_installer_with_pause():
     assert '-ExecutionPolicy Bypass -File "%~dp0install.ps1" -Pause %*' in text
 
 
+def test_setup_pauses_only_on_error():
+    text = (ROOT / "installer" / "ucho.iss").read_text(encoding="utf-8-sig")
+    assert "' -PauseOnError'" in text
+    assert "' -Pause';" not in text
+
+
+def test_install_ps1_pause_on_error():
+    text = (ROOT / "install.ps1").read_text(encoding="ascii")
+    assert "[switch]$PauseOnError" in text
+    assert "function Wait-Close([int]$Code)" in text
+    assert "Wait-Close $Code" in text
+
+
 @pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell not available")
 @pytest.mark.parametrize("name", ["install.ps1", "uninstall.ps1"])
 def test_powershell_scripts_parse(name):

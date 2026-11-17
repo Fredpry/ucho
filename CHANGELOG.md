@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Setup no longer waits for Enter in the install console after a successful install; the console closes and the wizard moves to its finish page. It still waits after a failure so the error can be read (`install.ps1 -PauseOnError`). `install.cmd` is unchanged (#23).
+
 ## v0.5.0 (2026-11-16)
 
 ### Added
