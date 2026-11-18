@@ -36,7 +36,7 @@ import os
 import threading
 import time
 from ctypes import c_void_p, wintypes
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
@@ -319,7 +319,7 @@ def clipboard_sequence() -> int:
 # dictated text stays and the previous text is not restored.
 
 _CLASS_NAME = "UchoClipboardOwner"
-_owners: dict[int, "DelayedClipboard"] = {}  # hidden window -> its clipboard offer
+_owners: dict[int, DelayedClipboard] = {}  # hidden window -> its clipboard offer
 _class_lock = threading.Lock()
 _class_registered = False
 
@@ -795,7 +795,7 @@ class Microphone:
                     raise
                 log.warning("Opening the microphone failed - retrying", exc_info=True)
 
-    def _callback(self, in_data, frame_count, time_info, status):  # noqa: ARG002
+    def _callback(self, in_data, frame_count, time_info, status):
         import pyaudiowpatch as pyaudio
 
         self._blocks.append(in_data)

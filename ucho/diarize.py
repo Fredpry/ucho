@@ -39,7 +39,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
@@ -333,7 +333,7 @@ def iter_diarize_track(
         nonlocal turns, failure
         try:
             turns = diarizer.diarize_file(Path(file), cancel=cancel)
-        except BaseException as error:  # noqa: BLE001 - logged on the engine thread
+        except BaseException as error:
             failure = error
 
     thread = threading.Thread(target=run, name="diarize", daemon=True)
@@ -420,7 +420,7 @@ def worker_main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     try:
         turns = Diarizer(args.threshold, args.threads).diarize(transcribe.load_audio(Path(args.file)))
-    except Exception as error:  # noqa: BLE001 - worker reports any error to stderr and exits 1
+    except Exception as error:  # the worker reports any error to stderr and exits 1
         sys.stderr.write(f"{type(error).__name__}: {error}\n")
         return 1
 

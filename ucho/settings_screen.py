@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 import customtkinter as ctk
 
@@ -367,11 +367,11 @@ class SettingsScreen(Screen):
         else:
             self._show_hardware()
         if kwargs.get("section") == "hardware":
-            self.scroll._parent_canvas.yview_moveto(0.12)  # noqa: SLF001
+            self.scroll._parent_canvas.yview_moveto(0.12)
         elif kwargs.get("section") == "llm":
-            self.scroll._parent_canvas.yview_moveto(0.59)  # noqa: SLF001
+            self.scroll._parent_canvas.yview_moveto(0.59)
         elif kwargs.get("section") == "titles":
-            self.scroll._parent_canvas.yview_moveto(0.64)  # noqa: SLF001
+            self.scroll._parent_canvas.yview_moveto(0.64)
 
     def _show_hardware(self) -> None:
         p, rec = self.app.hardware_profile, self.app.hardware_rec

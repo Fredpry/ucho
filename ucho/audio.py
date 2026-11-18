@@ -25,7 +25,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import soundfile as sf
@@ -49,7 +49,7 @@ log = logging.getLogger(__name__)
 PORTAUDIO_LOCK = threading.RLock()
 
 
-def new_pyaudio() -> "pyaudio.PyAudio":
+def new_pyaudio() -> pyaudio.PyAudio:
     with PORTAUDIO_LOCK:
         return pyaudio.PyAudio()
 
@@ -283,7 +283,7 @@ class _Track:
         self._listener = listener
         self._listener_failed = False
 
-        self._queue: "queue.Queue[bytes | None]" = queue.Queue(maxsize=256)
+        self._queue: queue.Queue[bytes | None] = queue.Queue(maxsize=256)
         self._stream = None
         self._out: sf.SoundFile | None = None
         self._resampler = None
@@ -306,7 +306,7 @@ class _Track:
             channels=1, subtype="PCM_16", format="FLAC",
         )
 
-    def start(self, p: "pyaudio.PyAudio", device: DeviceInfo | None = None) -> None:
+    def start(self, p: pyaudio.PyAudio, device: DeviceInfo | None = None) -> None:
         if device is not None:
             self.device = device
             self._channels = device.channels
@@ -371,7 +371,7 @@ class _Track:
 
     # --- processing -----------------------------------------------------
 
-    def _callback(self, in_data, frame_count, time_info, status):  # noqa: ARG002
+    def _callback(self, in_data, frame_count, time_info, status):
         try:
             self._queue.put_nowait(in_data)
         except queue.Full:
@@ -489,7 +489,7 @@ class Recorder:
         self._system = system
         self._microphone_index = microphone_index
         self._system_index = system_index
-        self._pa: "pyaudio.PyAudio | None" = None
+        self._pa: pyaudio.PyAudio | None = None
         self._tracks: dict[str, _Track] = {}
         self._watchdog: threading.Thread | None = None
         self._stop = threading.Event()

@@ -19,7 +19,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Generator
+from collections.abc import Callable, Generator
 
 import numpy as np
 import soundfile as sf

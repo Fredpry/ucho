@@ -28,7 +28,7 @@ import re
 import threading
 import time
 import unicodedata
-from typing import Callable
+from collections.abc import Callable
 
 from . import config, llm, session
 from .i18n import t

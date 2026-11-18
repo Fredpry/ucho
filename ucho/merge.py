@@ -17,7 +17,7 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from .config import write_json
 from .i18n import t

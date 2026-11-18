@@ -34,8 +34,9 @@ import itertools
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ class Job:
     step per turn and the generator's return value is the result.
     """
 
-    work: Callable[["Job"], Any]
+    work: Callable[[Job], Any]
     priority: int = NORMAL
     name: str = ""
     on_done: Callable[[Any], None] | None = None
@@ -252,7 +253,7 @@ class Engine:
             except StopIteration as stop:
                 self._finish(job, stop.value)
                 return False
-        except BaseException as error:  # noqa: BLE001 - reported to the caller
+        except BaseException as error:  # reported to the caller
             if not isinstance(error, Cancelled):
                 log.exception("Engine job %s failed", job.name)
             job.error = error

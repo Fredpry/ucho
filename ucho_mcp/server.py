@@ -271,7 +271,7 @@ def handle(archive: Archive, message: dict) -> dict | None:
             return result({"content": [{"type": "text", "text": text}], "isError": False})
         except ToolError as problem:
             return result({"content": [{"type": "text", "text": str(problem)}], "isError": True})
-        except Exception as problem:  # noqa: BLE001 - the agent should get the error text
+        except Exception as problem:  # the agent should get the error text
             log.exception("Tool %s failed", name)
             return result({"content": [{"type": "text", "text": f"Error: {problem}"}],
                            "isError": True})
@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
                     response = response or None
                 else:
                     response = handle(archive, message)
-            except Exception:  # noqa: BLE001 - one bad message must not end the server
+            except Exception:  # one bad message must not end the server
                 log.exception("Could not handle a message")
                 id_ = message.get("id") if isinstance(message, dict) else None
                 response = None if id_ is None and isinstance(message, dict) else {

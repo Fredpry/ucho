@@ -20,7 +20,7 @@ import logging
 import sys
 import threading
 from ctypes import byref, wintypes
-from typing import Callable
+from collections.abc import Callable
 
 from .i18n import t
 

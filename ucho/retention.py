@@ -31,7 +31,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from . import session
 from .config import write_json

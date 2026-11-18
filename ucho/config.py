@@ -569,7 +569,7 @@ class Settings:
         return Path(self._data["recordings_dir"])
 
 
-def prepare_dirs(settings: "Settings | None" = None) -> None:
+def prepare_dirs(settings: Settings | None = None) -> None:
     """Creates the recordings folder.
 
     The models folder is created by the download or the first compile, so a

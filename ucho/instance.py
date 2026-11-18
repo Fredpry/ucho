@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from ctypes import wintypes
-from typing import Callable
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ except ImportError:  # the CI test job does not install the audio stack
     stub.PyAudio = object
     sys.modules["pyaudiowpatch"] = stub
 
-from ucho import audio, dictation  # noqa: E402
+from ucho import audio, dictation
 
 MME, DS, WASAPI = 0, 1, 2
 HEADSET = "Zestaw słuchawkowy (Logitech G PRO X 2)"
