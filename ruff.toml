@@ -3,6 +3,7 @@ target-version = "py312"
 extend-exclude = [".venv", ".venv-dev", ".ref", "models", "modele"]
 
 [lint]
-select = ["E", "F", "W", "B", "I"]
+select = ["E", "F", "W", "B", "I", "UP", "RUF100"]
 # Long lines are allowed: UI strings and comments with measurements read better unwrapped.
-ignore = ["E501", "B008", "I001"]
+# UP031: the one `%` format builds a regex (summary.py); the automatic rewrite is unsafe.
+ignore = ["E501", "B008", "I001", "UP031"]

@@ -9,6 +9,7 @@ folder instead of the user profile and Hugging Face telemetry is off.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -130,7 +131,6 @@ DEFAULT_LLM_MODEL = "OpenVINO/Qwen3-8B-int4-ov"
 # of 10, Qwen3-0.6B in most; Qwen3-4B in none. 4B takes about 1 s on the Arc
 # iGPU and 7-27 s on the CPU per title.
 TITLE_MODEL = "OpenVINO/Qwen3-4B-int4-ov"
-TITLE_MODEL_SIZE = LLM_MODELS[TITLE_MODEL]["size"]
 
 # Speaker detection models (ucho/diarize.py, sherpa-onnx, CPU only).
 SPEAKER_MODELS = {
@@ -318,7 +318,6 @@ DEFAULTS = {
 
 DICTATION_SHARED = "shared"
 THEMES = ("system", "light", "dark")
-LAYOUTS = ("single", "tray")
 # Whisper devices offered in Settings. GPU.0/GPU.1 from the hardware
 # recommendation are kept as they are.
 DEVICES = ("GPU", "CPU", "NPU", "AUTO")
@@ -431,6 +430,30 @@ def migrate_legacy_settings(old: dict) -> dict:
     return new
 
 
+def sherpa_available() -> bool:
+    """True when the optional sherpa-onnx package is installed (checked without importing it)."""
+    try:
+        return importlib.util.find_spec("sherpa_onnx") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def write_json(file: Path, data) -> None:
+    """Writes `data` as JSON through a temp file in the same folder, so a failure keeps the old file."""
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    temp = file.with_name(file.name + ".tmp")
+    try:
+        temp.write_text(text, encoding="utf-8")
+        os.replace(temp, file)
+    except BaseException:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def migrate_file(new_file: Path, legacy_file: Path, migrate) -> bool:
     """Writes `new_file` from `legacy_file` when only the old one exists.
 
@@ -447,9 +470,7 @@ def migrate_file(new_file: Path, legacy_file: Path, migrate) -> bool:
     if not isinstance(old, dict):
         return False
     try:
-        new_file.parent.mkdir(parents=True, exist_ok=True)
-        new_file.write_text(json.dumps(migrate(old), indent=2, ensure_ascii=False),
-                            encoding="utf-8")
+        write_json(new_file, migrate(old))
     except OSError:
         log.warning("Could not write %s", new_file)
         return False
@@ -530,13 +551,9 @@ class Settings:
 
     def save(self) -> None:
         try:
-            self._file.parent.mkdir(parents=True, exist_ok=True)
-            self._file.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+            write_json(self._file, self._data)
+        except OSError as error:
+            log.warning("Could not save settings: %s", type(error).__name__)
 
     def __getitem__(self, key: str):
         return self._data.get(key, DEFAULTS.get(key))
@@ -552,7 +569,7 @@ class Settings:
         return Path(self._data["recordings_dir"])
 
 
-def prepare_dirs(settings: "Settings | None" = None) -> None:
+def prepare_dirs(settings: Settings | None = None) -> None:
     """Creates the recordings folder.
 
     The models folder is created by the download or the first compile, so a

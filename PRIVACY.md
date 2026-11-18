@@ -25,7 +25,7 @@ Hugging Face answers a file request on `huggingface.co` with a redirect to its d
 |---|---|
 | Recordings (`microphone.flac`, `meeting.flac`), transcripts, `meta.json` | `C:\Users\<you>\Ucho\recordings` (changeable in Settings; v0.1 used `Ucho\nagrania`) |
 | Settings | `settings.json` in the program folder (v0.1: `ustawienia.json` and `dyktuj.json`; earlier v0.2 builds: `dictate.json`. They are imported once and kept) |
-| Logs | `ucho.log` in the program folder. **It contains the dictated text** (used to restore the last text after a restart), like `dictate.log` of earlier versions. Delete them whenever you like. |
+| Logs | `ucho.log` in the program folder. **It contains the dictated text** (used to restore the last text after a restart), like `dictate.log` of earlier versions. The log is capped at about 2 MB plus one older file (`ucho.log.1`). Delete them whenever you like. |
 | Models | `models\` in the program folder |
 
 The default recordings folder is deliberately **not** in Documents: on many company laptops Documents are redirected to OneDrive, which would upload recordings to the cloud.
@@ -100,7 +100,7 @@ Na żądanie pliku `huggingface.co` odpowiada przekierowaniem na swoje serwery p
 |---|---|
 | Nagrania, transkrypty, `meta.json` | `C:\Users\<Ty>\Ucho\recordings` (do zmiany w Ustawieniach; w v0.1 `Ucho\nagrania`) |
 | Ustawienia | `settings.json` w folderze programu (w v0.1 `ustawienia.json` i `dyktuj.json`, we wcześniejszych wersjach v0.2 `dictate.json`; są wczytywane raz i zostają na dysku) |
-| Logi | `ucho.log` w folderze programu. **Zawiera podyktowany tekst** (służy do odtworzenia ostatniego tekstu po restarcie), tak jak `dictate.log` wcześniejszych wersji. Możesz je w każdej chwili usunąć. |
+| Logi | `ucho.log` w folderze programu. **Zawiera podyktowany tekst** (służy do odtworzenia ostatniego tekstu po restarcie), tak jak `dictate.log` wcześniejszych wersji. Log ma limit ok. 2 MB plus jeden starszy plik (`ucho.log.1`). Możesz je w każdej chwili usunąć. |
 | Modele | `models\` w folderze programu |
 
 Domyślny folder nagrań celowo **nie** leży w Dokumentach: na wielu firmowych laptopach Dokumenty są przekierowane do OneDrive, więc nagrania trafiłyby do chmury.

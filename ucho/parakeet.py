@@ -39,7 +39,6 @@ Differences from Whisper that matter here:
 from __future__ import annotations
 
 import gc
-import importlib.util
 import logging
 import os
 import re
@@ -48,6 +47,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import config
 from .i18n import t
 
 log = logging.getLogger(__name__)
@@ -79,13 +79,7 @@ MAX_PIECE_S = 20.0
 _SENTENCE_END = re.compile(r"[.!?…]$")
 
 
-def available() -> bool:
-    """True when the optional sherpa-onnx package is installed (without importing it)."""
-    try:
-        return importlib.util.find_spec("sherpa_onnx") is not None
-    except (ImportError, ValueError):
-        return False
-
+available = config.sherpa_available
 
 def default_threads() -> int:
     """Threads for the ONNX Runtime CPU session.

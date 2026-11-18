@@ -12,7 +12,7 @@ except ImportError:  # the CI test job does not install the audio stack
     stub.PyAudio = object
     sys.modules["pyaudiowpatch"] = stub
 
-from ucho import audio, dictation  # noqa: E402
+from ucho import audio, dictation
 
 MME, DS, WASAPI = 0, 1, 2
 HEADSET = "Zestaw słuchawkowy (Logitech G PRO X 2)"
@@ -263,3 +263,44 @@ def test_menu_shows_a_legacy_index_as_its_device():
     devices = _devices()
     labels, selected = audio.menu_choices(devices["microphones"], None, 2, devices["names_by_index"])
     assert labels[selected] == HEADSET
+
+
+def test_recorder_start_releases_started_tracks_when_a_later_one_breaks(monkeypatch, tmp_path):
+    mic = audio.DeviceInfo(1, "Mic", 1, 16000, False)
+    loop = audio.DeviceInfo(2, "Loop", 2, 48000, True)
+    monkeypatch.setattr(audio, "list_devices", lambda: {
+        "microphones": [mic], "default_microphone": mic, "system": [loop],
+        "default_system": loop, "names_by_index": {}})
+    closed: list[object] = []
+    monkeypatch.setattr(audio, "new_pyaudio", lambda: "PA")
+    monkeypatch.setattr(audio, "close_pyaudio", closed.append)
+    finished: list[str] = []
+
+    class Boom(BaseException):
+        pass
+
+    class FakeTrack:
+        def __init__(self, name, file, device, listener):
+            self.name = name
+
+        def open_file(self):
+            if self.name == "system":
+                raise Boom()
+
+        def start(self, _pa):
+            pass
+
+        def finish(self):
+            finished.append(self.name)
+
+    monkeypatch.setattr(audio, "_Track", FakeTrack)
+    recorder = audio.Recorder()
+    try:
+        recorder.start(tmp_path)
+    except Boom:
+        pass
+    else:
+        raise AssertionError("the error must be re-raised")
+    assert closed == ["PA"]
+    assert recorder._pa is None and not recorder._tracks
+    assert "microphone" in finished

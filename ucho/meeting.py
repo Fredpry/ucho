@@ -44,7 +44,6 @@ as without live transcription.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -52,9 +51,9 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
 
 from . import config, llm, session, titles, transcribe
+from .events import Emitter
 from .i18n import t
 from .merge import (META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
                     TRANSCRIPTION_ERRORS, Segment, clean_speaker_name, save_results, slug,
@@ -65,8 +64,9 @@ log = logging.getLogger(__name__)
 TITLE_RETRY_S = 30.0
 
 
-class MeetingController:
+class MeetingController(Emitter):
     def __init__(self, app):
+        super().__init__()
         self.app = app
         self.recorder = None
         self.recording = False
@@ -94,25 +94,6 @@ class MeetingController:
         self.live_segments: list[Segment] = []
         self._live_meta: dict = {}
         self._caches: dict[str, object] = {}  # folder key -> live_meeting.ChunkCache
-        self._listeners: list[Callable[[str, object], None]] = []
-
-    # --- events -------------------------------------------------------------
-
-    def listen(self, callback: Callable[[str, object], None]) -> None:
-        self._listeners.append(callback)
-
-    def clear_listeners(self) -> None:
-        self._listeners.clear()
-
-    def _emit(self, event: str, data=None) -> None:
-        """Delivers an event on the UI thread."""
-        def deliver():
-            for callback in list(self._listeners):
-                try:
-                    callback(event, data)
-                except Exception:
-                    log.exception("Listener for %s failed", event)
-        self.app.post(deliver)
 
     @property
     def settings(self) -> config.Settings:
@@ -237,7 +218,7 @@ class MeetingController:
         self.session_name_source = name_source
         self.recording_start = time.time()
         self.message = (("; ".join(recorder.warnings)), "warning") if recorder.warnings else None
-        log.info("Recording started: %s", folder.name)
+        log.info("Recording started")
         self._emit("state")
         return True
 
@@ -251,8 +232,10 @@ class MeetingController:
         # before the transcription below starts and lands in the cache.
         live, self.live = self.live, None
         cache = live.stop() if live is not None else None
-        result = self.recorder.stop()
-        self.recorder = None
+        try:
+            result = self.recorder.stop()
+        finally:
+            self.recorder = None
         files = {n: d["file"] for n, d in result["tracks"].items()}
         self.last_stopped = result["folder"]
         log.info("Recording stopped: %.0f s", result["duration_s"])
@@ -275,13 +258,16 @@ class MeetingController:
         if live is not None:
             log.info("Live transcription while recording: %d chunks done, %d failed%s",
                      live.done, live.errors, ", stopped early (too slow)" if live.gave_up else "")
+        self.message = None
         if self.live_segments:
             # Keeps the live text on disk until the transcription replaces it.
             self._save_partial(result["folder"], self.live_segments, meta)
         else:
-            (result["folder"] / "meta.json").write_text(
-                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-        self.message = None
+            try:
+                config.write_json(result["folder"] / "meta.json", meta)
+            except OSError as error:
+                log.warning("Could not write meta.json: %s", type(error).__name__)
+                self.message = (t("Could not save the recording details (meta.json)."), "warning")
         self._emit("state")
         if self.settings["transcribe_after_stop"]:
             self.transcribe(result["folder"], files, meta, cache=cache)
@@ -413,13 +399,13 @@ class MeetingController:
         recognized while recording (live_meeting.ChunkCache).
         """
         if self.is_active(folder) or self.queue_position(folder):
-            log.info("Transcription of %s already running or queued", folder.name)
+            log.info("Transcription already running or queued")
             return True
         if self.busy or self._queue:
             self._queue.append((folder, files, meta))
             if cache is not None:
                 self._caches[_folder_key(folder)] = cache
-            log.info("Transcription of %s queued (%d waiting)", folder.name, len(self._queue))
+            log.info("Transcription queued (%d waiting)", len(self._queue))
             self._emit("state")
             return True
         return self._start(folder, files, meta, cache)
@@ -430,7 +416,7 @@ class MeetingController:
             folder, files, meta = self._queue.popleft()
             cache = self._caches.pop(_folder_key(folder), None)
             if not folder.is_dir():
-                log.warning("Queued session %s no longer exists - skipped", folder.name)
+                log.warning("Queued session no longer exists - skipped")
                 continue
             if self._start(folder, files, meta, cache):
                 return
@@ -522,13 +508,15 @@ class MeetingController:
                 self._titles.append(folder)
             # Summarizing first: `busy` must not drop between the two steps,
             # or a queued session would start in between.
-            self.summarizing = expected
-            self.transcribing = False
+            # The results are set before `transcribing` drops: the UI thread
+            # reads them as soon as it sees the job is no longer running.
             self.progress = 1.0
             self.last_segments, self.last_meta = segments, full
             self.status_text = t("Done in {time} s  ·  {device}  ·  {n} utterances",
                                  time=f"{full['transcription_time_s']:.0f}", device=used_device,
                                  n=len(segments))
+            self.summarizing = expected
+            self.transcribing = False
             self._emit("transcribed", (folder, segments, full, expected))
             if expected:
                 self.summarize(folder, segments, full)
@@ -544,7 +532,11 @@ class MeetingController:
             self._emit("state")
             self._finished()
 
-        speakers = self._speaker_pass()
+        try:
+            speakers = self._speaker_pass()
+        except Exception:
+            log.exception("Speaker detection could not start")
+            speakers = None
         self._job = self.app.engine.transcribe(
             files, model, device, self.settings["language"],
             progress=progress, status=status, on_done=done, on_error=failed, report=report,
@@ -758,8 +750,7 @@ class MeetingController:
             if segments:
                 save_results(folder, segments, meta)
             else:
-                (folder / META_FILE).write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                config.write_json(folder / META_FILE, meta)
         except OSError as error:
             self._emit("error", t("Could not rename: {error}", error=error))
             return False
@@ -825,8 +816,8 @@ def rename_session(folder: Path, result: dict) -> Path:
     except OSError as error:
         # Most common reason: the folder is open in Explorer. That is not a
         # transcription error: the files are in place, only the name stays.
-        log.warning("Could not rename %s -> %s: %s", folder.name, new_name, error)
+        log.warning("Could not rename a session folder: %s", type(error).__name__)
         return folder
-    log.info("Session renamed: %s -> %s", folder.name, target.name)
+    log.info("Session folder renamed")
     return target
 

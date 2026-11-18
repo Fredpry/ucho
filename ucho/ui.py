@@ -15,7 +15,7 @@ import sys
 import time
 import tkinter
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFont
@@ -177,7 +177,7 @@ def entry_focus(entry: ctk.CTkEntry) -> None:
 
 def segmented_focus(segmented: ctk.CTkSegmentedButton, command: Callable[[str], None] | None) -> None:
     """Every segment is reachable with Tab and selectable with Enter/Space."""
-    for value, button in segmented._buttons_dict.items():  # noqa: SLF001 - no public access
+    for value, button in segmented._buttons_dict.items():  # no public access
         def choose(v=value):
             segmented.set(v)
             if command:
@@ -205,7 +205,7 @@ def scrollable(master, **kwargs) -> ctk.CTkScrollableFrame:
     frame = ctk.CTkScrollableFrame(master, fg_color="transparent", corner_radius=0, **kwargs)
     if sys.platform == "win32":
         unit = max(1, round(_WHEEL_UNIT_PX * ctk.ScalingTracker.get_widget_scaling(frame)))
-        frame._parent_canvas.configure(yscrollincrement=unit)  # noqa: SLF001
+        frame._parent_canvas.configure(yscrollincrement=unit)
     return frame
 
 
@@ -244,27 +244,28 @@ def primary(master, text: str, command: Callable, icon_name: str | None = None,
     return button
 
 
-def secondary(master, text: str, command: Callable, icon_name: str | None = None,
-              height: int = 34, **kwargs) -> ctk.CTkButton:
+def _outline(master, text: str, command: Callable, icon_name: str | None, height: int,
+             hover: theme.Pair, color: theme.Pair, **kwargs) -> ctk.CTkButton:
+    """Outlined button on the surface color; `hover` and `color` (text and icon) set its tone."""
     button = ctk.CTkButton(master, text=text, command=command, height=height,
                            corner_radius=theme.RADIUS_SM + 2, font=font(theme.SM - 1),
-                           fg_color=C.surface, hover_color=C.hover, text_color=C.text,
+                           fg_color=C.surface, hover_color=hover, text_color=color,
                            border_color=C.border, border_width=1,
-                           image=icon(icon_name, 15, C.text) if icon_name else None, **kwargs)
+                           image=icon(icon_name, 15, color) if icon_name else None, **kwargs)
     focusable(button, button.invoke)
     return button
+
+
+def secondary(master, text: str, command: Callable, icon_name: str | None = None,
+              height: int = 34, **kwargs) -> ctk.CTkButton:
+    return _outline(master, text, command, icon_name, height, C.hover, C.text, **kwargs)
 
 
 def danger(master, text: str, command: Callable, icon_name: str | None = None,
            height: int = 34, **kwargs) -> ctk.CTkButton:
     """Secondary button for a destructive action: text and icon in the recording (clay) color."""
-    button = ctk.CTkButton(master, text=text, command=command, height=height,
-                           corner_radius=theme.RADIUS_SM + 2, font=font(theme.SM - 1),
-                           fg_color=C.surface, hover_color=C.recording_soft, text_color=C.recording,
-                           border_color=C.border, border_width=1,
-                           image=icon(icon_name, 15, C.recording) if icon_name else None, **kwargs)
-    focusable(button, button.invoke)
-    return button
+    return _outline(master, text, command, icon_name, height, C.recording_soft, C.recording,
+                    **kwargs)
 
 
 def ghost(master, text: str, command: Callable, icon_name: str | None = None,
@@ -295,7 +296,7 @@ def option_menu(master, values: list[str], current: str, command: Callable[[str]
                                dynamic_resizing=False, font=font(theme.SM - 1),
                                dropdown_font=font(theme.SM - 1), anchor="w")
     widget.set(current)
-    focusable(widget, widget._open_dropdown_menu, ring="fill")  # noqa: SLF001
+    focusable(widget, widget._open_dropdown_menu, ring="fill")
     return widget
 
 

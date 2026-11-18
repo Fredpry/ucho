@@ -36,11 +36,12 @@ import os
 import threading
 import time
 from ctypes import c_void_p, wintypes
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
 from . import config, live, transcribe
+from .events import Emitter
 from .i18n import t
 
 log = logging.getLogger(__name__)
@@ -318,7 +319,7 @@ def clipboard_sequence() -> int:
 # dictated text stays and the previous text is not restored.
 
 _CLASS_NAME = "UchoClipboardOwner"
-_owners: dict[int, "DelayedClipboard"] = {}  # hidden window -> its clipboard offer
+_owners: dict[int, DelayedClipboard] = {}  # hidden window -> its clipboard offer
 _class_lock = threading.Lock()
 _class_registered = False
 
@@ -511,11 +512,6 @@ def window_process(window: int | None) -> int | None:
 def window_is_ours(window: int | None) -> bool:
     """True when the window belongs to this process (any Ucho window)."""
     return window_process(window) == os.getpid()
-
-
-def foreground_is_ours() -> bool:
-    """True when the active window belongs to this process (any Ucho window)."""
-    return window_is_ours(foreground_window())
 
 
 def window_exists(window: int) -> bool:
@@ -799,7 +795,7 @@ class Microphone:
                     raise
                 log.warning("Opening the microphone failed - retrying", exc_info=True)
 
-    def _callback(self, in_data, frame_count, time_info, status):  # noqa: ARG002
+    def _callback(self, in_data, frame_count, time_info, status):
         import pyaudiowpatch as pyaudio
 
         self._blocks.append(in_data)
@@ -896,16 +892,18 @@ class Microphone:
 # --- controller ---------------------------------------------------------------------------
 
 
-class DictationController:
+class DictationController(Emitter):
     """State of dictation for the Dictation screen, the small window and the tray."""
 
     def __init__(self, app):
+        super().__init__()
         self.app = app
         self.microphone = Microphone(app.settings["microphone_name"], app.settings["microphone_index"])
         self._downloaded: dict[str, tuple[bool, float]] = {}
         self._reported_missing: str | None = None
         self.recording = False
         self.finishing = False
+        self._finish_token = 0
         self.recording_start = 0.0
         self.queued = 0
         self.model_state = "idle"  # idle / loading / ready / error
@@ -919,24 +917,6 @@ class DictationController:
         self._shown: live.LiveDictation | None = None
         self._message: tuple[str, str] | None = None
         self._message_until = 0.0
-        self._listeners: list[Callable[[str, object], None]] = []
-
-    # --- events -------------------------------------------------------------
-
-    def listen(self, callback: Callable[[str, object], None]) -> None:
-        self._listeners.append(callback)
-
-    def clear_listeners(self) -> None:
-        self._listeners.clear()
-
-    def _emit(self, event: str, data=None) -> None:
-        def deliver():
-            for callback in list(self._listeners):
-                try:
-                    callback(event, data)
-                except Exception:
-                    log.exception("Listener for %s failed", event)
-        self.app.post(deliver)
 
     def show_message(self, text: str, style: str = "ready", seconds: float = 3.0) -> None:
         self._message = (text, style)
@@ -1132,9 +1112,13 @@ class DictationController:
         if not self.recording or self.finishing:
             return
         self.finishing = True
-        self.app.after(int(TAIL_S * 1000), self._finish)
+        token = self._finish_token
+        self.app.after(int(TAIL_S * 1000), lambda: self._finish(token))
 
-    def _finish(self) -> None:
+    def _finish(self, token: int | None = None) -> None:
+        # A cancel (Esc) inside the tail window invalidates the scheduled finish.
+        if token is not None and token != self._finish_token:
+            return
         taken = self.microphone.taken_samples
         recording = self.microphone.stop()
         self.recording = self.finishing = False
@@ -1238,6 +1222,7 @@ class DictationController:
             self._live.cancel()
         self._live = self._shown = None
         self.live_text = ""
+        self._finish_token += 1
         self.microphone.stop()
         self.recording = self.finishing = False
         self._engine_call("resume_after_dictation")

@@ -27,8 +27,10 @@ def dictate():
     return dictate
 
 
-def test_migration_maps_keys_and_values(dictate):
-    new = dictate.migrate_legacy_dictate_settings(LEGACY)
+def test_migration_maps_keys_and_values():
+    from ucho import config
+
+    new = config.migrate_legacy_dictate_settings(LEGACY)
     assert new == {
         "language": "pl",
         "enter": True,
@@ -38,43 +40,37 @@ def test_migration_maps_keys_and_values(dictate):
         "model": "OpenVINO/whisper-large-v3-int8-ov",
         "dictionary": {"Cloud Code": "Claude Code", "Ucha": "Ucho"},
     }
-    assert dictate.migrate_legacy_dictate_settings({"tryb": "wklej"}) == {"mode": "paste"}
+    assert config.migrate_legacy_dictate_settings({"tryb": "wklej"}) == {"mode": "paste"}
 
 
-def test_load_migrates_legacy_file_and_keeps_it(dictate, tmp_path):
+def test_legacy_file_is_migrated_and_kept(tmp_path):
+    from ucho import config
+
     legacy = tmp_path / "dyktuj.json"
     legacy.write_text(json.dumps(LEGACY), encoding="utf-8")
     new = tmp_path / "dictate.json"
 
-    settings = dictate.load_settings(new)
+    assert config.migrate_file(new, legacy, config.migrate_legacy_dictate_settings)
 
     assert legacy.exists()
-    assert new.exists()
     stored = json.loads(new.read_text(encoding="utf-8"))
     assert stored["mode"] == "type" and "tryb" not in stored
-    assert settings["language"] == "pl"
-    assert settings["mode"] == "type"
-    assert settings["dictionary"]["Ucha"] == "Ucho"
-    assert settings["max_recording_s"] == 120
+    assert stored["language"] == "pl"
+    assert stored["dictionary"]["Ucha"] == "Ucho"
+    assert stored["max_recording_s"] == 120
 
 
-def test_existing_new_file_is_not_overwritten(dictate, tmp_path):
+def test_existing_new_file_is_not_overwritten(tmp_path):
+    from ucho import config
+
     (tmp_path / "dyktuj.json").write_text(json.dumps(LEGACY), encoding="utf-8")
     new = tmp_path / "dictate.json"
     new.write_text(json.dumps({"language": "en", "mode": "paste"}), encoding="utf-8")
 
-    settings = dictate.load_settings(new)
+    assert not config.migrate_file(new, tmp_path / "dyktuj.json",
+                                   config.migrate_legacy_dictate_settings)
 
     assert json.loads(new.read_text(encoding="utf-8")) == {"language": "en", "mode": "paste"}
-    assert settings["language"] == "en"
-    assert settings["sounds"] is True  # default fills the gap
-
-
-def test_save_and_load_round_trip(dictate, tmp_path):
-    file = tmp_path / "dictate.json"
-    data = dict(dictate.DEFAULTS, language="en", enter=True)
-    dictate.save_settings(data, file)
-    assert dictate.load_settings(file) == data
 
 
 def test_last_text_from_new_log(dictate, tmp_path):
@@ -101,3 +97,14 @@ def test_last_text_without_any_log(dictate, tmp_path, monkeypatch):
     monkeypatch.setattr(dictate, "LOG_FILE", tmp_path / "dictate.log")
     monkeypatch.setattr(dictate, "LEGACY_LOG_FILE", tmp_path / "dyktuj.log")
     assert dictate.last_text_from_log() == ""
+
+
+def test_last_text_looks_at_the_rotated_log(dictate, tmp_path, monkeypatch):
+    log = tmp_path / "ucho.log"
+    log.write_text("2026-11-15 10:00:00 INFO ucho: Start\n", encoding="utf-8")
+    (tmp_path / "ucho.log.1").write_text(
+        "2026-11-15 09:00:00 INFO ucho.dictation: Recognized 2.0 s of audio in 0.5 s: 'Starszy tekst'\n",
+        encoding="utf-8")
+    monkeypatch.setattr(dictate, "LOG_FILE", log)
+    monkeypatch.setattr(dictate, "LEGACY_LOG_FILE", tmp_path / "dictate.log")
+    assert dictate.last_text_from_log() == "Starszy tekst"

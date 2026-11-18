@@ -262,7 +262,7 @@ if (-not $entry) {
 # them, and the user may want to reinstall.
 $dataFolders = @('.venv', 'models', 'modele') | ForEach-Object { Join-Path $Root $_ }
 $dataFiles = @('settings.json', 'ustawienia.json', 'dictate.json', 'dyktuj.json',
-               'ucho.log', 'dictate.log', 'dyktuj.log', 'install.log',
+               'ucho.log', 'ucho.log.1', 'dictate.log', 'dyktuj.log', 'install.log',
                'Ucho (diagnostics).cmd', 'Ucho (diagnostyka).cmd') | ForEach-Object { Join-Path $Root $_ }
 
 if ($KeepEnvironment) {

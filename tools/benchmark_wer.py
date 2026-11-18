@@ -37,7 +37,7 @@ import time
 import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Sequence
+from collections.abc import Sequence
 
 AUDIO_SUFFIXES = (".wav", ".flac", ".mp3")
 HYP_SUFFIX = ".hyp.txt"

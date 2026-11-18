@@ -389,5 +389,7 @@
   "No usable GPU: the 8B model would be slow on the CPU; the 4B model writes good Polish.": "Brak karty graficznej, z której Ucho może korzystać: model 8B byłby na procesorze wolny, a model 4B dobrze pisze po polsku.",
   "Language model (optional, for meeting names and summaries)": "Model językowy (opcjonalny, do nazw i podsumowań spotkań)",
   " (recommended)": " (zalecany)",
-  "Recommended for this computer: {model}. {reason}": "Zalecany dla tego komputera: {model}. {reason}"
+  "Recommended for this computer: {model}. {reason}": "Zalecany dla tego komputera: {model}. {reason}",
+  "Could not load the language model: {error}": "Nie udało się wczytać modelu językowego: {error}",
+  "Could not save the recording details (meta.json).": "Nie udało się zapisać szczegółów nagrania (meta.json)."
 }

@@ -29,18 +29,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import session as sessions
-from .merge import META_FILE, TRANSCRIPT_MD, display_title
+from .merge import META_FILE, TRANSCRIPT_MD, display_title, format_hms
 
 
 class ArchiveError(Exception):
     """Bad input from the caller (invalid id, empty query); the message is shown as is."""
-
-
-def hms(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    h, rest = divmod(seconds, 3600)
-    m, s = divmod(rest, 60)
-    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def fold(text: str) -> str:
@@ -169,6 +162,8 @@ class Archive:
         if not isinstance(id_, str) or not id_ or re.search(r"[\\/:]|\.\.", id_):
             raise ArchiveError(f"Invalid id: {id_!r}")
         path = self.folder / id_
+        if id_ == "." or path.parent != self.folder or sessions.is_link(path):
+            raise ArchiveError(f"Invalid id: {id_!r}")
         if sessions.is_tombstone(id_) or not path.is_dir():
             raise ArchiveError(f"No meeting with id {id_!r}. Use list_meetings.")
         return path
@@ -186,7 +181,7 @@ class Archive:
             "id": session.name,
             "title": display_title(meta) or session.name,
             "date": meta.get("date") or sessions.date_from_name(session.name),
-            "duration": hms(meta["duration_s"]) if meta.get("duration_s") else None,
+            "duration": format_hms(meta["duration_s"]) if meta.get("duration_s") else None,
             "transcript": sessions.find_file(session, TRANSCRIPT_MD) is not None,
             "summary": sessions.find_file(session, sessions.SUMMARY_MD) is not None,
         }

@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from ctypes import wintypes
-from typing import Callable
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +27,6 @@ MUTEX_NAME = "Local\\Ucho.App"
 COMMANDS = ("show", "dictate", "record")
 ERROR_ALREADY_EXISTS = 183
 WAIT_OBJECT_0 = 0
-WAIT_TIMEOUT = 0x102
 EVENT_MODIFY_STATE = 0x0002
 SYNCHRONIZE = 0x00100000
 ASFW_ANY = 0xFFFFFFFF

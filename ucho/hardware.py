@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
 
 from . import config
 from .i18n import language, t

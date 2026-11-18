@@ -28,7 +28,7 @@ import re
 import threading
 import time
 import unicodedata
-from typing import Callable
+from collections.abc import Callable
 
 from . import config, llm, session
 from .i18n import t
@@ -227,7 +227,7 @@ class LLMEngine:
                     last_error = error
                     log.warning("Could not build the LLM on %s: %s", device, error)
 
-        raise RuntimeError(f"Could not load the language model: {last_error}")
+        raise RuntimeError(t("Could not load the language model: {error}", error=last_error))
 
     def release(self) -> None:
         """Frees the memory held by the model - this is the 'off after use'."""
@@ -553,7 +553,7 @@ def _names(value, transcript: str | None = None, known=()) -> list[str]:
         if {name.lower(), name.lower().split()[0]} & NOT_NAMES:
             continue
         if comparable is not None and not _name_in_text(name, comparable):
-            log.info("Rejecting name %r - not said in the transcript", name)
+            log.info("Rejecting 1 name not said in the transcript")
             continue
         seen.add(name.lower())
         result.append(name[:1].upper() + name[1:])

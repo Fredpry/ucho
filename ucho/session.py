@@ -63,11 +63,22 @@ LEGACY_META_KEYS = {
 LEGACY_SEGMENT_KEYS = {"koniec": "end", "tekst": "text", "mowca": "speaker"}
 
 
+def is_link(path: Path) -> bool:
+    """True for a symlink or a junction; an unreadable path counts as a link."""
+    try:
+        return path.is_symlink() or path.is_junction()
+    except OSError:
+        return True
+
+
 def find_file(session: Path, name: str) -> Path | None:
-    """The session file under its current name, else under the old one."""
+    """The session file under its current name, else under the old one (never a link)."""
     for candidate in (name, LEGACY_FILES.get(name)):
-        if candidate and (session / candidate).exists():
-            return session / candidate
+        if not candidate:
+            continue
+        path = session / candidate
+        if path.is_file() and not is_link(path):
+            return path
     return None
 
 

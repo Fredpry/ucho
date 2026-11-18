@@ -20,7 +20,7 @@ import logging
 import sys
 import threading
 from ctypes import byref, wintypes
-from typing import Callable
+from collections.abc import Callable
 
 from .i18n import t
 
@@ -35,7 +35,6 @@ VK_ESCAPE = 0x1B
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 WM_APP_ESC = 0x8001
-ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 
 _MODIFIERS = {"ctrl": MOD_CONTROL, "control": MOD_CONTROL, "alt": MOD_ALT,
               "shift": MOD_SHIFT, "win": MOD_WIN, "cmd": MOD_WIN}

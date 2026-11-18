@@ -507,3 +507,34 @@ def test_meeting_controller_shown_status():
     m_raises = make_ctrl(_RaisingEngine())
     m_raises.transcribing = True
     assert m_raises.shown_status == "Transcribing on GPU..."
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
+def test_cancel_during_tail_window_invalidates_scheduled_finish(monkeypatch):
+    from ucho import dictation
+
+    monkeypatch.setattr(dictation, "dictation_target", lambda: None)
+    monkeypatch.setattr(dictation.DictationController, "model_key", lambda self: ("M", "GPU"))
+
+    eng = _make_engine()
+    try:
+        app = _FakeDictApp(eng, live_on=False)
+        scheduled: list = []
+        app.after = lambda _ms, fn: scheduled.append(fn)
+        ctrl = dictation.DictationController(app)
+        ctrl.microphone = _FakeMic(_speech(1.2, pause_every=99))
+        assert ctrl.start() is True
+        ctrl.stop()
+        assert ctrl.finishing and len(scheduled) == 1
+        ctrl.cancel()
+        assert not ctrl.recording and not ctrl.finishing
+
+        # A new dictation starts; the stale finish must not touch it.
+        ctrl.microphone = _FakeMic(_speech(1.2, pause_every=99))
+        assert ctrl.start() is True
+        scheduled.pop(0)()
+        assert ctrl.recording is True
+        assert ctrl.queued == 0
+        ctrl.cancel()
+    finally:
+        eng.stop()

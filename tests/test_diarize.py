@@ -364,7 +364,7 @@ def test_run_worker_parses_turns_retries_and_handles_errors_and_cancel(tmp_path:
         return popen
 
     payload = {"turns": [[4.0, 6.0, 1], [2.0, 2.0, 0], [3.0, 1.0, 0], [0.5, 2.5, 0]]}
-    stdout_bytes = (f"noise line\n{json.dumps(payload)}\n\n").encode("utf-8")
+    stdout_bytes = (f"noise line\n{json.dumps(payload)}\n\n").encode()
     turns = run_worker(track, 0.55, 3, popen=make_popen(stdout_bytes))
     assert turns == [Turn(0.5, 2.5, 0), Turn(4.0, 6.0, 1)]
     proc = created[-1]
