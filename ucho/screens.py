@@ -68,7 +68,7 @@ def open_path(path: Path) -> None:
     try:
         os.startfile(str(path))  # noqa: S606 - opens the user's own folder in Explorer
     except Exception as error:
-        log.warning("Could not open %s: %s", path, error)
+        log.warning("Could not open a folder in Explorer: %s", type(error).__name__)
 
 
 def describe(meta: dict, folder: Path) -> tuple[str, str]:

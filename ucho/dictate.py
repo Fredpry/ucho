@@ -94,7 +94,7 @@ def last_text_from_log(file: Path | None = None) -> str:
     """The last non-empty dictation from the log, so it survives an app restart."""
     if file is not None:
         return _last_text_in(file)
-    for candidate in (LOG_FILE, LEGACY_LOG_FILE):
+    for candidate in (LOG_FILE, LOG_FILE.with_name(LOG_FILE.name + ".1"), LEGACY_LOG_FILE):
         text = _last_text_in(candidate)
         if text:
             return text

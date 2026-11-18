@@ -101,3 +101,14 @@ def test_last_text_without_any_log(dictate, tmp_path, monkeypatch):
     monkeypatch.setattr(dictate, "LOG_FILE", tmp_path / "dictate.log")
     monkeypatch.setattr(dictate, "LEGACY_LOG_FILE", tmp_path / "dyktuj.log")
     assert dictate.last_text_from_log() == ""
+
+
+def test_last_text_looks_at_the_rotated_log(dictate, tmp_path, monkeypatch):
+    log = tmp_path / "ucho.log"
+    log.write_text("2026-11-15 10:00:00 INFO ucho: Start\n", encoding="utf-8")
+    (tmp_path / "ucho.log.1").write_text(
+        "2026-11-15 09:00:00 INFO ucho.dictation: Recognized 2.0 s of audio in 0.5 s: 'Starszy tekst'\n",
+        encoding="utf-8")
+    monkeypatch.setattr(dictate, "LOG_FILE", log)
+    monkeypatch.setattr(dictate, "LEGACY_LOG_FILE", tmp_path / "dictate.log")
+    assert dictate.last_text_from_log() == "Starszy tekst"

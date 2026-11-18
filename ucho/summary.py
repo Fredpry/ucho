@@ -553,7 +553,7 @@ def _names(value, transcript: str | None = None, known=()) -> list[str]:
         if {name.lower(), name.lower().split()[0]} & NOT_NAMES:
             continue
         if comparable is not None and not _name_in_text(name, comparable):
-            log.info("Rejecting name %r - not said in the transcript", name)
+            log.info("Rejecting 1 name not said in the transcript")
             continue
         seen.add(name.lower())
         result.append(name[:1].upper() + name[1:])

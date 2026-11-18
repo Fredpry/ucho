@@ -61,13 +61,6 @@ class PartialDeleteError(DeleteError):
         self.rest = rest
 
 
-def _is_link(path: Path) -> bool:
-    try:
-        return path.is_symlink() or path.is_junction()
-    except OSError:
-        return True
-
-
 def session_folder(recordings_dir: Path, folder: Path) -> Path:
     """`folder` resolved, after checking that it is a session folder of the archive.
 
@@ -84,13 +77,13 @@ def session_folder(recordings_dir: Path, folder: Path) -> Path:
     if not root.is_dir():
         raise DeleteError("The recordings folder is not a folder")
     folder = Path(folder).absolute()
-    if _is_link(folder):
+    if session.is_link(folder):
         raise DeleteError("A link, not a session folder")
     try:
         resolved = folder.resolve(strict=True)
     except (OSError, RuntimeError) as error:
         raise DeleteError("Session folder not found") from error
-    if resolved == root or resolved.parent != root or not resolved.is_dir() or _is_link(resolved):
+    if resolved == root or resolved.parent != root or not resolved.is_dir() or session.is_link(resolved):
         raise DeleteError("Not a session folder of the recordings folder")
     # The path as given must name the same folder (no "..", no other spelling
     # that resolves differently): its own parent resolves to the archive too.
@@ -151,7 +144,7 @@ def remove_leftovers(recordings_dir: Path) -> int:
         return 0
     removed = 0
     for folder in candidates:
-        if _is_link(folder) or not folder.is_dir():
+        if session.is_link(folder) or not folder.is_dir():
             continue
         try:
             shutil.rmtree(folder, onexc=_clear_readonly_and_retry)
@@ -262,7 +255,7 @@ def audio_expired(folder: Path, days: int, now: datetime | None = None,
                   active: Callable[[Path], bool] | None = None) -> bool:
     """True when retention may remove the audio of `folder` now."""
     days = retention_days(days)
-    if not days or _is_link(folder) or not folder.is_dir():
+    if not days or session.is_link(folder) or not folder.is_dir():
         return False
     if active is not None and active(folder):
         return False

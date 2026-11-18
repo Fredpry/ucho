@@ -309,3 +309,22 @@ def test_label_and_size():
     assert llm.size("C:\\models\\x.gguf") == ""
     assert llm.size("") == ""
     assert llm.size(None) == ""
+
+
+def _nested_array(levels: int) -> bytes:
+    """An array (type 9) that holds one array, ... down to an empty array of ints."""
+    payload = struct.pack("<IQ", 4, 0)  # innermost: uint32 elements, count 0
+    for _ in range(levels):
+        payload = struct.pack("<IQ", 9, 1) + payload
+    return payload
+
+
+def test_gguf_nested_arrays_are_limited(tmp_path: Path):
+    ok = tmp_path / "ok.gguf"
+    ok.write_bytes(_gguf_header([_gguf_kv("tokenizer.x", 9, _nested_array(2)),
+                                 _gguf_kv("general.file_type", 4, struct.pack("<I", 2))]))
+    assert llm.gguf_file_type(ok) == 2
+    deep = tmp_path / "deep.gguf"
+    deep.write_bytes(_gguf_header([_gguf_kv("tokenizer.x", 9, _nested_array(30))]))
+    with pytest.raises(ValueError, match="nested"):
+        llm.gguf_file_type(deep)

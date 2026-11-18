@@ -455,7 +455,7 @@ finally:
 $progressText = T 'pobrano {0} MB' 'downloaded {0} MB'
 
 if (-not $SkipModel) {
-    $size = & $VenvPy -c "from ucho import config; print(config.MODELS.get(r'$Model', {}).get('size', '?'))"
+    $size = & $VenvPy -c "import sys; from ucho import config; print(config.MODELS.get(sys.argv[1], {}).get('size', '?'))" $Model
     if ($LASTEXITCODE -ne 0 -or -not $size) { $size = '?' }
     $size = "$size".Trim()
     if ($PL) { $size = $size -replace '\.', ',' }
@@ -472,7 +472,7 @@ if (-not $SkipModel) {
 
 # Summaries are optional and off by default: transcription is the core of Ucho.
 if ($WithSummary) {
-    $llmSize = & $VenvPy -c "from ucho import config; print(config.LLM_MODELS.get(r'$LlmModel', {}).get('size', '?'))"
+    $llmSize = & $VenvPy -c "import sys; from ucho import config; print(config.LLM_MODELS.get(sys.argv[1], {}).get('size', '?'))" $LlmModel
     if ($LASTEXITCODE -ne 0 -or -not $llmSize) { $llmSize = '?' }
     $llmSize = "$llmSize".Trim()
     if ($PL) { $llmSize = $llmSize -replace '\.', ',' }

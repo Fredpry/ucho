@@ -169,6 +169,8 @@ class Archive:
         if not isinstance(id_, str) or not id_ or re.search(r"[\\/:]|\.\.", id_):
             raise ArchiveError(f"Invalid id: {id_!r}")
         path = self.folder / id_
+        if id_ == "." or path.parent != self.folder or sessions.is_link(path):
+            raise ArchiveError(f"Invalid id: {id_!r}")
         if sessions.is_tombstone(id_) or not path.is_dir():
             raise ArchiveError(f"No meeting with id {id_!r}. Use list_meetings.")
         return path

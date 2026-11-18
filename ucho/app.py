@@ -19,6 +19,7 @@ import argparse
 import copy
 import json
 import logging
+import logging.handlers
 import queue
 import sys
 import tempfile
@@ -915,12 +916,12 @@ def run(argv: list[str] | None = None) -> int:
     if options.smoke_test is not None:
         return smoke_test(options)
 
+    # Capped: about 2 MB plus one older file (ucho.log.1); the log holds dictated text.
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        filename=str(config.LOG_FILE),
-        filemode="a",
-        encoding="utf-8",
+        handlers=[logging.handlers.RotatingFileHandler(
+            str(config.LOG_FILE), maxBytes=2_000_000, backupCount=1, encoding="utf-8")],
     )
     _install_excepthooks()
     command = "record" if options.record else "dictate" if options.dictate else "show"

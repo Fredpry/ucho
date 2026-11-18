@@ -97,7 +97,10 @@ def _skip_bytes(f: BinaryIO, n: int, file_size: int) -> None:
     f.seek(n, 1)
 
 
-def _skip_gguf_value(f: BinaryIO, vtype: int, file_size: int) -> None:
+_GGUF_MAX_ARRAY_DEPTH = 4  # real headers nest at most one level; deeper means a crafted file
+
+
+def _skip_gguf_value(f: BinaryIO, vtype: int, file_size: int, depth: int = 0) -> None:
     fixed = _GGUF_FIXED_SIZES.get(vtype)
     if fixed is not None:
         _skip_bytes(f, fixed, file_size)
@@ -107,13 +110,15 @@ def _skip_gguf_value(f: BinaryIO, vtype: int, file_size: int) -> None:
         _skip_bytes(f, length, file_size)
         return
     if vtype == 9:
+        if depth >= _GGUF_MAX_ARRAY_DEPTH:
+            raise ValueError("GGUF arrays are nested too deeply")
         elem_type, count = struct.unpack("<IQ", _read_exact(f, 12, file_size))
         elem_fixed = _GGUF_FIXED_SIZES.get(elem_type)
         if elem_fixed is not None:
             _skip_bytes(f, count * elem_fixed, file_size)
         elif elem_type in (8, 9):
             for _ in range(count):
-                _skip_gguf_value(f, elem_type, file_size)
+                _skip_gguf_value(f, elem_type, file_size, depth + 1)
         else:
             raise ValueError(f"Unknown GGUF array element type: {elem_type}")
         return

@@ -200,3 +200,64 @@ def test_server_over_stdio(archive, flag):
     assert "Dostawca stali" in responses[1]["result"]["content"][0]["text"]
     meetings = json.loads(responses[2]["result"]["content"][0]["text"])
     assert {m["id"] for m in meetings} == {OLD_ID, NEW_ID, NEW_ID_2}
+
+
+@pytest.mark.parametrize("message", [[], 5, "text", None, [1, 2]])
+def test_non_object_message_is_invalid_request(archive, message):
+    response = handle(archive, message)
+    assert response == {"jsonrpc": "2.0", "id": None,
+                        "error": {"code": -32600, "message": "Invalid Request"}}
+
+
+@pytest.mark.parametrize("params", [[], "x", 7, None])
+def test_non_object_params_are_ignored(archive, params):
+    response = handle(archive, {"jsonrpc": "2.0", "id": 4, "method": "tools/list",
+                                "params": params})
+    assert "tools" in response["result"]
+
+
+def test_server_survives_bad_messages(archive):
+    lines = ['[1, "x"]', '7', 'null',
+             '{"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": [1]}']
+    process = subprocess.run(
+        [sys.executable, str(ROOT / "mcp_server.py"), "--recordings-dir", str(archive.folder)],
+        input=("\n".join(lines) + "\n").encode("utf-8"), capture_output=True, timeout=30,
+        check=True)
+    responses = [json.loads(line) for line in process.stdout.decode("utf-8").splitlines()]
+    assert responses[0][0]["error"]["code"] == -32600
+    assert responses[1]["error"]["code"] == -32600
+    assert responses[2]["error"]["code"] == -32600
+    assert responses[3]["id"] == 9 and "tools" in responses[3]["result"]
+
+
+def _junction_or_skip(link: Path, target: Path) -> None:
+    if sys.platform != "win32":
+        pytest.skip("junctions are Windows only")
+    import _winapi
+
+    _winapi.CreateJunction(str(target), str(link))
+
+
+def test_archive_rejects_dot_and_links(archive, tmp_path):
+    from ucho_mcp.server import ArchiveError
+
+    outside = tmp_path.parent / (tmp_path.name + "_outside")
+    outside.mkdir()
+    _junction_or_skip(archive.folder / "2026-11-14_10-00_Link", outside)
+    for bad in (".", "2026-11-14_10-00_Link"):
+        with pytest.raises(ArchiveError):
+            archive.session(bad)
+    assert archive.session(NEW_ID).name == NEW_ID
+
+
+def test_find_file_ignores_directories_and_links(tmp_path):
+    from ucho import session as sessions
+
+    folder = tmp_path / "s"
+    folder.mkdir()
+    (folder / "transcript.md").mkdir()  # a directory with the file's name
+    assert sessions.find_file(folder, "transcript.md") is None
+    (folder / "transcript.md").rmdir()
+    (folder / "transcript.md").write_text("x", encoding="utf-8")
+    assert sessions.find_file(folder, "transcript.md") == folder / "transcript.md"
+    assert sessions.is_link(folder / "transcript.md") is False

@@ -237,7 +237,7 @@ class MeetingController:
         self.session_name_source = name_source
         self.recording_start = time.time()
         self.message = (("; ".join(recorder.warnings)), "warning") if recorder.warnings else None
-        log.info("Recording started: %s", folder.name)
+        log.info("Recording started")
         self._emit("state")
         return True
 
@@ -419,13 +419,13 @@ class MeetingController:
         recognized while recording (live_meeting.ChunkCache).
         """
         if self.is_active(folder) or self.queue_position(folder):
-            log.info("Transcription of %s already running or queued", folder.name)
+            log.info("Transcription already running or queued")
             return True
         if self.busy or self._queue:
             self._queue.append((folder, files, meta))
             if cache is not None:
                 self._caches[_folder_key(folder)] = cache
-            log.info("Transcription of %s queued (%d waiting)", folder.name, len(self._queue))
+            log.info("Transcription queued (%d waiting)", len(self._queue))
             self._emit("state")
             return True
         return self._start(folder, files, meta, cache)
@@ -436,7 +436,7 @@ class MeetingController:
             folder, files, meta = self._queue.popleft()
             cache = self._caches.pop(_folder_key(folder), None)
             if not folder.is_dir():
-                log.warning("Queued session %s no longer exists - skipped", folder.name)
+                log.warning("Queued session no longer exists - skipped")
                 continue
             if self._start(folder, files, meta, cache):
                 return
@@ -837,8 +837,8 @@ def rename_session(folder: Path, result: dict) -> Path:
     except OSError as error:
         # Most common reason: the folder is open in Explorer. That is not a
         # transcription error: the files are in place, only the name stays.
-        log.warning("Could not rename %s -> %s: %s", folder.name, new_name, error)
+        log.warning("Could not rename a session folder: %s", type(error).__name__)
         return folder
-    log.info("Session renamed: %s -> %s", folder.name, target.name)
+    log.info("Session folder renamed")
     return target
 

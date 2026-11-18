@@ -233,9 +233,14 @@ def call_tool(archive: Archive, name: str, args: dict) -> str:
 
 def handle(archive: Archive, message: dict) -> dict | None:
     """One JSON-RPC message -> response (or None for notifications)."""
+    if not isinstance(message, dict):
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "Invalid Request"}}
     method = message.get("method")
     id_ = message.get("id")
-    params = message.get("params") or {}
+    params = message.get("params")
+    if not isinstance(params, dict):
+        params = {}
 
     if id_ is None:
         return None  # notification, e.g. notifications/initialized
@@ -315,11 +320,18 @@ def main(argv: list[str] | None = None) -> int:
             response = {"jsonrpc": "2.0", "id": None,
                         "error": {"code": -32700, "message": "Parse error"}}
         else:
-            if isinstance(message, list):  # JSON-RPC batch
-                response = [r for r in (handle(archive, m) for m in message) if r]
-                response = response or None
-            else:
-                response = handle(archive, message)
+            try:
+                if isinstance(message, list):  # JSON-RPC batch
+                    response = [r for r in (handle(archive, m) for m in message) if r]
+                    response = response or None
+                else:
+                    response = handle(archive, message)
+            except Exception:  # noqa: BLE001 - one bad message must not end the server
+                log.exception("Could not handle a message")
+                id_ = message.get("id") if isinstance(message, dict) else None
+                response = None if id_ is None and isinstance(message, dict) else {
+                    "jsonrpc": "2.0", "id": id_,
+                    "error": {"code": -32603, "message": "Internal error"}}
         if response is not None:
             stdout.write(json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n")
             stdout.flush()
