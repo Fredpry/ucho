@@ -906,6 +906,7 @@ class DictationController:
         self._reported_missing: str | None = None
         self.recording = False
         self.finishing = False
+        self._finish_token = 0
         self.recording_start = 0.0
         self.queued = 0
         self.model_state = "idle"  # idle / loading / ready / error
@@ -1132,9 +1133,13 @@ class DictationController:
         if not self.recording or self.finishing:
             return
         self.finishing = True
-        self.app.after(int(TAIL_S * 1000), self._finish)
+        token = self._finish_token
+        self.app.after(int(TAIL_S * 1000), lambda: self._finish(token))
 
-    def _finish(self) -> None:
+    def _finish(self, token: int | None = None) -> None:
+        # A cancel (Esc) inside the tail window invalidates the scheduled finish.
+        if token is not None and token != self._finish_token:
+            return
         taken = self.microphone.taken_samples
         recording = self.microphone.stop()
         self.recording = self.finishing = False
@@ -1238,6 +1243,7 @@ class DictationController:
             self._live.cancel()
         self._live = self._shown = None
         self.live_text = ""
+        self._finish_token += 1
         self.microphone.stop()
         self.recording = self.finishing = False
         self._engine_call("resume_after_dictation")

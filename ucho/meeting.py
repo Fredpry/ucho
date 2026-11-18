@@ -251,8 +251,10 @@ class MeetingController:
         # before the transcription below starts and lands in the cache.
         live, self.live = self.live, None
         cache = live.stop() if live is not None else None
-        result = self.recorder.stop()
-        self.recorder = None
+        try:
+            result = self.recorder.stop()
+        finally:
+            self.recorder = None
         files = {n: d["file"] for n, d in result["tracks"].items()}
         self.last_stopped = result["folder"]
         log.info("Recording stopped: %.0f s", result["duration_s"])
@@ -275,13 +277,17 @@ class MeetingController:
         if live is not None:
             log.info("Live transcription while recording: %d chunks done, %d failed%s",
                      live.done, live.errors, ", stopped early (too slow)" if live.gave_up else "")
+        self.message = None
         if self.live_segments:
             # Keeps the live text on disk until the transcription replaces it.
             self._save_partial(result["folder"], self.live_segments, meta)
         else:
-            (result["folder"] / "meta.json").write_text(
-                json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
-        self.message = None
+            try:
+                (result["folder"] / "meta.json").write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+            except OSError as error:
+                log.warning("Could not write meta.json: %s", type(error).__name__)
+                self.message = (t("Could not save the recording details (meta.json)."), "warning")
         self._emit("state")
         if self.settings["transcribe_after_stop"]:
             self.transcribe(result["folder"], files, meta, cache=cache)
@@ -522,13 +528,15 @@ class MeetingController:
                 self._titles.append(folder)
             # Summarizing first: `busy` must not drop between the two steps,
             # or a queued session would start in between.
-            self.summarizing = expected
-            self.transcribing = False
+            # The results are set before `transcribing` drops: the UI thread
+            # reads them as soon as it sees the job is no longer running.
             self.progress = 1.0
             self.last_segments, self.last_meta = segments, full
             self.status_text = t("Done in {time} s  ·  {device}  ·  {n} utterances",
                                  time=f"{full['transcription_time_s']:.0f}", device=used_device,
                                  n=len(segments))
+            self.summarizing = expected
+            self.transcribing = False
             self._emit("transcribed", (folder, segments, full, expected))
             if expected:
                 self.summarize(folder, segments, full)
@@ -544,7 +552,11 @@ class MeetingController:
             self._emit("state")
             self._finished()
 
-        speakers = self._speaker_pass()
+        try:
+            speakers = self._speaker_pass()
+        except Exception:
+            log.exception("Speaker detection could not start")
+            speakers = None
         self._job = self.app.engine.transcribe(
             files, model, device, self.settings["language"],
             progress=progress, status=status, on_done=done, on_error=failed, report=report,

@@ -350,11 +350,11 @@ class _Track:
         try:
             stream.stop_stream()
         except Exception:
-            pass
+            log.warning("Could not stop the audio stream of track %s", self.name, exc_info=True)
         try:
             stream.close()
         except Exception:
-            pass
+            log.warning("Could not close the audio stream of track %s", self.name, exc_info=True)
 
     def finish(self) -> None:
         self.stop_stream()
@@ -366,7 +366,7 @@ class _Track:
             try:
                 self._out.close()
             except Exception:
-                pass
+                log.warning("Could not close the FLAC file of track %s", self.name, exc_info=True)
             self._out = None
 
     # --- processing -----------------------------------------------------
@@ -398,15 +398,17 @@ class _Track:
                 self.error = str(error)
 
         # Flush the resampler so the tail of the buffer is not lost.
-        if self._resampler is not None and self._out is not None:
+        resampler = self._resampler
+        if resampler is not None and self._out is not None:
             try:
-                tail = self._resampler.resample_chunk(
+                tail = resampler.resample_chunk(
                     np.zeros(0, dtype=np.float32), last=True
                 )
                 if tail is not None and len(tail):
                     self._out.write(np.asarray(tail, dtype=np.float32))
             except Exception:
-                pass
+                log.warning("Could not flush the resampler tail of track %s", self.name,
+                            exc_info=True)
 
     def _write_block(self, data: bytes) -> None:
         if self._out is None:
@@ -528,16 +530,25 @@ class Recorder:
         self._pa = new_pyaudio()
         self.start_ts = time.time()
 
-        for name, file, dev in chosen:
-            track = _Track(name, folder / file, dev, self._listener)
-            track.open_file()
-            try:
-                track.start(self._pa)
-            except Exception as error:
+        try:
+            for name, file, dev in chosen:
+                track = _Track(name, folder / file, dev, self._listener)
+                try:
+                    track.open_file()
+                    track.start(self._pa)
+                except Exception as error:
+                    track.finish()
+                    self.warnings.append(
+                        t("Could not open “{name}”: {error}", name=dev.name, error=error))
+                    continue
+                self._tracks[name] = track
+        except BaseException:
+            for track in self._tracks.values():
                 track.finish()
-                self.warnings.append(t("Could not open “{name}”: {error}", name=dev.name, error=error))
-                continue
-            self._tracks[name] = track
+            self._tracks.clear()
+            close_pyaudio(self._pa)
+            self._pa = None
+            raise
 
         if not self._tracks:
             close_pyaudio(self._pa)
@@ -603,7 +614,10 @@ class Recorder:
             dead = [n for n, s in self._tracks.items() if s.dead]
             if dead:
                 log.warning("Tracks without data: %s - restarting streams", dead)
-                self._restart_streams()
+                try:
+                    self._restart_streams()
+                except Exception:
+                    log.exception("Restarting the audio streams failed")
 
     def _restart_streams(self) -> None:
         """Full PortAudio restart - otherwise it does not see a new default device."""
