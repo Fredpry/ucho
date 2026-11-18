@@ -18,7 +18,7 @@ from pathlib import Path
 import customtkinter as ctk
 
 from . import config, retention, session, theme, ui
-from .archive import Match, fold, hms, query_words
+from .archive import Match, fold, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .meeting import same_folder
@@ -76,7 +76,7 @@ def describe(meta: dict, folder: Path) -> tuple[str, str]:
     title = display_title(meta) or session_title(folder.name)
     parts = [meta.get("date") or session.date_from_name(folder.name)]
     if meta.get("duration_s"):
-        parts.append(hms(meta["duration_s"]))
+        parts.append(format_hms(meta["duration_s"]))
     return title, "  ·  ".join(p for p in parts if p)
 
 

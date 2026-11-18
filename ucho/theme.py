@@ -292,20 +292,6 @@ def apply_fonts() -> None:
         {"family": Fonts.sans, "size": SM, "weight": "normal"})
 
 
-def windows_dark_mode() -> bool | None:
-    """The Windows app theme (AppsUseLightTheme), None when unknown."""
-    if sys.platform != "win32":
-        return None
-    try:
-        import winreg
-
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
-                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
-            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
-    except OSError:
-        return None
-
-
 def reduced_motion() -> bool:
     """Windows "Animation effects" turned off (Settings > Accessibility > Visual effects)."""
     if sys.platform != "win32":

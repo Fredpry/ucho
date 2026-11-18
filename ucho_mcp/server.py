@@ -27,9 +27,8 @@ from pathlib import Path
 
 from ucho import session as sessions
 from ucho.archive import Archive, ArchiveError
-from ucho.archive import hms as _hms
 from ucho.config import VERSION  # one version for the app and the server
-from ucho.merge import TRANSCRIPT_MD, speaker_label
+from ucho.merge import TRANSCRIPT_MD, format_hms, speaker_label
 
 log = logging.getLogger("ucho_mcp")
 
@@ -139,7 +138,7 @@ def _date(text: str | None) -> datetime | None:
 
 def search(archive: Archive, query: str, limit: int) -> list[dict]:
     """search_transcripts result rows (the search itself lives in ucho.archive)."""
-    return [{"id": h.id, "time": _hms(h.start), "speaker": h.name or _speaker(h.speaker),
+    return [{"id": h.id, "time": format_hms(h.start), "speaker": h.name or _speaker(h.speaker),
              "excerpt": h.text[:400]} for h in archive.search(query, limit)]
 
 
@@ -205,7 +204,7 @@ def call_tool(archive: Archive, name: str, args: dict) -> str:
             at = float(seg.get("start", 0))
             if (start is not None and at < start) or (end is not None and at > end):
                 continue
-            lines.append(f"[{_hms(at)}] {_speaker(seg.get('speaker'), names)}: {seg['text']}")
+            lines.append(f"[{format_hms(at)}] {_speaker(seg.get('speaker'), names)}: {seg['text']}")
         return "\n".join(lines)
 
     if name == "get_summary":

@@ -4,6 +4,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from ucho import config
 
 LEGACY = {
@@ -156,3 +158,26 @@ def test_installer_writes_only_known_settings_keys():
     block = block[:block.index("}")]
     keys = {line.split("=")[0].strip() for line in block.splitlines()[1:] if "=" in line}
     assert keys and keys <= set(config.DEFAULTS), keys - set(config.DEFAULTS)
+
+
+def test_write_json_failure_keeps_the_old_file(tmp_path, monkeypatch):
+    file = tmp_path / "sub" / "data.json"
+    config.write_json(file, {"a": 1, "b": "zażółć"})
+    assert json.loads(file.read_text(encoding="utf-8")) == {"a": 1, "b": "zażółć"}
+
+    def broken_replace(_src, _dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config.os, "replace", broken_replace)
+    with pytest.raises(OSError):
+        config.write_json(file, {"a": 2})
+    assert json.loads(file.read_text(encoding="utf-8")) == {"a": 1, "b": "zażółć"}
+    assert not (file.parent / "data.json.tmp").exists()
+
+
+def test_settings_save_failure_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    settings = config.Settings(tmp_path / "settings.json")
+    monkeypatch.setattr(config.os, "replace", lambda *_a: (_ for _ in ()).throw(OSError("x")))
+    with caplog.at_level("WARNING"):
+        settings.save()
+    assert "Could not save settings: OSError" in caplog.text

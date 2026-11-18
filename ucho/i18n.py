@@ -20,7 +20,6 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-UI_LANGUAGES = ("auto", "pl", "en")
 SOURCE_LANGUAGE = "en"
 _LOCALE_DIR = Path(__file__).resolve().parent / "locale"
 

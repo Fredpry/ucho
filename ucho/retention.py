@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import session
+from .config import write_json
 from .merge import META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_MD, TRANSCRIPTION_CANCELLED
 
 log = logging.getLogger(__name__)
@@ -317,9 +318,7 @@ def _mark_audio_removed(folder: Path, when: datetime) -> None:
         loaded = json.loads(file.read_text(encoding="utf-8"))
         raw = loaded if isinstance(loaded, dict) else {}
     raw[AUDIO_REMOVED_KEY] = when.isoformat(timespec="seconds")
-    temp = file.with_name(file.name + ".tmp")
-    temp.write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(temp, file)
+    write_json(file, raw)
 
 
 def remove_audio(recordings_dir: Path, folder: Path, now: datetime | None = None) -> int:

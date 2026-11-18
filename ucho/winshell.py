@@ -374,24 +374,6 @@ def set_jump_list(app_id: str, tasks: list[dict]) -> bool:
                 _release(pointer)
 
 
-def clear_jump_list(app_id: str) -> bool:
-    """Removes the custom Jump List of `app_id` (ICustomDestinationList::DeleteList)."""
-    if sys.platform != "win32":
-        return False
-    destinations = c_void_p()
-    try:
-        _com_start()
-        destinations = _create(_CLSID_DESTINATION_LIST, _IID_CUSTOM_DESTINATION_LIST)
-        _method(destinations, _IDX_DL_DELETE_LIST, wintypes.LPCWSTR)(destinations, app_id)
-        return True
-    except Exception:
-        log.debug("Could not delete the Jump List", exc_info=True)
-        return False
-    finally:
-        if destinations:
-            _release(destinations)
-
-
 # --- start with Windows ---------------------------------------------------------
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"

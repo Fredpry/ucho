@@ -129,10 +129,6 @@ class Engine:
         if self._thread is not None:
             self._thread.join(timeout)
 
-    @property
-    def on_worker(self) -> bool:
-        return threading.current_thread() is self._thread
-
     def pending(self) -> int:
         with self._cv:
             return len(self._heap) + (1 if self.current is not None else 0)

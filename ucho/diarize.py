@@ -31,7 +31,6 @@ the pass.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import logging
 import subprocess
@@ -68,13 +67,7 @@ _CREATION_FLAGS = (
 )
 
 
-def available() -> bool:
-    """True when the optional sherpa-onnx package can be imported (without importing it)."""
-    try:
-        return importlib.util.find_spec("sherpa_onnx") is not None
-    except (ImportError, ValueError):
-        return False
-
+available = config.sherpa_available
 
 def models_downloaded() -> bool:
     """True when every speaker detection model repo is downloaded and its ONNX file exists."""

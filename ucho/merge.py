@@ -12,7 +12,6 @@ Segments store stable speaker codes; the localized labels ("Me"/"Ja",
 
 from __future__ import annotations
 
-import json
 import re
 import unicodedata
 from dataclasses import asdict, dataclass
@@ -20,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from .config import write_json
 from .i18n import t
 
 SPEAKER_ME = "me"
@@ -341,7 +341,5 @@ def save_results(folder: Path, segments: list[Segment], meta: dict) -> dict[str,
     full_meta["saved"] = datetime.now().isoformat(timespec="seconds")
     full_meta["segment_count"] = len(segments)
     full_meta["segments"] = [asdict(s) for s in segments]
-    files["meta"].write_text(
-        json.dumps(full_meta, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_json(files["meta"], full_meta)
     return files

@@ -244,27 +244,28 @@ def primary(master, text: str, command: Callable, icon_name: str | None = None,
     return button
 
 
-def secondary(master, text: str, command: Callable, icon_name: str | None = None,
-              height: int = 34, **kwargs) -> ctk.CTkButton:
+def _outline(master, text: str, command: Callable, icon_name: str | None, height: int,
+             hover: theme.Pair, color: theme.Pair, **kwargs) -> ctk.CTkButton:
+    """Outlined button on the surface color; `hover` and `color` (text and icon) set its tone."""
     button = ctk.CTkButton(master, text=text, command=command, height=height,
                            corner_radius=theme.RADIUS_SM + 2, font=font(theme.SM - 1),
-                           fg_color=C.surface, hover_color=C.hover, text_color=C.text,
+                           fg_color=C.surface, hover_color=hover, text_color=color,
                            border_color=C.border, border_width=1,
-                           image=icon(icon_name, 15, C.text) if icon_name else None, **kwargs)
+                           image=icon(icon_name, 15, color) if icon_name else None, **kwargs)
     focusable(button, button.invoke)
     return button
+
+
+def secondary(master, text: str, command: Callable, icon_name: str | None = None,
+              height: int = 34, **kwargs) -> ctk.CTkButton:
+    return _outline(master, text, command, icon_name, height, C.hover, C.text, **kwargs)
 
 
 def danger(master, text: str, command: Callable, icon_name: str | None = None,
            height: int = 34, **kwargs) -> ctk.CTkButton:
     """Secondary button for a destructive action: text and icon in the recording (clay) color."""
-    button = ctk.CTkButton(master, text=text, command=command, height=height,
-                           corner_radius=theme.RADIUS_SM + 2, font=font(theme.SM - 1),
-                           fg_color=C.surface, hover_color=C.recording_soft, text_color=C.recording,
-                           border_color=C.border, border_width=1,
-                           image=icon(icon_name, 15, C.recording) if icon_name else None, **kwargs)
-    focusable(button, button.invoke)
-    return button
+    return _outline(master, text, command, icon_name, height, C.recording_soft, C.recording,
+                    **kwargs)
 
 
 def ghost(master, text: str, command: Callable, icon_name: str | None = None,

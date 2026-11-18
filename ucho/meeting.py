@@ -44,7 +44,6 @@ as without live transcription.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -52,9 +51,9 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
 
 from . import config, llm, session, titles, transcribe
+from .events import Emitter
 from .i18n import t
 from .merge import (META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
                     TRANSCRIPTION_ERRORS, Segment, clean_speaker_name, save_results, slug,
@@ -65,8 +64,9 @@ log = logging.getLogger(__name__)
 TITLE_RETRY_S = 30.0
 
 
-class MeetingController:
+class MeetingController(Emitter):
     def __init__(self, app):
+        super().__init__()
         self.app = app
         self.recorder = None
         self.recording = False
@@ -94,25 +94,6 @@ class MeetingController:
         self.live_segments: list[Segment] = []
         self._live_meta: dict = {}
         self._caches: dict[str, object] = {}  # folder key -> live_meeting.ChunkCache
-        self._listeners: list[Callable[[str, object], None]] = []
-
-    # --- events -------------------------------------------------------------
-
-    def listen(self, callback: Callable[[str, object], None]) -> None:
-        self._listeners.append(callback)
-
-    def clear_listeners(self) -> None:
-        self._listeners.clear()
-
-    def _emit(self, event: str, data=None) -> None:
-        """Delivers an event on the UI thread."""
-        def deliver():
-            for callback in list(self._listeners):
-                try:
-                    callback(event, data)
-                except Exception:
-                    log.exception("Listener for %s failed", event)
-        self.app.post(deliver)
 
     @property
     def settings(self) -> config.Settings:
@@ -283,8 +264,7 @@ class MeetingController:
             self._save_partial(result["folder"], self.live_segments, meta)
         else:
             try:
-                (result["folder"] / "meta.json").write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                config.write_json(result["folder"] / "meta.json", meta)
             except OSError as error:
                 log.warning("Could not write meta.json: %s", type(error).__name__)
                 self.message = (t("Could not save the recording details (meta.json)."), "warning")
@@ -770,8 +750,7 @@ class MeetingController:
             if segments:
                 save_results(folder, segments, meta)
             else:
-                (folder / META_FILE).write_text(
-                    json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+                config.write_json(folder / META_FILE, meta)
         except OSError as error:
             self._emit("error", t("Could not rename: {error}", error=error))
             return False

@@ -663,30 +663,6 @@ def iter_transcribe_file(
     return segments
 
 
-def transcribe_session(
-    files: dict[str, Path],
-    model: str,
-    device: str,
-    language_code: str = "auto",
-    progress: ProgressFn | None = None,
-    cancel: threading.Event | None = None,
-    status: Callable[[str], None] | None = None,
-) -> tuple[list[Segment], str]:
-    """Transcribes all tracks of a session. Returns (segments, used_device).
-
-    Builds and releases its own model; the app uses `iter_transcribe_session`
-    through the shared engine instead.
-    """
-    engine = create_engine(model, device)
-    try:
-        segments = drain(iter_transcribe_session(files, engine, language_code, progress,
-                                                 cancel, status))
-    finally:
-        used_device = engine.device
-        engine.release()
-    return segments, used_device
-
-
 def iter_transcribe_session(
     files: dict[str, Path],
     engine: Engine,

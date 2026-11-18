@@ -41,6 +41,7 @@ from typing import Callable
 import numpy as np
 
 from . import config, live, transcribe
+from .events import Emitter
 from .i18n import t
 
 log = logging.getLogger(__name__)
@@ -513,11 +514,6 @@ def window_is_ours(window: int | None) -> bool:
     return window_process(window) == os.getpid()
 
 
-def foreground_is_ours() -> bool:
-    """True when the active window belongs to this process (any Ucho window)."""
-    return window_is_ours(foreground_window())
-
-
 def window_exists(window: int) -> bool:
     return bool(_user32.IsWindow(window))
 
@@ -896,10 +892,11 @@ class Microphone:
 # --- controller ---------------------------------------------------------------------------
 
 
-class DictationController:
+class DictationController(Emitter):
     """State of dictation for the Dictation screen, the small window and the tray."""
 
     def __init__(self, app):
+        super().__init__()
         self.app = app
         self.microphone = Microphone(app.settings["microphone_name"], app.settings["microphone_index"])
         self._downloaded: dict[str, tuple[bool, float]] = {}
@@ -920,24 +917,6 @@ class DictationController:
         self._shown: live.LiveDictation | None = None
         self._message: tuple[str, str] | None = None
         self._message_until = 0.0
-        self._listeners: list[Callable[[str, object], None]] = []
-
-    # --- events -------------------------------------------------------------
-
-    def listen(self, callback: Callable[[str, object], None]) -> None:
-        self._listeners.append(callback)
-
-    def clear_listeners(self) -> None:
-        self._listeners.clear()
-
-    def _emit(self, event: str, data=None) -> None:
-        def deliver():
-            for callback in list(self._listeners):
-                try:
-                    callback(event, data)
-                except Exception:
-                    log.exception("Listener for %s failed", event)
-        self.app.post(deliver)
 
     def show_message(self, text: str, style: str = "ready", seconds: float = 3.0) -> None:
         self._message = (text, style)
