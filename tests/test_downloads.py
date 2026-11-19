@@ -346,7 +346,6 @@ def test_meeting_does_not_start_without_a_speech_model(tmp_path):
     assert controller.recording is False
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 def test_dictation_does_not_start_without_a_speech_model():
     from ucho import dictation
 
@@ -561,7 +560,6 @@ def test_meeting_is_blocked_only_without_any_speech_model(meeting_app):
     assert app.refused == ["no speech model"]
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 def test_dictation_uses_its_own_model_when_only_that_one_is_on_the_disk():
     from ucho import config, dictation
 
