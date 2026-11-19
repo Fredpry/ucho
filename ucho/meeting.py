@@ -211,6 +211,7 @@ class MeetingController(Emitter):
             microphone_index=self.settings["microphone_index"],
             system_index=self.settings["system_index"],
             listener=live.feed if live is not None else None,
+            on_notice=self._audio_notice,
         )
         try:
             recorder.start(folder)
@@ -242,6 +243,14 @@ class MeetingController(Emitter):
         log.info("Recording started")
         self._emit("state")
         return True
+
+    def _audio_notice(self, code: str, message: str) -> None:
+        """A problem found while recording (macOS system audio: silent or failed tap).
+
+        Runs on a recorder thread; the event reaches the UI on the Tk thread as
+        `("audio_warning", {"code": audio.NOTICE_*, "message": translated text})`.
+        """
+        self._emit("audio_warning", {"code": code, "message": message})
 
     def stop(self) -> None:
         if not self.recording or self.recorder is None:

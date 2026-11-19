@@ -212,6 +212,43 @@ def migrate_device_choices(settings, devices: dict) -> bool:
 # write thread, so it must be quick.
 Listener = Callable[[str, np.ndarray], None]
 
+# Gets (code, translated message) for a problem found while recording, on a
+# worker thread (the meeting controller turns it into an "audio_warning" event).
+Notice = Callable[[str, str], None]
+NOTICE_SYSTEM_SILENT = "system_audio_silent"
+NOTICE_SYSTEM_FAILED = "system_audio_failed"
+
+# A macOS process tap without the permission delivers exact zeros.
+SILENCE_LIMIT_S = 20.0
+
+
+class SilenceWatch:
+    """Fires once when a track has delivered nothing but exact zeros for `limit_s`.
+
+    Exact zeros, not quiet: a real signal, even a silent room, has noise in
+    the lowest bits. The first non-zero sample ends the watch for good (the
+    source evidently works), so a meeting that goes quiet later never fires it.
+    """
+
+    def __init__(self, limit_s: float = SILENCE_LIMIT_S) -> None:
+        self.limit_s = limit_s
+        self.zero_s = 0.0
+        self.heard = False
+        self.fired = False
+
+    def feed(self, samples: np.ndarray, rate: int) -> bool:
+        """True exactly once: on the block that completes `limit_s` of zeros."""
+        if self.heard or self.fired or rate <= 0 or samples.size == 0:
+            return False
+        if np.any(samples):
+            self.heard = True
+            return False
+        self.zero_s += samples.size / rate
+        if self.zero_s >= self.limit_s - 1e-6:  # float sums of block lengths
+            self.fired = True
+            return True
+        return False
+
 
 class _Track:
     """A single track: PortAudio stream -> queue -> 16 kHz mono FLAC file."""
@@ -237,6 +274,15 @@ class _Track:
         self._width = 2  # paInt16
         self._channels = device.channels
         self._rate = device.rate
+        # Given up for this recording (a macOS tap that never started): no restarts.
+        self.abandoned = False
+        self._silence: SilenceWatch | None = None
+        self._on_silence: Callable[[str], None] | None = None
+
+    def watch_silence(self, on_silence: Callable[[str], None], limit_s: float = SILENCE_LIMIT_S) -> None:
+        """Calls `on_silence(track name)` once when the device delivers only zeros (write thread)."""
+        self._silence = SilenceWatch(limit_s)
+        self._on_silence = on_silence
 
     # --- life cycle -----------------------------------------------------
 
@@ -357,6 +403,8 @@ class _Track:
             return
 
         self._last_data = time.monotonic()
+        if self._silence is not None and self._silence.feed(samples, self._rate):
+            self._silent()
         rms = float(np.sqrt(np.mean(np.square(samples))))
         # Decibel scale 0..1: -60 dBFS is silence, 0 dBFS is the maximum.
         db = 20.0 * np.log10(rms + 1e-9)
@@ -402,8 +450,29 @@ class _Track:
             self._samples_written += missing
             self._tell(padding)
 
+    def _silent(self) -> None:
+        if self._on_silence is None:
+            return
+        try:
+            self._on_silence(self.name)
+        except Exception:
+            log.exception("Silence callback of track %s failed", self.name)
+
+    @property
+    def starting(self) -> bool:
+        """The stream is still starting (a macOS tap starts on a worker thread)."""
+        return getattr(self._stream, "starting", False) is True
+
+    @property
+    def failure(self) -> str | None:
+        """Why the stream failed for good (a macOS tap that did not start), else None."""
+        failure = getattr(self._stream, "failure", None)
+        return failure if isinstance(failure, str) else None
+
     @property
     def dead(self) -> bool:
+        if self.starting:
+            return False
         return (time.monotonic() - self._last_data) > DEVICE_TIMEOUT_S
 
     @property
@@ -416,9 +485,11 @@ class Recorder:
 
     def __init__(self, tracks: str = "both", microphone: str | None = None,
                  system: str | None = None, microphone_index: int | None = None,
-                 system_index: int | None = None, listener: Listener | None = None):
+                 system_index: int | None = None, listener: Listener | None = None,
+                 on_notice: Notice | None = None):
         self.tracks = tracks
         self._listener = listener
+        self._on_notice = on_notice
         # Chosen devices by name; the indices are a choice saved by an earlier version.
         self._microphone = microphone
         self._system = system
@@ -474,6 +545,8 @@ class Recorder:
         try:
             for name, file, dev in chosen:
                 track = _Track(name, folder / file, dev, self._listener)
+                if name == "system" and platforms.family() == "macos":
+                    track.watch_silence(self._system_silent)
                 try:
                     track.open_file()
                     track.start(self._pa)
@@ -514,6 +587,11 @@ class Recorder:
                 track.finish()
             close_pyaudio(self._pa)
             self._pa = None
+            for name, track in list(self._tracks.items()):
+                if track.abandoned and track.duration_s == 0:
+                    # Its source never delivered: no empty "meeting" file to transcribe.
+                    track.file.unlink(missing_ok=True)
+                    del self._tracks[name]
 
         result = {
             "folder": self.folder,
@@ -552,9 +630,42 @@ class Recorder:
 
     # --- surviving a device change --------------------------------------
 
+    def _notice(self, code: str, message: str) -> None:
+        """A problem found while recording: logged, kept in `warnings`, passed to `on_notice`."""
+        log.warning("Recording notice: %s", code)
+        if message not in self.warnings:
+            self.warnings.append(message)
+        if self._on_notice is None:
+            return
+        try:
+            self._on_notice(code, message)
+        except Exception:
+            log.exception("Recording notice callback failed")
+
+    def _system_silent(self, _track: str) -> None:
+        self._notice(NOTICE_SYSTEM_SILENT,
+                     t("System audio is silent. Ucho may not have permission to record it."))
+
+    def _drop_failed(self) -> None:
+        """Gives up tracks whose source failed for good; the others keep recording."""
+        for name, track in list(self._tracks.items()):
+            failure = track.failure
+            if track.abandoned or failure is None:
+                continue
+            with self._lock:
+                if not self._running:
+                    return
+                track.abandoned = True
+                track.stop_stream()
+            log.warning("Track %s stopped for this recording: %s", name, failure)
+            if name == "system":
+                self._notice(NOTICE_SYSTEM_FAILED,
+                             t("System audio could not be recorded — recording the microphone only."))
+
     def _watchdog_loop(self) -> None:
         while not self._stop.wait(2.0):
-            dead = [n for n, s in self._tracks.items() if s.dead]
+            self._drop_failed()
+            dead = [n for n, s in self._tracks.items() if s.dead and not s.abandoned]
             if dead:
                 log.warning("Tracks without data: %s - restarting streams", dead)
                 try:
@@ -568,12 +679,15 @@ class Recorder:
             if not self._running:
                 return
             for track in self._tracks.values():
-                track.stop_stream()
+                if not track.abandoned:
+                    track.stop_stream()
             close_pyaudio(self._pa)
 
             devices = list_devices()
             self._pa = new_pyaudio()
             for name, track in self._tracks.items():
+                if track.abandoned:
+                    continue
                 new = self._pick(name, devices)
                 if new is None:
                     continue
