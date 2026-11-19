@@ -662,6 +662,37 @@ Recenzja planu z 2026-11-19 (Claude, bez delegowania). Twierdzenia o kodzie spra
 
 **Ostateczna lista zadań:** jak w tabeli „Podsumowanie zadań” (19 zadań, ok. 8 700 linii, ok. 5 800 delegowalnych).
 
+## Postęp: fala 3
+
+Baza: ab5f603. Scalone do `macos/dev` (`--no-ff`, w kolejności): M3b, M4, M7a. Wynik integracji: pytest 696 passed, 9 skipped (jedna niestabilna `test_live::test_controller_stop_submits_only_the_tail[True]` przeszła po osobnym powtórzeniu); ruff czysto; `set_copyright --check` 0 plików; `--smoke-test 3` OK. Konflikt tylko w `tests/test_platforms.py` (test zapasowych modułów null): zachowana wersja M7a, która sprawdza istnienie pliku `macos/<akcesor>.py`. `ucho/platforms/macos/__init__.py` identyczny z `windows/__init__.py`. Wyniki CI macOS: patrz niżej, sekcja "CI PR #30".
+
+**Zrobione**
+- M3b: `.github/workflows/macos.yml` (macos-tests na macos-15 i macos-26, macos-smoke, macos-asr z whisper.cpp na Metal), `requirements.txt` z markerami platform, `tools/macos_asr_check.py`, `UCHO_ONLY_WINDOWS_SKIPS=1` (pominięcie bez powodu "Windows only: ..." wywala job macOS). Poprawki: `initial_prompt` w pywhispercpp tylko jako str, `diagnostics.Redactor` zachowuje wiodący `/` ścieżek POSIX.
+- M4: `platforms/macos/{sysinfo,shell,sounds,fonts}.py`, reguły Apple Silicon w `hardware.py` (mac_large, mac_turbo, `HardwareProfile.system`, `recommend_llm` dla darwin), podzbiór Fluent UI System Icons (`design/icons/FluentSystemIcons-Ucho.ttf`, `tools/subset_icons.py`, `THIRD_PARTY.md`).
+- M7a: `platforms/macos/audio.py` (MacAudio, sounddevice/CoreAudio, mikrofon przez AVFoundation z fallbackiem `unknown`), `system=[]` do czasu ScreenCaptureKit.
+
+**Odchylenia od planu**
+- `MacShell.worker_command` ze źródeł: `[sys.executable, '-m', module, *args]` (diarize samo dodaje `--worker` w args, wersja z planu podwoiłaby flagę). W paczce `.app`: `Ucho --worker ucho.diarize --worker ...`; M10 musi zdjąć pierwsze `--worker <moduł>` i przekazać resztę do `main()` modułu.
+- Stosy czcionek macOS wg spike'a: sans `.AppleSystemUIFont, Helvetica Neue, Helvetica`, mono `Menlo, Monaco, Courier`, display `New York, Georgia, Times`, bez SF Pro/SF Mono, strong/semibold puste. `theme.Fonts.resolve` przyjmuje rodziny zaczynające się od `.`.
+- Ikony rysuje Pillow z pliku (`ui._font_file()` -> `icon_font()`), tak samo jak na Windows; rejestracja TTF w Tk (Core Text) NIE jest potrzebna. Kryterium "czcionka ikon w Tk" zastąpić sprawdzeniem przez Pillow (`ImageFont.truetype`).
+- `set_window_icon` używa `icon.draw/draw_dictate`; `hardware.benchmark` idzie przez `transcribe.create_engine` (dla whisper.cpp `_forced_kwargs` nie działa, benchmark mierzy dekodowanie swobodne).
+- `autostart_set(True)` odmawia z `/Volumes/` i z App Translocation (M9 powinno to pokazać użytkownikowi). Start z bundla: `open -a <.app>`.
+- Test `test_track_with_mac_audio...` sprawdza 16 kHz stereo bez resamplingu (M1c zakłada 48 kHz); bez skutków.
+
+**Uwagi dla fali 4 (M5, M6, M7b, M9)**
+- Nowe testy wymagające PyObjC, sounddevice, catap lub pywhispercpp muszą albo dopisać paczki do kroku "Install test dependencies" w `macos.yml`, albo używać atrap (pominięcie importorskip czerwieni job macOS).
+- Backendy: `create()` bez argumentów, bez wołania akcesorów `platforms.*` przy imporcie (deadlock pod `_cache_lock`). `test_platforms` wymaga, by nazwa modułu = nazwa akcesora.
+- Smoke na runnerze bez mikrofonu nie może logować ERROR (brak TCC/urządzeń: WARNING i powrót do null).
+- PortAudio zapamiętuje listę urządzeń przy pierwszym imporcie sounddevice: mikrofon podłączony po starcie (AirPods) nie pojawi się, a `Recorder._restart_streams` może otworzyć nieaktualny indeks. `sd._terminate()/_initialize()` unieważnia strumienie. Rozwiązać w M7b albo ręcznie w p. 7b.
+- `request_permission('microphone')` bez `NSMicrophoneUsageDescription` w Info.plist zabija TCC: M10/M11 dodać klucz, zanim M9 wywoła tę funkcję.
+- M10: plik `design/icons/FluentSystemIcons-Ucho.ttf` musi być w bundlu (`icon_font()` zwraca None bez niego).
+
+**Nowe kroki do 7b/7c (na Macu)**
+- Kryteria tylko-macOS: `plutil -lint` na plist z `MacShell(home=tmp).autostart_set(True)`; `MacSystemInfo` (RAM > 1, CPU zawiera Apple, arm64, GPU Metal); `hardware.recommend` na darwin daje klucz whisper.cpp large-v3[-turbo]-q5_0 i METAL; `Fonts.resolve()` w prawdziwym Tk (sans `.AppleSystemUIFont`, mono Menlo); MacAudio: `list_devices()` bez wyjątku, open_input/start/stop/close na domyślnym urządzeniu, `permission('microphone')` zwraca wartość Permission.
+- Na ucho: czy `NSSound.soundNamed_` nie gubi szybko następujących po sobie dźwięków start/stop/cancel.
+- Podłączenie i odłączenie słuchawek w trakcie pracy.
+- Benchmark WER whisper.cpp (ggml-large/turbo, Metal) vs OpenVINO: `tools/benchmark_wer.py --backend whispercpp` na Macu Fryderyka. CI (base-q5_1) sprawdza tylko działanie potoku (PL słowa kluczowe 4/5, EN 5/5, Metal MTL0).
+
 ## Postęp: fala 2
 
 Baza: 00afdcf. Scalone do `macos/dev` (`--no-ff`): M1b, M1c, M8. Wynik integracji: pytest 675 passed, 6 skipped; ruff czysto; `set_copyright --check` 0 plików; `--smoke-test 3` OK. Konflikty: `tests/test_platforms.py` (zbiory wyjątków M1b i M1c, oba teraz puste) i `ucho/locale/pl.json` (wpisy M1c i M8 zachowane). `downloads.py` i `settings_screen.py` scaliły się bez konfliktów.
