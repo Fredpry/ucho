@@ -830,6 +830,55 @@ def check_tap(out: Path) -> dict:
             "details": d}
 
 
+TCC_DATABASES = [Path.home() / "Library" / "Application Support" / "com.apple.TCC" / "TCC.db",
+                 Path("/Library/Application Support/com.apple.TCC/TCC.db")]
+
+
+def tcc_grant(out: Path, home: str) -> None:
+    """Run as root (sudo): copy every kTCCServiceMicrophone row to kTCCServiceAudioCapture.
+
+    Experiment from the plan (M3a point 7): the runner images pre-grant the microphone by
+    writing TCC.db; does the same trick give the Process Tap real audio? CI only.
+    """
+    import sqlite3
+
+    result: dict = {}
+    for db in [Path(home) / "Library" / "Application Support" / "com.apple.TCC" / "TCC.db", TCC_DATABASES[1]]:
+        entry: dict = result.setdefault(str(db), {})
+        try:
+            con = sqlite3.connect(str(db))
+            columns = [row[1] for row in con.execute("PRAGMA table_info(access)")]
+            entry["audio_capture_before"] = con.execute(
+                "SELECT client, auth_value FROM access WHERE service='kTCCServiceAudioCapture'").fetchall()
+            entry["microphone_clients"] = con.execute(
+                "SELECT client, auth_value FROM access WHERE service='kTCCServiceMicrophone'").fetchall()
+            select = ", ".join("'kTCCServiceAudioCapture'" if c == "service" else c for c in columns)
+            cursor = con.execute(f"INSERT OR REPLACE INTO access ({', '.join(columns)}) "
+                                 f"SELECT {select} FROM access WHERE service='kTCCServiceMicrophone'")
+            con.commit()
+            entry["inserted"] = cursor.rowcount
+            con.close()
+        except Exception as error:
+            entry["error"] = f"{type(error).__name__}: {error}"
+    result["killall_tccd"] = run_cmd(["killall", "tccd"])
+    (out / "tcc_grant.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+
+
+def check_tap_granted(out: Path) -> dict:
+    """The tap again after the TCC.db experiment (sudo); information only."""
+    grant = run_cmd(["sudo", "-n", sys.executable, str(Path(__file__)), "tcc-grant", "--home", str(Path.home()),
+                     "--out", str(out)], timeout=60)
+    time.sleep(2)
+    result = check_tap(out)
+    details = result["details"]
+    details["grant_cmd"] = grant
+    path = out / "tcc_grant.json"
+    details["grant"] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    inserted = [v.get("inserted") for k, v in (details["grant"] or {}).items() if isinstance(v, dict) and k != "killall_tccd"]
+    result["summary"] = f"TCC rows inserted={inserted}; " + result["summary"]
+    return result
+
+
 def check_microphone(out: Path) -> dict:
     import numpy as np
     import sounddevice as sd
@@ -915,6 +964,65 @@ def _codesign_diagnose(site_lib: Path, temp: Path) -> dict:
     return d
 
 
+def macho_strip_signature(source: Path, target: Path) -> dict:
+    """Copy a thin 64-bit Mach-O without LC_CODE_SIGNATURE (what codesign --remove-signature does)."""
+    import struct
+
+    data = bytearray(source.read_bytes())
+    info: dict = {"file_size": len(data)}
+    if struct.unpack_from("<I", data, 0)[0] != 0xFEEDFACF:
+        info["error"] = "not a thin 64-bit Mach-O"
+        return info
+    ncmds, sizeofcmds = struct.unpack_from("<II", data, 16)
+    offset, signature, linkedit = 32, None, None
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", data, offset)
+        if cmd == 0x1D:
+            signature = (offset, size, *struct.unpack_from("<II", data, offset + 8))
+        elif cmd == 0x19 and bytes(data[offset + 8:offset + 24]).rstrip(b"\0") == b"__LINKEDIT":
+            linkedit = offset
+        offset += size
+    if signature is None or linkedit is None:
+        info["error"] = "no LC_CODE_SIGNATURE or __LINKEDIT"
+        return info
+    cmd_offset, cmd_size, dataoff, datasize = signature
+    fileoff, filesize = struct.unpack_from("<QQ", data, linkedit + 40)
+    info.update(sig_dataoff=dataoff, sig_datasize=datasize, sig_end=dataoff + datasize,
+                linkedit_end=fileoff + filesize, trailing_bytes=len(data) - (dataoff + datasize),
+                cmd_is_last=cmd_offset + cmd_size == 32 + sizeofcmds)
+    end_cmds = 32 + sizeofcmds
+    data[cmd_offset:end_cmds] = data[cmd_offset + cmd_size:end_cmds] + bytes(cmd_size)
+    struct.pack_into("<II", data, 16, ncmds - 1, sizeofcmds - cmd_size)
+    if linkedit > cmd_offset:
+        linkedit -= cmd_size
+    struct.pack_into("<Q", data, linkedit + 48, dataoff - fileoff)
+    del data[dataoff:]
+    target.write_bytes(bytes(data))
+    return info
+
+
+def _signing_survey(site: Path, temp: Path) -> dict:
+    """Which native files of the full bundle does `codesign -s - --force` refuse (tried on copies)?"""
+    roots = ["openvino", "openvino_genai", "openvino_tokenizers", "catap", "_sounddevice_data", "_soundfile_data",
+             "pywhispercpp", "objc", "numpy", "PIL", "soxr", "hf_xet"]
+    files = [p for root in roots if (site / root).exists() for p in (site / root).rglob("*")
+             if p.is_file() and not p.is_symlink() and (p.suffix in (".dylib", ".so") or ".so." in p.name)]
+    refused, authorities = [], {}
+    work = temp / "survey"
+    work.mkdir(exist_ok=True)
+    for path in files:
+        copy = work / path.name
+        shutil.copy2(path, copy)
+        result = run_cmd(["codesign", "-s", "-", "--force", str(copy)])
+        if result.get("rc") != 0:
+            relative = str(path.relative_to(site))
+            refused.append(relative)
+            display = run_cmd(["codesign", "-dvv", str(path)]).get("err", "")
+            authorities[relative] = re.findall(r"Authority=(.*)", display)[:1]
+        copy.unlink(missing_ok=True)
+    return {"checked": len(files), "refused": refused, "authorities": authorities}
+
+
 def check_pyinstaller(out: Path) -> dict:
     import sysconfig
 
@@ -935,25 +1043,26 @@ def check_pyinstaller(out: Path) -> dict:
                 light["dmg_mb"] = round(dmg.stat().st_size / 2**20, 1)
                 break
             time.sleep(10)
-    # 2. Everything Ucho needs (OpenVINO, catap, sounddevice, soundfile). The second run failed on
-    #    ad-hoc signing of openvino/libs/libtbb.12.dylib; diagnose it and retry after removing the
-    #    original signature of each failing dylib (CI only, in the runner's site-packages).
+    # 2. Everything Ucho needs (OpenVINO, catap, sounddevice, soundfile). Run 2 and 3: codesign
+    #    cannot re-sign or even remove the Intel signature of openvino/libs/libtbb.12.dylib
+    #    ("internal error in Code Signing subsystem"). Survey every native file of the bundle
+    #    candidates, strip the signature of the ones codesign refuses with our own Mach-O edit
+    #    (CI only, in the runner's site-packages), then build again.
+    d["survey"] = survey = _signing_survey(site, temp)
+    d["stripped"] = stripped = []
+    for item in survey["refused"]:
+        path = site / item
+        info = macho_strip_signature(path, temp / ("stripped-" + path.name))
+        info["sign_stripped_copy"] = run_cmd(["codesign", "-s", "-", "--force", str(temp / ("stripped-" + path.name))])
+        info["load_stripped_copy"] = run_cmd([sys.executable, "-c", "import ctypes, sys; ctypes.CDLL(sys.argv[1])",
+                                              str(temp / ("stripped-" + path.name))])
+        if info["sign_stripped_copy"].get("rc") == 0:
+            shutil.copy2(temp / ("stripped-" + path.name), path)
+            info["replaced"] = True
+        stripped.append({"lib": item, **info})
+    shutil.rmtree(Path.home() / "Library" / "Application Support" / "pyinstaller", ignore_errors=True)
     full = d["full"] = _build_probe(out, temp, "FullProbe", [])
-    fixes = d["full_signature_fixes"] = []
-    for _attempt in range(4):
-        failed = full.get("failed_binary")
-        if full.get("app") or not failed or not full.get("codesign_error"):
-            break
-        relative = failed.split("/no-entitlements/", 1)[-1]
-        site_lib = site / relative
-        if not site_lib.exists():
-            fixes.append({"lib": relative, "error": "not found in site-packages"})
-            break
-        if not fixes:
-            d["diagnose"] = _codesign_diagnose(site_lib, temp)
-        fixes.append({"lib": relative, "remove_signature": run_cmd(["codesign", "--remove-signature", str(site_lib)])})
-        shutil.rmtree(Path.home() / "Library" / "Application Support" / "pyinstaller", ignore_errors=True)
-        full = d["full"] = _build_probe(out, temp, "FullProbe", [])
+    fixes = [s["lib"] for s in stripped if s.get("replaced")]
     lp, fp = light.get("probe", {}), full.get("probe", {})
     ok = (light.get("codesign_verify", {}).get("rc") == 0 and len(_hits(lp.get("text", ""), KEYWORDS_EN)) >= 3)
     return {"status": "ok" if ok else "fail",
@@ -961,7 +1070,7 @@ def check_pyinstaller(out: Path) -> dict:
                        f"{light.get('dmg_mb')} MB, codesign rc={light.get('codesign_verify', {}).get('rc')}, "
                        f"hits={len(_hits(lp.get('text', ''), KEYWORDS_EN))}, tk={lp.get('tk')}; "
                        f"full: build rc={full['build']['rc']} {full['build']['seconds']} s, .app {full.get('app_mb')} MB, "
-                       f"signature fixes={[f['lib'] for f in fixes]}, codesign rc="
+                       f"refused by codesign={len(survey['refused'])} of {survey['checked']}, stripped={fixes}, codesign rc="
                        f"{full.get('codesign_verify', {}).get('rc')}, hits={len(_hits(fp.get('text', ''), KEYWORDS_EN))}, "
                        f"openvino={fp.get('openvino')}, catap={str(fp.get('catap'))[:120]}, "
                        f"sounddevice={str(fp.get('sounddevice'))[:40]}, soundfile={fp.get('soundfile')}, "
@@ -984,6 +1093,7 @@ CHECKS: dict[str, tuple[Callable[[Path], dict], int]] = {
     "whisper": (check_whisper, 900),
     "microphone": (check_microphone, 60),
     "tap": (check_tap, 240),
+    "tap_granted": (check_tap_granted, 300),
     "pyinstaller": (check_pyinstaller, 2700),
 }
 
@@ -1049,12 +1159,16 @@ def summary(out: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["all", "run", "summary", "hotkey-holder"])
+    parser.add_argument("command", choices=["all", "run", "summary", "hotkey-holder", "tcc-grant"])
     parser.add_argument("name", nargs="*")
     parser.add_argument("--out", type=Path, default=Path("spike-out"))
+    parser.add_argument("--home", default=str(Path.home()))
     args = parser.parse_args()
     if args.command == "hotkey-holder":
         hotkey_holder()
+        return 0
+    if args.command == "tcc-grant":
+        tcc_grant(args.out, args.home)
         return 0
     args.out.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
