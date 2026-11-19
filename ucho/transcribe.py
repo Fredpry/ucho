@@ -88,19 +88,21 @@ def drain(steps: Generator):
 # --- model ---------------------------------------------------------------
 
 
-def model_path(repo_id: str, download: bool = False) -> Path:
+def model_path(repo_id: str, download: bool = False, tqdm_class: type | None = None) -> Path:
     """Returns the local model folder. Without `download` it never touches the network.
 
     We always download the pinned revision from `config.REVISIONS`. A local
     check also accepts an older copy downloaded earlier (e.g. before pinning),
-    so nobody has to download several GB again.
+    so nobody has to download several GB again. `tqdm_class` receives the
+    download progress (`downloads.progress_bar_class`).
     """
     from huggingface_hub import snapshot_download
 
     revision = config.REVISIONS.get(repo_id)
     patterns = config.DOWNLOAD_PATTERNS.get(repo_id)
     if download:
-        return Path(snapshot_download(repo_id, revision=revision, allow_patterns=patterns))
+        return Path(snapshot_download(repo_id, revision=revision, allow_patterns=patterns,
+                                      tqdm_class=tqdm_class))
     try:
         return Path(snapshot_download(repo_id, revision=revision, allow_patterns=patterns,
                                       local_files_only=True))

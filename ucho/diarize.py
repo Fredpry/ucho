@@ -88,10 +88,13 @@ def ready() -> bool:
     return available() and models_downloaded()
 
 
-def download_models() -> None:
-    """Downloads every speaker detection model in `config.SPEAKER_MODELS`."""
+def download_models(tqdm_class: type | None = None) -> None:
+    """Downloads every speaker detection model in `config.SPEAKER_MODELS`.
+
+    One `tqdm_class` for all of them, so the progress adds up across the repos.
+    """
     for repo in config.SPEAKER_MODELS:
-        transcribe.model_path(repo, download=True)
+        transcribe.model_path(repo, download=True, tqdm_class=tqdm_class)
 
 
 def model_files() -> tuple[Path, Path]:

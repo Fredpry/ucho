@@ -362,7 +362,9 @@ class MeetingScreen(Screen):
 
     def tick(self) -> None:
         m = self.meeting
-        self.button.set_state(m.recording)
+        # No speech model yet: the button is off and the notice says why (#28).
+        blocked = None if m.recording else self.app.recording_blocked(False)
+        self.button.set_state(m.recording, enabled=blocked is None)
         self.button.render()
         self.timer.configure(text=format_hms(m.elapsed()))
         levels = m.levels()
@@ -373,7 +375,7 @@ class MeetingScreen(Screen):
         shortcut = hotkey_label(self.app.settings["hotkey"])
         self.hint.configure(text=error or t("Shortcut: {shortcut}", shortcut=shortcut))
         self.name.configure(state="disabled" if m.recording else "normal")
-        message = m.message[0] if m.message else ""
+        message = blocked or (m.message[0] if m.message else "")
         if not self.app.audio_ok and not m.recording:
             message = message or t("No audio devices found. Connect a microphone or headphones.")
         if self.notice.cget("text") != message:
@@ -1083,7 +1085,8 @@ class DictationPanel(ctk.CTkFrame):
             self.headline.configure(text=headline, text_color=color)
         if self.hint.cget("text") != hint:
             self.hint.configure(text=hint)
-        self.button.set_state(d.recording)
+        blocked = not d.recording and self.app.recording_blocked(False) is not None
+        self.button.set_state(d.recording, enabled=not blocked)
         self.button.render()
         self.meter.set(d.level())
         showing_live = bool((d.recording or d.queued) and d.live_text)

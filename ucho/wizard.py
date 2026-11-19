@@ -11,7 +11,6 @@ shared engine); the measurement may move the choice one row down.
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 
 import customtkinter as ctk
@@ -181,7 +180,12 @@ class Wizard(ctk.CTkFrame):
         self.use = ui.switch(self.body, t("Use this recommendation"), self.state["use_recommendation"],
                              lambda v: self.state.update(use_recommendation=v))
         self.use.grid(row=4, column=0, sticky="w", pady=(14, 0))
+        self._poll: str | None = None
         self.app.load_hardware(self._show_hardware)
+
+    def _poll_download(self) -> None:
+        self._poll = None
+        self._show_hardware()
 
     def _show_hardware(self) -> None:
         if not self.winfo_exists():
@@ -199,16 +203,29 @@ class Wizard(ctk.CTkFrame):
                                      model=short_model(rec.model), device=rec.device, dictation=dictation))
         self.hw_reasons.configure(text="\n".join([f"•  {r}" for r in rec.reasons]
                                                  + [f"!  {w}" for w in rec.warnings]))
-        downloaded = transcribe.model_downloaded(rec.model)
+        item = self.app.downloads.get(rec.model)
+        running = item is not None and item.running
+        downloaded = not running and transcribe.model_downloaded(rec.model)
         self.measure.configure(state="normal" if downloaded else "disabled")
         self.download.pack_forget()
-        if not downloaded:
+        if running:
+            self.result.configure(text=t("Downloading: {progress}", progress=item.progress.describe()))
+            # The download goes on in the background when you go to the next step.
+            if self._poll is None:
+                self._poll = self.after(500, self._poll_download)
+        elif not downloaded:
             size = config.MODELS.get(rec.model, {}).get("size", "")
-            self.download.configure(text=t("Download model ({size})", size=size))
+            if item is not None and item.error:
+                self.download.configure(text=t("Retry download"), state="normal")
+                self.result.configure(text=t("Model download failed: {error}", error=item.error))
+            else:
+                self.download.configure(text=t("Download model ({size})", size=size), state="normal")
+                self.result.configure(text=t("The model is not downloaded yet."))
             self.download.pack(side="left", padx=(8, 0), before=self.result)
-            self.result.configure(text=t("The model is not downloaded yet."))
         elif self.state["measured"]:
             self.result.configure(text=self.state["measured"])
+        else:
+            self.result.configure(text="")
 
     def _measure(self) -> None:
         rec = self.app.hardware_rec
@@ -240,19 +257,8 @@ class Wizard(ctk.CTkFrame):
         rec = self.app.hardware_rec
         if rec is None:
             return
-        self.download.configure(state="disabled", text=t("Downloading..."))
-
-        def job():
-            try:
-                transcribe.model_path(rec.model, download=True)
-            except Exception as error:
-                message = str(error)
-                log.exception("Model download failed")
-                self.app.post(lambda: self.winfo_exists() and self.result.configure(
-                    text=t("Model download failed: {error}", error=message)))
-            self.app.post(lambda: self.winfo_exists() and self._show_hardware())
-
-        threading.Thread(target=job, daemon=True).start()
+        self.app.download_model(rec.model)
+        self._show_hardware()
 
     def _analysis(self) -> None:
         self._title(

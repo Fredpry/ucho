@@ -32,7 +32,7 @@ from collections.abc import Callable
 
 import customtkinter as ctk
 
-from . import config, hardware, i18n, retention, theme, ui, winshell
+from . import config, downloads, hardware, i18n, retention, theme, ui, winshell
 from .archive import Archive
 from .dictation import DictationController
 from .engine import Engine
@@ -50,6 +50,10 @@ ICON_FILE = Path(__file__).resolve().parent / "assets" / "icon.ico"
 DICTATE_ICON_FILE = Path(__file__).resolve().parent / "assets" / "dictate.ico"
 TICK_MS = 66
 SIDEBAR_WIDTH = 212
+# The speech model is looked for on the disk again this often while it is
+# missing (it may arrive from the installer or another Ucho), and once more
+# after a download.
+MODEL_CHECK_S = 10.0
 # Audio retention runs 20 s after start (the window and the dictation preload
 # come first), then about once a day. The hourly check only compares two
 # numbers; a single 24 h timer could drift a lot across sleep and hibernation.
@@ -115,14 +119,27 @@ class App(ctk.CTk):
         self._toast_until = 0.0
         self._taskbar = None
         self._threads: list[threading.Thread] = []
+        # Model downloads (wizard, Settings, the main window) and the speech
+        # model check that blocks recording while no model is on the disk.
+        # Download threads are not joined at quit: a download can take minutes.
+        self.downloads = downloads.Downloads(self.post)
+        self.downloads.listen(self._download_finished)
+        self._speech_check: tuple[str, bool] | None = None  # (model, on disk)
+        self._speech_checked_at = 0.0
+        self._speech_generation = 0
+        self._speech_checking = False
+        self._blocked_shown: bool | None = None
+        self._models_shown = None
 
         self._setup_window()
         self.tray = TrayIcon(config.APP_NAME, [
             Item(lambda: t("Show Ucho"), lambda: self.post(self.show_main), default=True),
             Item(lambda: t("Stop recording") if self.meeting.recording else t("Record a meeting"),
-                 lambda: self.post(self.toggle_recording)),
+                 lambda: self.post(self.toggle_recording),
+                 enabled=lambda: self.meeting.recording or not self.recording_blocked(False)),
             Item(lambda: t("Stop dictation") if self.dictation.recording else t("Dictate"),
-                 lambda: self.post(self.dictation.toggle)),
+                 lambda: self.post(self.dictation.toggle),
+                 enabled=lambda: self.dictation.recording or not self.recording_blocked(False)),
             Item(lambda: t("Dictation window"), lambda: self.post(self.show_dictation),
                  visible=lambda: self.settings["layout"] == "tray"),
             None,
@@ -142,6 +159,7 @@ class App(ctk.CTk):
         if self.settings["tray"] or self.settings["layout"] == "tray":
             self.tray.start()
         self._start_thread(self._load_devices, "devices")
+        self._check_speech_async()
         if not self.smoke:
             # Describe the window for the taskbar before anything heavy starts:
             # loading an OpenVINO model holds the GIL for 10+ s, and a window
@@ -339,6 +357,8 @@ class App(ctk.CTk):
             ui.ghost(sidebar, t("Dictation window"), self.show_dictation, "window",
                      color=C.text_muted, anchor="w").grid(row=11, column=0, sticky="ew", padx=12)
 
+        self._build_models_card(sidebar)
+
         self._activity = ctk.CTkFrame(sidebar, fg_color=C.info_soft, corner_radius=theme.RADIUS_MD)
         self._activity.grid_columnconfigure(0, weight=1)
         self._activity_label = ui.label(self._activity, "", theme.XS + 1, "bold", color=C.info,
@@ -492,6 +512,13 @@ class App(ctk.CTk):
             return t("Summarizing") + queued, "working"
         if d.queued:
             return t("Recognizing"), "working"
+        readiness = self.speech_readiness(False)
+        if readiness.state == downloads.DOWNLOADING:
+            fraction = readiness.progress.fraction
+            percent = f" {int(fraction * 100)}%" if fraction is not None else ""
+            return t("Downloading the model") + percent, "working"
+        if readiness.blocks:
+            return t("No speech model"), "warning"
         return t("Ready"), "ready"
 
     def dictation_hotkey_label(self) -> str:
@@ -515,6 +542,7 @@ class App(ctk.CTk):
 
     def settings_changed(self) -> None:
         """Model, device or dictation settings changed: reload what dictation keeps in memory."""
+        self._check_speech_model()
         if not self.smoke:
             self.dictation.preload()
 
@@ -524,6 +552,183 @@ class App(ctk.CTk):
             self.settings.recordings_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+
+    # --- models: downloads and whether recording can start ---------------------------
+
+    def speech_readiness(self, check: bool = True) -> downloads.Readiness:
+        """State of the transcription model chosen in Settings.
+
+        `check`: look at the disk now when it was not checked yet (a start of a
+        recording); the UI loop passes False and treats "not checked" as ready.
+        """
+        model = self.settings["model"]
+        cached = self._speech_check
+        on_disk = cached[1] if cached is not None and cached[0] == model else None
+        if on_disk is None and check:
+            on_disk = self._check_speech_model()
+        return downloads.speech_readiness(model, on_disk, self.downloads.get(model))
+
+    def recording_blocked(self, check: bool = True) -> str | None:
+        """Why a meeting or a dictation cannot start now (no speech model), or None."""
+        return downloads.block_reason(self.speech_readiness(check))
+
+    def refuse_recording(self, reason: str) -> None:
+        """A meeting or dictation was asked for without a speech model: say why."""
+        log.info("Recording not started: speech model %s", self.speech_readiness(False).state)
+        self.toast(reason, "warning", 6)
+        if self.state() in ("withdrawn", "iconic"):
+            # The hotkey or the tray while the window is hidden: the toast would be unseen.
+            self.tray.notify(reason)
+
+    def _check_speech_model(self) -> bool:
+        """Looks for the chosen speech model on the disk (UI thread, fast after the first import)."""
+        from . import transcribe
+
+        model = self.settings["model"]
+        on_disk = transcribe.model_downloaded(model)
+        self._speech_generation += 1
+        self._speech_check = (model, on_disk)
+        self._speech_checked_at = time.monotonic()
+        if on_disk:
+            self.downloads.forget(model)
+        return on_disk
+
+    def _check_speech_async(self) -> None:
+        """The same check off the UI thread: the first one imports huggingface_hub."""
+        if self._speech_checking:
+            return
+        self._speech_checking = True
+        self._speech_checked_at = time.monotonic()
+        model, generation = self.settings["model"], self._speech_generation
+
+        def work() -> None:
+            from . import transcribe
+
+            on_disk = transcribe.model_downloaded(model)
+
+            def apply() -> None:
+                self._speech_checking = False
+                self._speech_checked_at = time.monotonic()
+                # A check on the UI thread (settings change, finished download) is newer.
+                if generation == self._speech_generation and model == self.settings["model"]:
+                    self._speech_check = (model, on_disk)
+                    if on_disk:
+                        self.downloads.forget(model)
+            self.post(apply)
+
+        threading.Thread(target=work, name="model check", daemon=True).start()
+
+    def download_model(self, repo: str, kind: str = downloads.SPEECH,
+                       on_done: Callable[[str | None], None] | None = None) -> bool:
+        """Downloads a model from Hugging Face in the background, with progress in the window."""
+        from . import transcribe
+
+        return self.downloads.start(
+            repo, downloads.model_name(repo), kind,
+            lambda bar: transcribe.model_path(repo, download=True, tqdm_class=bar), on_done)
+
+    def download_speech_model(self) -> None:
+        self.download_model(self.settings["model"])
+
+    def download_speaker_models(self, on_done: Callable[[str | None], None] | None = None) -> bool:
+        from . import diarize
+
+        return self.downloads.start(downloads.SPEAKER_MODELS, t("Speaker detection models"),
+                                    downloads.SPEAKERS, diarize.download_models, on_done)
+
+    def _download_finished(self, item: downloads.Download) -> None:
+        if item.error is not None:
+            self.toast(t("Model download failed: {error}", error=item.error), "warning", 8)
+            if self.state() in ("withdrawn", "iconic"):
+                self.tray.notify(t("Model download failed: {error}", error=item.error))
+        if item.kind == downloads.SPEECH:
+            self._check_speech_model()
+            if item.error is None and item.key in (self.settings["model"],
+                                                   self.settings.dictation_model()):
+                self.settings_changed()
+        self.tray.refresh()
+
+    def _build_models_card(self, sidebar) -> None:
+        """Sidebar card: a running download, or the missing speech model with a button."""
+        self._models = ctk.CTkFrame(sidebar, fg_color=C.info_soft, corner_radius=theme.RADIUS_MD)
+        self._models.grid_columnconfigure(0, weight=1)
+        self._models_title = ui.label(self._models, "", theme.XS + 1, "bold", anchor="w",
+                                      justify="left", wraplength=164)
+        self._models_title.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
+        self._models_text = ui.label(self._models, "", theme.XS, anchor="w", justify="left",
+                                     wraplength=164)
+        self._models_text.grid(row=1, column=0, sticky="ew", padx=12)
+        self._models_bar = ctk.CTkProgressBar(self._models, height=6, progress_color=C.info)
+        self._models_button = ui.secondary(self._models, "", self.download_speech_model,
+                                           width=10, height=30)
+        self._models_shown = None
+
+    def models_card_content(self) -> tuple | None:
+        """(style, title, text, fraction or None, button text or None) for the card, or None."""
+        readiness = self.speech_readiness(False)
+        name = downloads.model_name(readiness.model)
+        if readiness.state == downloads.DOWNLOADING:
+            return ("info", t("Downloading the speech model"),
+                    f"{name}\n{readiness.progress.describe()}\n"
+                    + t("Recording works when it is done."),
+                    readiness.progress.fraction or 0.0, None)
+        if readiness.state == downloads.MISSING:
+            return ("warning", t("No speech model"),
+                    t("Recording needs the speech model {model}. It is downloaded once from "
+                      "Hugging Face.", model=name),
+                    None, t("Download ({size})", size=downloads.model_size(readiness.model)))
+        if readiness.state == downloads.FAILED:
+            return ("warning", t("Download failed"),
+                    t("{model}: {error}", model=name, error=readiness.error or ""),
+                    None, t("Retry"))
+        running = self.downloads.running()
+        if running:
+            item = running[0]
+            return ("info", t("Downloading a model"), f"{item.name}\n{item.progress.describe()}",
+                    item.progress.fraction or 0.0, None)
+        return None
+
+    def _update_models(self) -> None:
+        blocked = self.recording_blocked(False) is not None
+        if blocked != self._blocked_shown:
+            self._blocked_shown = blocked
+            self.tray.refresh()
+        model = self.settings["model"]
+        stale = self._speech_check is not None and self._speech_check[0] != model
+        if stale or ((blocked or self._speech_check is None)
+                     and not self.downloads.is_running(model)
+                     and time.monotonic() - self._speech_checked_at > MODEL_CHECK_S):
+            # Missing: the model may arrive from the installer; changed: the wizard chose another.
+            self._check_speech_async()
+        if not self._screens or not hasattr(self, "_models") or not self._models.winfo_exists():
+            return
+        content = self.models_card_content()
+        # Progress in whole percents: no reconfiguring 15 times a second.
+        key = None if content is None else (content[:3], None if content[3] is None
+                                            else round(content[3], 2), content[4])
+        if key == self._models_shown:
+            return
+        self._models_shown = key
+        if content is None:
+            self._models.grid_forget()
+            return
+        style, title, text, fraction, button = content
+        color, soft = (C.info, C.info_soft) if style == "info" else (C.warning_ink, C.warning_soft)
+        self._models.configure(fg_color=soft)
+        self._models_title.configure(text=title, text_color=color)
+        self._models_text.configure(text=text)
+        if fraction is not None:
+            self._models_bar.set(fraction)
+            self._models_bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(6, 10))
+        else:
+            self._models_bar.grid_forget()
+        if button is not None:
+            self._models_button.configure(text=button)
+            self._models_button.grid(row=3, column=0, sticky="w", padx=12, pady=(8, 10))
+        else:
+            self._models_button.grid_forget()
+        self._models_text.grid_configure(pady=(0, 10) if fraction is None and button is None else 0)
+        self._models.grid(row=6, column=0, sticky="ew", padx=12, pady=(14, 0))
 
     # --- audio retention -------------------------------------------------------------
 
@@ -748,6 +953,7 @@ class App(ctk.CTk):
         if self._toast is not None and self._toast.winfo_exists() and time.monotonic() > self._toast_until:
             self._toast.place_forget()
         self._update_activity()
+        self._update_models()
         active = self.meeting.recording or self.dictation.recording
         self.tray.set_state(active, t("{app} - recording", app=config.APP_NAME) if active else None)
         if self._taskbar is not None:
@@ -758,6 +964,12 @@ class App(ctk.CTk):
                 self._taskbar.set(winshell.TaskbarProgress.NORMAL, max(1, int(m.progress * 100)))
             elif m.summarizing or self.dictation.queued:
                 self._taskbar.set(winshell.TaskbarProgress.INDETERMINATE)
+            elif running := self.downloads.running():
+                fraction = running[0].progress.fraction
+                if fraction is None:
+                    self._taskbar.set(winshell.TaskbarProgress.INDETERMINATE)
+                else:
+                    self._taskbar.set(winshell.TaskbarProgress.NORMAL, max(1, int(fraction * 100)))
             else:
                 self._taskbar.set(winshell.TaskbarProgress.NONE)
 

@@ -9,13 +9,14 @@ the file before it starts, see meeting.py).
 from __future__ import annotations
 
 import logging
-import threading
+import time
 from pathlib import Path
 from collections.abc import Callable
 
 import customtkinter as ctk
 
-from . import config, diarize, hardware, i18n, llm, retention, theme, transcribe, ui, winshell
+from . import (config, diarize, downloads, hardware, i18n, llm, retention, theme, transcribe, ui,
+               winshell)
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .screens import PAD, Screen, header, open_path
@@ -59,6 +60,7 @@ class LanguageModelPicker(ctk.CTkFrame):
         self.state.pack(side="left")
         self.download = ui.secondary(row, t("Download model"), self._download, width=10,
                                      height=30)
+        self._poll: str | None = None
         self.after(400, self.refresh)
 
     def _menu_items(self) -> tuple[list[str], str]:
@@ -160,44 +162,53 @@ class LanguageModelPicker(ctk.CTkFrame):
                 )
             return
         size = llm.size(model)
-        if llm.available(model):
+        item = self.app.downloads.get(model)
+        if item is not None and item.running:
+            self.state.configure(text=t("Downloading: {progress}", progress=item.progress.describe()),
+                                 text_color=C.info)
+            # The picker has no tick of its own (the wizard shows it too).
+            if self._poll is None:
+                self._poll = self.after(500, self._poll_download)
+        elif llm.available(model):
             self.state.configure(
                 text=t("Model downloaded ({size})", size=size),
                 text_color=C.success,
             )
         else:
-            self.state.configure(
-                text=t("Not downloaded ({size}). Transcription works without it.", size=size),
-                text_color=C.text_muted,
-            )
-            self.download.configure(text=t("Download model ({size})", size=size), state="normal")
+            if item is not None and item.error:
+                self.state.configure(
+                    text=t("Language model download failed: {error}", error=item.error),
+                    text_color=C.warning,
+                )
+                button = t("Retry download")
+            else:
+                self.state.configure(
+                    text=t("Not downloaded ({size}). Transcription works without it.", size=size),
+                    text_color=C.text_muted,
+                )
+                button = t("Download model ({size})", size=size)
+            self.download.configure(text=button, state="normal")
             self.download.pack(side="left", padx=(12, 0))
+
+    def _poll_download(self) -> None:
+        self._poll = None
+        self.refresh()
 
     def _download(self) -> None:
         model = self.value
         if not model or llm.is_custom(model):
             return
-        self.download.configure(state="disabled", text=t("Downloading..."))
 
-        def job() -> None:
-            error_message: str | None = None
-            try:
-                transcribe.model_path(model, download=True)
-            except Exception as error:
-                error_message = str(error)
-                log.exception("Language model download failed")
-            self.app.post(lambda: self.winfo_exists() and self.refresh())
-            if error_message is None:
+        def done(error: str | None) -> None:
+            if not self.winfo_exists():
+                return
+            self.refresh()
+            if error is None and self.value == model:
                 # Lets the owner update what depends on the model (the meeting names state).
-                self.app.post(lambda: self.winfo_exists() and self.value == model
-                              and self._on_change(model))
-            else:
-                self.app.post(lambda m=error_message: self.winfo_exists() and self.state.configure(
-                    text=t("Language model download failed: {error}", error=m),
-                    text_color=C.warning,
-                ))
+                self._on_change(model)
 
-        threading.Thread(target=job, daemon=True).start()
+        self.app.download_model(model, downloads.LANGUAGE, on_done=done)
+        self.refresh()
 
 
 class Section(ctk.CTkFrame):
@@ -267,6 +278,7 @@ class SettingsScreen(Screen):
         self._build_storage()
         self._build_about()
         self._profile_loaded = False
+        self._download_tick = 0.0
 
     def _section(self, title: str, description: str | None = None) -> Section:
         section = Section(self.scroll, title, description)
@@ -474,9 +486,19 @@ class SettingsScreen(Screen):
         # Parakeet (optional backend) ignores the device setting.
         cpu_only = config.MODELS.get(model, {}).get("backend") == "parakeet"
         note = " " + t("Runs on the CPU only.") if cpu_only else ""
-        if transcribe.model_downloaded(model):
+        item = self.app.downloads.get(model)
+        if item is not None and item.running:
+            self.model_state.configure(
+                text=t("Downloading: {progress}", progress=item.progress.describe()) + note,
+                text_color=C.info)
+        elif transcribe.model_downloaded(model):
             self.model_state.configure(text=t("Model downloaded ({size})", size=size) + note,
                                        text_color=C.success)
+        elif item is not None and item.error:
+            self.model_state.configure(text=t("Model download failed: {error}", error=item.error),
+                                       text_color=C.warning)
+            self.download.configure(text=t("Retry download"), state="normal")
+            self.download.pack(side="left", padx=(12, 0))
         else:
             self.model_state.configure(text=t("Model not downloaded ({size})", size=size) + note,
                                        text_color=C.warning)
@@ -484,21 +506,21 @@ class SettingsScreen(Screen):
             self.download.pack(side="left", padx=(12, 0))
 
     def _download(self) -> None:
-        model = self.settings["model"]
-        self.download.configure(state="disabled", text=t("Downloading..."))
+        # The app reloads dictation when the model arrives (App._download_finished).
+        self.app.download_model(self.settings["model"],
+                                on_done=lambda _error: self.winfo_exists() and self._refresh_model())
+        self._refresh_model()
 
-        def job():
-            try:
-                transcribe.model_path(model, download=True)
-            except Exception as error:
-                message = str(error)
-                log.exception("Model download failed")
-                self.app.post(lambda: self.app.toast(t("Model download failed: {error}", error=message),
-                                                     "warning"))
-            self.app.post(self._refresh_model)
-            self.app.post(self.app.settings_changed)
-
-        threading.Thread(target=job, daemon=True).start()
+    def tick(self) -> None:
+        # Progress of a running download next to its button; the main window has the bar.
+        now = time.monotonic()
+        if now - self._download_tick < 0.5:
+            return
+        self._download_tick = now
+        if self.app.downloads.is_running(self.settings["model"]):
+            self._refresh_model()
+        if self.app.downloads.is_running(downloads.SPEAKER_MODELS):
+            self._refresh_speakers()
 
     # --- transcription ----------------------------------------------------------------
 
@@ -549,34 +571,38 @@ class SettingsScreen(Screen):
                 text=t("Needs the optional sherpa-onnx package: run the installer again with -WithSpeakers."),
                 text_color=C.warning,
             )
+            return
+        item = self.app.downloads.get(downloads.SPEAKER_MODELS)
+        if item is not None and item.running:
+            self.speaker_state.configure(
+                text=t("Downloading: {progress}", progress=item.progress.describe()),
+                text_color=C.info,
+            )
         elif diarize.models_downloaded():
             self.speaker_state.configure(
                 text=t("Models downloaded ({size})", size=size),
                 text_color=C.success,
             )
         else:
-            self.speaker_state.configure(
-                text=t("Models not downloaded ({size})", size=size),
-                text_color=C.text_muted,
-            )
-            self.speaker_download.configure(
-                text=t("Download models ({size})", size=size), state="normal")
+            if item is not None and item.error:
+                self.speaker_state.configure(
+                    text=t("Speaker model download failed: {error}", error=item.error),
+                    text_color=C.warning,
+                )
+                button = t("Retry download")
+            else:
+                self.speaker_state.configure(
+                    text=t("Models not downloaded ({size})", size=size),
+                    text_color=C.text_muted,
+                )
+                button = t("Download models ({size})", size=size)
+            self.speaker_download.configure(text=button, state="normal")
             self.speaker_download.pack(side="left", padx=(12, 0))
 
     def _download_speakers(self) -> None:
-        self.speaker_download.configure(state="disabled", text=t("Downloading..."))
-
-        def job():
-            try:
-                diarize.download_models()
-            except Exception as error:
-                message = str(error)
-                log.exception("Speaker model download failed")
-                self.app.post(lambda: self.app.toast(
-                    t("Speaker model download failed: {error}", error=message), "warning"))
-            self.app.post(self._refresh_speakers)
-
-        threading.Thread(target=job, daemon=True).start()
+        self.app.download_speaker_models(
+            on_done=lambda _error: self.winfo_exists() and self._refresh_speakers())
+        self._refresh_speakers()
 
     # --- dictation --------------------------------------------------------------------
 

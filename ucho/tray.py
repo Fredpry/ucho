@@ -25,6 +25,7 @@ class Item:
     action: Callable[[], None]
     default: bool = False
     visible: Callable[[], bool] = field(default=lambda: True)
+    enabled: Callable[[], bool] = field(default=lambda: True)
 
 
 class TrayIcon:
@@ -48,7 +49,8 @@ class TrayIcon:
 
         def entry(item: Item):
             return pystray.MenuItem(lambda _: item.text(), lambda: item.action(),
-                                    default=item.default, visible=lambda _: item.visible())
+                                    default=item.default, visible=lambda _: item.visible(),
+                                    enabled=lambda _: item.enabled())
 
         menu = pystray.Menu(*[pystray.Menu.SEPARATOR if item is None else entry(item)
                               for item in self._items])
@@ -77,6 +79,15 @@ class TrayIcon:
             self._icon.update_menu()
         except Exception:
             log.debug("Could not update the tray icon", exc_info=True)
+
+    def notify(self, text: str) -> None:
+        """A Windows notification from the tray icon (when the window is hidden)."""
+        if self._icon is None:
+            return
+        try:
+            self._icon.notify(text, self._title)
+        except Exception:
+            log.debug("Could not show a tray notification", exc_info=True)
 
     def refresh(self) -> None:
         if self._icon is not None:

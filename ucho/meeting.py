@@ -52,7 +52,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import config, llm, session, titles, transcribe
+from . import config, downloads, llm, session, titles, transcribe
 from .events import Emitter
 from .i18n import t
 from .merge import (META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
@@ -179,6 +179,12 @@ class MeetingController(Emitter):
 
     def start(self, name: str = "") -> bool:
         if self.recording:
+            return False
+        # No speech model on the disk (still downloading, or missing): nothing could
+        # transcribe the recording, so it does not start (#28).
+        blocked = downloads.recording_blocked(self.app)
+        if blocked:
+            self.app.refuse_recording(blocked)
             return False
         from . import audio
 

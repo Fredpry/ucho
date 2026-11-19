@@ -8,7 +8,9 @@ themes and both window layouts, and grabs each window by its rectangle
 (DwmGetWindowAttribute / GetWindowRect via ctypes, PIL ImageGrab).
 
 Nothing is recorded: the "recording" shots use a fake recorder that only
-reports levels. No model is loaded.
+reports levels. No model is loaded, and nothing is downloaded: the speech
+model counts as present, and the "model-*" shots show a made-up download or a
+missing model (#28).
 
     python tools/screenshots.py                    # all shots into docs/screens
     python tools/screenshots.py --only meeting     # shots whose name contains "meeting"
@@ -176,6 +178,21 @@ def main(argv: list[str]) -> int:
         d.recording_start = time.monotonic() - 7
         d.microphone.level = 0.21 if on else 0.0
 
+    def model(state: str):
+        # The speech model gate (ucho/downloads.py) without the disk or the network.
+        from ucho import downloads
+
+        name = settings["model"]
+        app.downloads._items.pop(name, None)
+        app._speech_generation += 1  # a disk check still running is ignored
+        app._speech_check = (name, state != "missing")
+        app._speech_checked_at = time.monotonic() + 3600  # no new disk check meanwhile
+        if state == "downloading":
+            item = downloads.Download(name, downloads.model_name(name), downloads.SPEECH)
+            item.counter.add_total(1520 * downloads.MB)
+            item.counter.advance(640 * downloads.MB)
+            app.downloads._items[name] = item
+
     def transcribing(on: bool):
         # The live transcript screen of a running transcription, without a model:
         # only the controller state the screen reads (#14: the progress row).
@@ -191,8 +208,10 @@ def main(argv: list[str]) -> int:
     def shot(name, prepare, window=None):
         shots.append((name, prepare, window))
 
+    model("ready")
     for mode in ("light", "dark"):
-        shot(f"meeting-{mode}", lambda m=mode: (app.set_theme(m), recording(False), app.show("meeting")))
+        shot(f"meeting-{mode}", lambda m=mode: (app.set_theme(m), model("ready"), recording(False),
+                                                app.show("meeting")))
         shot(f"meeting-recording-{mode}", lambda: (recording(True), app.show("meeting")))
         shot(f"meeting-live-{mode}", lambda: (live(True), app.show("meeting")))
         shot(f"dictation-{mode}", lambda: (live(False), recording(False), app.show("dictation")))
@@ -204,8 +223,13 @@ def main(argv: list[str]) -> int:
              lambda: (transcribing(False), app.show("settings", section="hardware")))
         shot(f"settings-llm-{mode}", lambda: app.show("settings", section="llm"))
         shot(f"settings-titles-{mode}", lambda: app.show("settings", section="titles"))
+        shot(f"model-downloading-{mode}", lambda: (model("downloading"), app.show("meeting")))
+        shot(f"model-downloading-dictation-{mode}", lambda: app.show("dictation"))
+        shot(f"model-missing-{mode}", lambda: (model("missing"), app.show("meeting")))
+        shot(f"model-missing-settings-{mode}",
+             lambda: app.show("settings", section="hardware"))
     shot("transcript-all-actions-light",
-         lambda: (app.set_theme("light"),
+         lambda: (app.set_theme("light"), model("ready"),
                   app.show("transcript", folder=recordings / "2026-11-07_09-15_Przeglad-sprintu")))
     shot("wizard-language-light", lambda: (app.set_theme("light"), app.show_wizard(0)))
     shot("wizard-hardware-light", lambda: app.show_wizard(2))

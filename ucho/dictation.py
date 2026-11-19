@@ -40,7 +40,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from . import config, live, transcribe
+from . import config, downloads, live, transcribe
 from .events import Emitter
 from .i18n import t
 
@@ -989,6 +989,9 @@ class DictationController(Emitter):
             return self._waiting_text() or t("Recognizing…"), "working", hint
         if self._message and time.monotonic() < self._message_until:
             return self._message[0], self._message[1], hint
+        blocked = downloads.recording_blocked(self.app, check=False)
+        if blocked:
+            return t("Speech model not ready"), "warning", blocked
         if error:
             return t("Shortcut unavailable"), "warning", error
         if self.model_state == "error":
@@ -1039,6 +1042,12 @@ class DictationController(Emitter):
 
     def start(self) -> bool:
         if self.recording:
+            return False
+        blocked = downloads.recording_blocked(self.app)
+        if blocked:
+            # No speech model on the disk: nothing could recognize the dictation (#28).
+            self.app.refuse_recording(blocked)
+            self._emit("state")
             return False
         # Before anything of ours can take the focus: this is where the text goes.
         try:
