@@ -32,6 +32,41 @@ def test_strip_outro_keeps_what_the_user_could_have_said():
         assert strip_outro(text) == text
 
 
+def test_thank_you_for_watching_is_a_hallucination():
+    # #27: "^thanks? for watching" missed the most common variant.
+    from ucho.merge import is_hallucination
+    for text in ("Thank you for watching.", "Thank you for watching!", "Thanks for watching.",
+                 "Thank you so much for watching!", "Thank you very much for watching.",
+                 "thank you for watching"):
+        assert is_hallucination(text), text
+    # A plain "Thank you." is dropped only as a whole utterance (as before);
+    # inside real speech it stays.
+    assert not is_hallucination("Thank you for the report, send it by Friday.")
+
+
+def test_strip_outro_cuts_thank_you_for_watching():
+    assert strip_outro("Spotkanie jutro o dziesiątej. Thank you for watching.") ==         "Spotkanie jutro o dziesiątej."
+    assert strip_outro("Send the report. Thank you so much for watching!") == "Send the report."
+    # Glued to the last sentence without a full stop.
+    assert strip_outro("Spotkanie jutro o dziesiątej thank you for watching") ==         "Spotkanie jutro o dziesiątej"
+    assert strip_outro("Spotkanie jutro o dziesiątej, Thank you for watching.") ==         "Spotkanie jutro o dziesiątej"
+    assert strip_outro("Wyślij raport dziękuję za obejrzenie") == "Wyślij raport"
+
+
+def test_strip_outro_keeps_a_real_thank_you():
+    for text in ("Send the report. Thank you.", "Prześlij to do piątku. Dziękuję.",
+                 "Zamykamy temat dziękuję za uwagę", "Thank you for watching."):
+        assert strip_outro(text) == text
+
+
+def test_clean_drops_thank_you_for_watching_at_the_end_of_a_meeting():
+    segments = [
+        Segment(0.0, 4.0, "Budżet zamykamy w piątek.", "me"),
+        Segment(4.0, 6.0, "Thank you for watching.", "meeting"),
+    ]
+    assert [s.text for s in clean(segments)] == ["Budżet zamykamy w piątek."]
+
+
 def test_clean_strips_an_outro_appended_to_a_segment():
     result = clean([Segment(0.0, 5.0, "Budżet zamykamy w piątek. Dziękuję za uwagę.", "me")])
     assert [s.text for s in result] == ["Budżet zamykamy w piątek."]

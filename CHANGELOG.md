@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Transcripts and dictations no longer end with an invented "Thank you for watching." (#27): the filter matched only "Thanks for watching". "Thank you (so / very much) for watching" is now dropped as a whole utterance and cut from the end of a text, also when Whisper glues it to the last sentence without a full stop.
 - Error paths found in a code review: a recording whose second track cannot start no longer leaks the first track's stream and PortAudio; a failing speaker detection no longer leaves the meeting controller busy until a restart; Esc during the 0.25 s dictation tail no longer lets a stale finish submit an empty dictation; a failing `meta.json` write after a recording is a warning instead of an unhandled error; the audio watchdog survives a failed stream restart; recording-path errors are logged instead of swallowed.
 - `settings.json` and `meta.json` are written through a temp file and `os.replace`, so a crash mid-write keeps the old file; a failed settings save is logged.
 - Privacy and hardening: `ucho.log` is capped (about 2 MB plus `ucho.log.1`); logs no longer carry meeting titles, folder names or person names; the MCP server rejects ids that are links or not direct children of the recordings folder, reads only real files, and survives malformed JSON-RPC messages; `install.ps1` passes model ids to Python as arguments instead of code; GGUF headers with deeply nested arrays are rejected.
