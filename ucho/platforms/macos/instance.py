@@ -3,10 +3,12 @@
 """One Ucho per user on macOS: a lock file plus a Unix socket for commands.
 
 The first process holds `fcntl.flock` on `<lock_dir>/ucho.lock` and serves a
-Unix socket next to it. A second start (the Dock, Finder, `open -a Ucho
---args --dictate`) finds the lock taken, connects to the socket, sends one
-ASCII line from `COMMANDS` ("show", "dictate", "record") and exits once the
-first process answered "ok".
+Unix socket next to it. A second process (`python -m ucho --dictate`,
+`Ucho.app/Contents/MacOS/Ucho --dictate`, `open -n`) finds the lock taken,
+connects to the socket, sends one ASCII line from `COMMANDS` ("show",
+"dictate", "record") and exits once the first process answered "ok". The
+Dock, Finder and `open -a` start no second process for a running app: they
+activate it and send a reopen event (`::tk::mac::ReopenApplication` in app.py).
 
 Why flock: the kernel releases it when the process dies, even after
 `kill -9`, so a crashed Ucho never blocks the next start. The socket file
