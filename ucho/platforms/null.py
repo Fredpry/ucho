@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
     from ..audio import DeviceInfo
     from ..hardware import GraphicsAdapter
     from .base import Permission, SoundEvent, WindowRef
+
+log = logging.getLogger(__name__)
 
 
 class NullDelayedOffer:
@@ -112,6 +115,8 @@ class NullHotkeys:
     def start(self, bindings: dict[str, str]) -> dict[str, str]:
         from ..i18n import t
 
+        if bindings:
+            log.warning("Global hotkeys are not supported on this system")
         message = t("Global hotkeys are not supported on this system.")
         return {name: message for name in bindings}
 
@@ -131,7 +136,7 @@ class NullInstance:
     def acquire(self) -> bool:
         return True
 
-    def listen(self, handler: Callable[[str], None]) -> None:
+    def listen(self, on_command: Callable[[str], None]) -> None:
         pass
 
     def signal(self, command: str) -> bool:
@@ -150,10 +155,10 @@ class NullShell:
     def window_handle(self, tk_window) -> int:
         return 0
 
-    def describe_window(self, tk_window) -> bool:
+    def describe_window(self, tk_window, dictation: bool = False) -> bool:
         return False
 
-    def after_start(self, app_id: str, tasks: list[tuple[str, str]]) -> None:
+    def after_start(self, app_id: str, tasks: list[tuple[str, str, str]]) -> None:
         pass
 
     def progress(self, tk_window) -> None:
@@ -171,16 +176,19 @@ class NullShell:
     def autostart_set(self, enabled: bool) -> bool:
         return False
 
+    def autostart_sync(self, enabled: bool) -> None:
+        pass
+
     def open_path(self, path) -> None:
         pass
 
-    def work_area(self) -> tuple[int, int, int, int] | None:
+    def work_area(self) -> tuple[int, int] | None:
         return None
 
     def show_without_focus(self, tk_window) -> None:
         tk_window.deiconify()
 
-    def set_window_icon(self, tk_window) -> None:
+    def set_window_icon(self, tk_window, dictation: bool = False) -> None:
         pass
 
     def autostart_label(self) -> str:

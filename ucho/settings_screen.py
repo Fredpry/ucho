@@ -15,8 +15,8 @@ from collections.abc import Callable
 
 import customtkinter as ctk
 
-from . import (config, diarize, downloads, hardware, i18n, llm, retention, theme, transcribe, ui,
-               winshell)
+from . import (config, diarize, downloads, hardware, i18n, llm, platforms, retention, theme,
+               transcribe, ui)
 from .hotkeys import label as hotkey_label
 from .i18n import t
 from .screens import PAD, Screen, header, open_path
@@ -309,7 +309,7 @@ class SettingsScreen(Screen):
             m, list(languages), t(config.UI_LANGUAGE_LABELS.get(self.settings["ui_language"],
                                                                  config.UI_LANGUAGE_LABELS["auto"])),
             lambda v: self.app.set_ui_language(languages[v])))
-        s.row(t("Start with Windows"), lambda m: ui.switch(
+        s.row(platforms.shell().autostart_label(), lambda m: ui.switch(
             m, t("Start Ucho in the tray when I sign in"), self.settings["start_with_windows"],
             self.app.set_autostart))
         s.row(t("Closing the window"), lambda m: ui.switch(
@@ -924,19 +924,6 @@ class SettingsScreen(Screen):
         open_diagnostics(self.app)
 
 
-def autostart_command() -> str:
-    from .app import start_command
-
-    return start_command() + " --minimized"
-
-
 def sync_autostart(settings: config.Settings) -> None:
     """Makes the Run entry match the setting (also fixes a moved installation)."""
-    enabled = bool(settings["start_with_windows"])
-    current = winshell.autostart_command()
-    wanted = autostart_command()
-    if enabled and current != wanted:
-        winshell.set_autostart(True, wanted)
-    elif not enabled and current is not None and "ucho.pyw" in current.lower():
-        # Only an entry this app wrote; a "Ucho" entry made by hand stays.
-        winshell.set_autostart(False, wanted)
+    platforms.shell().autostart_sync(bool(settings["start_with_windows"]))
