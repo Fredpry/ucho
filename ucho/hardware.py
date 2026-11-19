@@ -39,6 +39,8 @@ LARGE_INT8 = "OpenVINO/whisper-large-v3-int8-ov"
 LARGE_FP16 = "OpenVINO/whisper-large-v3-fp16-ov"
 TURBO_INT8 = "OpenVINO/whisper-large-v3-turbo-int8-ov"
 TURBO_INT4 = "OpenVINO/whisper-large-v3-turbo-int4-ov"
+WCPP_LARGE = "ggerganov/whisper.cpp:ggml-large-v3-q5_0.bin"
+WCPP_TURBO = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin"
 
 # Language models for meeting names and summaries. The recommendation never
 # changes their device: they use the transcription device, with CPU fallback.
@@ -113,12 +115,15 @@ class HardwareProfile:
     devices: list[OvDevice] = field(default_factory=list)
     adapters: list[GraphicsAdapter] = field(default_factory=list)
     openvino_version: str = ""
+    system: str = ""
 
     @property
     def ram_gb(self) -> float:
         """RAM used by the rules: nominal when known, otherwise visible + tolerance."""
         if self.ram_installed_gb:
             return self.ram_installed_gb
+        if self.system == "darwin":
+            return self.ram_total_gb
         return self.ram_total_gb + RAM_TOLERANCE_GB
 
     @property
@@ -238,7 +243,7 @@ def _safe(probe: Callable, default):
 
 def profile() -> HardwareProfile:
     """Reads the hardware profile. Every probe may fail without breaking the rest."""
-    p = HardwareProfile(logical_cores=os.cpu_count() or 0)
+    p = HardwareProfile(logical_cores=os.cpu_count() or 0, system=sys.platform)
     p.ram_total_gb, p.ram_free_gb, p.ram_installed_gb = _safe(_ram, (0.0, 0.0, None))
     p.cpu_name = _safe(_cpu_name, "")
     p.physical_cores = _safe(_physical_cores, None)
@@ -279,6 +284,8 @@ RULES: dict[str, Rule] = {
         Rule("low_ram", TURBO_INT4, "CPU", TURBO_INT4, None),
         Rule("gpu_turbo", TURBO_INT8, "GPU", TURBO_INT8, "gpu_turbo_int4"),
         Rule("gpu_turbo_int4", TURBO_INT4, "GPU", TURBO_INT4, None),
+        Rule("mac_large", WCPP_LARGE, "METAL", WCPP_TURBO, "mac_turbo"),
+        Rule("mac_turbo", WCPP_TURBO, "METAL", WCPP_TURBO, None),
     )
 }
 
@@ -310,6 +317,20 @@ def _choose_rule(p: HardwareProfile) -> tuple[str, list[str], list[str]]:
     gpu = p.usable_gpu()
     reasons: list[str] = []
     warnings: list[str] = []
+
+    if p.system == "darwin":
+        reasons.append(t("Apple Silicon: transcription with whisper.cpp on the GPU (Metal)."))
+        if ram >= 16:
+            reasons.append(t(
+                "{ram} GB RAM: the full large-v3 model for meetings, the faster turbo model for dictation.",
+                ram=_num(ram),
+            ))
+            return "mac_large", reasons, warnings
+        reasons.append(t(
+            "{ram} GB RAM: the faster turbo model for meetings and dictation.",
+            ram=_num(ram),
+        ))
+        return "mac_turbo", reasons, warnings
 
     if ram < 8:
         warnings.append(t("Less than 8 GB RAM ({ram} GB): the smallest model was chosen. "
@@ -395,6 +416,21 @@ def recommend_llm(p: HardwareProfile) -> LlmRecommendation:
     the system RAM, so RAM decides unless a discrete GPU brings its own memory.
     """
     ram = p.ram_gb
+    if p.system == "darwin":
+        if ram <= 8:
+            return LlmRecommendation(LLM_SMALL, [t(
+                "{ram} GB RAM: only the smallest language model fits next to speech recognition.",
+                ram=_num(ram),
+            )])
+        if ram <= 16:
+            return LlmRecommendation(LLM_MEDIUM, [t(
+                "{ram} GB RAM: the 4B language model on the CPU writes good Polish.",
+                ram=_num(ram),
+            )])
+        return LlmRecommendation(LLM_LARGE, [t(
+            "{ram} GB RAM: the largest language model fits.",
+            ram=_num(ram),
+        )])
     gpu = p.usable_gpu()
     if ram < 8:
         rec = LlmRecommendation(LLM_SMALL, [t(
@@ -535,14 +571,14 @@ def _forced_kwargs(engine, tokens: int) -> dict:
 def benchmark(model: str, device: str, seconds: float = 10.0) -> BenchmarkResult:
     """Measures the real-time factor of `model` on `device` with a synthetic signal.
 
-    Reuses transcribe.Engine for loading, so the GPU to CPU fallback and the
+    Builds the engine through transcribe.create_engine, so the GPU to CPU fallback and the
     restricted language detection behave as in a real transcription. The first
     call is a warm-up: on the GPU it allocates buffers, which a long recording
     pays only once. Raises when the model is not downloaded.
     """
     from . import transcribe
 
-    engine = transcribe.Engine(model, device)
+    engine = transcribe.create_engine(model, device)
     start = time.monotonic()
     engine.load()
     load_s = time.monotonic() - start

@@ -97,7 +97,13 @@ def test_missing_modules_fall_back_to_null_and_cache():
                 first = accessor()
                 second = accessor()
                 assert first is second
-                assert type(first).__module__ == "ucho.platforms.null"
+                if fam == "null":
+                    assert type(first).__module__ == "ucho.platforms.null"
+                else:
+                    assert type(first).__module__ in (
+                        "ucho.platforms.null",
+                        f"ucho.platforms.macos.{accessor.__name__}",
+                    )
 
             h1 = platforms.hotkeys(lambda _n: None)
             h2 = platforms.hotkeys(lambda _n: None)

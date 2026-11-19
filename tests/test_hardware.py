@@ -74,7 +74,7 @@ def test_every_model_in_rules_is_known():
     for rule in hardware.RULES.values():
         assert rule.model in config.MODELS
         assert rule.dictation_model in config.MODELS
-        assert rule.model in config.REVISIONS
+        assert config.split_model_id(rule.model)[0] in config.REVISIONS
         assert rule.step_down is None or rule.step_down in hardware.RULES
 
 
