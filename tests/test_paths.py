@@ -139,12 +139,31 @@ def test_is_cloud_path_linux():
 
 
 def test_import_config_creates_no_files(tmp_path):
+    data = tmp_path / "data"
     env = os.environ.copy()
-    env["UCHO_DATA_DIR"] = str(tmp_path)
+    env["UCHO_DATA_DIR"] = str(data)
     subprocess.run(
         [sys.executable, "-c", "import ucho.config"],
         cwd=paths.app_dir(),
         env=env,
         check=True,
     )
+    assert not data.exists()
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32" or bool(os.environ.get("UCHO_DATA_DIR")),
+    reason="Windows paths without the UCHO_DATA_DIR override",
+)
+def test_windows_config_paths_unchanged():
+    # Values as computed before ucho/paths.py existed.
+    old_project = Path(config.__file__).resolve().parent.parent
+    assert config.PROJECT_DIR == old_project
+    assert config.DATA_DIR == old_project
+    assert config.LEGACY_MODELS_DIR == old_project / "modele"
+    assert config.MODELS_DIR in (old_project / "models", old_project / "modele")
+    assert config.OV_CACHE_DIR == config.MODELS_DIR / "ovcache"
+    assert config.SETTINGS_FILE == old_project / "settings.json"
+    assert config.LOG_FILE == old_project / "ucho.log"
+    assert type(config.SETTINGS_FILE) is type(old_project)
