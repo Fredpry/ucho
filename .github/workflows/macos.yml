@@ -40,7 +40,7 @@ jobs:
       - name: Install test dependencies
         run: >-
           python -m pip install pytest==9.2.0 ruff==0.17.5 numpy==2.5.3 soundfile==0.14.0
-          customtkinter==6.0.0 pillow==13.0.0 soxr==1.1.0
+          customtkinter==6.0.0 pillow==13.0.0 soxr==1.1.0 sounddevice==0.5.6
       - name: Tests
         env:
           PYTHONIOENCODING: utf-8
