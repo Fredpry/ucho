@@ -834,7 +834,7 @@ TCC_DATABASES = [Path.home() / "Library" / "Application Support" / "com.apple.TC
                  Path("/Library/Application Support/com.apple.TCC/TCC.db")]
 
 
-def tcc_grant(out: Path, home: str) -> None:
+def tcc_grant(out: Path, home: str, client: str | None = None) -> None:
     """Run as root (sudo): copy every kTCCServiceMicrophone row to kTCCServiceAudioCapture.
 
     Experiment from the plan (M3a point 7): the runner images pre-grant the microphone by
@@ -852,16 +852,22 @@ def tcc_grant(out: Path, home: str) -> None:
                 "SELECT client, auth_value FROM access WHERE service='kTCCServiceAudioCapture'").fetchall()
             entry["microphone_clients"] = con.execute(
                 "SELECT client, auth_value FROM access WHERE service='kTCCServiceMicrophone'").fetchall()
-            select = ", ".join("'kTCCServiceAudioCapture'" if c == "service" else c for c in columns)
+            values = {"service": "'kTCCServiceAudioCapture'"}
+            limit = ""
+            if client:  # one row for a bundle id (client_type 0), no code requirement
+                values.update(client=f"'{client}'", client_type="0", csreq="NULL")
+                limit = " LIMIT 1"
+            select = ", ".join(values.get(c, c) for c in columns)
             cursor = con.execute(f"INSERT OR REPLACE INTO access ({', '.join(columns)}) "
-                                 f"SELECT {select} FROM access WHERE service='kTCCServiceMicrophone'")
+                                 f"SELECT {select} FROM access WHERE service='kTCCServiceMicrophone'{limit}")
             con.commit()
             entry["inserted"] = cursor.rowcount
             con.close()
         except Exception as error:
             entry["error"] = f"{type(error).__name__}: {error}"
     result["killall_tccd"] = run_cmd(["killall", "tccd"])
-    (out / "tcc_grant.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    name = f"tcc_grant_{client}.json" if client else "tcc_grant.json"
+    (out / name).write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
 
 
 def check_tap_granted(out: Path) -> dict:
@@ -910,13 +916,14 @@ def check_microphone(out: Path) -> dict:
 LIGHT_EXCLUDES = ["openvino", "openvino_genai", "openvino_tokenizers", "catap", "sounddevice", "soundfile"]
 
 
-def _build_probe(out: Path, temp: Path, name: str, excludes: list[str]) -> dict:
+def _build_probe(out: Path, temp: Path, name: str, excludes: list[str], extra: list[str] | None = None) -> dict:
     d: dict = {}
     args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", name,
             "--osx-bundle-identifier", f"app.ucho.spike.{name.lower()}", "--distpath", str(temp / "dist"),
             "--workpath", str(temp / "build" / name), "--specpath", str(temp)]
     for module in excludes:
         args += ["--exclude-module", module]
+    args += extra or []
     build = run_cmd(args + [str(HERE / "pyi_probe.py")], timeout=900, tail=8000)
     log = build.get("err", "") + build.get("out", "")
     (out / f"pyinstaller-{name}.log").write_text(log, encoding="utf-8")
@@ -1023,6 +1030,40 @@ def _signing_survey(site: Path, temp: Path) -> dict:
     return {"checked": len(files), "refused": refused, "authorities": authorities}
 
 
+def _tap_in_app(out: Path, app: Path) -> dict:
+    """Run 4: the tap blocks in AudioDeviceCreateIOProcID for a bare python, even with a TCC row.
+    Try it from the frozen .app with NSAudioCaptureUsageDescription: direct exec, through
+    LaunchServices (`open`, the app is then the responsible process) and after a TCC row for
+    the bundle id."""
+    d: dict = {}
+    plist = app / "Contents" / "Info.plist"
+    for key in ("NSAudioCaptureUsageDescription", "NSMicrophoneUsageDescription"):
+        d[f"plist_{key}"] = run_cmd(["plutil", "-insert", key, "-string", "Ucho spike: system audio test", str(plist)])
+    d["resign"] = run_cmd(["codesign", "--force", "--deep", "-s", "-", str(app)])
+    d["verify"] = run_cmd(["codesign", "--verify", "--deep", "--strict", str(app)]).get("rc")
+    exe = app / "Contents" / "MacOS" / app.stem
+    wav = str(out / "tts_en.wav")
+    bundle_id = run_cmd(["plutil", "-extract", "CFBundleIdentifier", "raw", str(plist)]).get("out", "").strip()
+    d["bundle_id"] = bundle_id
+
+    def read(name: str) -> object:
+        path = out / name
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    run = run_cmd([str(exe), "tap", wav, str(out / "tap_app_direct.json")], timeout=90)
+    d["direct"] = {"rc": run.get("rc"), "seconds": run.get("seconds"), "result": read("tap_app_direct.json")}
+    run = run_cmd(["open", "-W", "-n", str(app), "--args", "tap", wav, str(out / "tap_app_open.json")], timeout=90)
+    d["open"] = {"rc": run.get("rc"), "seconds": run.get("seconds"), "result": read("tap_app_open.json")}
+    d["grant"] = run_cmd(["sudo", "-n", sys.executable, str(Path(__file__)), "tcc-grant", "--home", str(Path.home()),
+                          "--client", bundle_id, "--out", str(out)], timeout=60)
+    time.sleep(2)
+    run = run_cmd(["open", "-W", "-n", str(app), "--args", "tap", wav, str(out / "tap_app_open_granted.json")],
+                  timeout=90)
+    d["open_granted"] = {"rc": run.get("rc"), "seconds": run.get("seconds"),
+                         "result": read("tap_app_open_granted.json")}
+    return d
+
+
 def check_pyinstaller(out: Path) -> dict:
     import sysconfig
 
@@ -1061,8 +1102,15 @@ def check_pyinstaller(out: Path) -> dict:
             info["replaced"] = True
         stripped.append({"lib": item, **info})
     shutil.rmtree(Path.home() / "Library" / "Application Support" / "pyinstaller", ignore_errors=True)
-    full = d["full"] = _build_probe(out, temp, "FullProbe", [])
+    # Run 4: OpenVINO had no devices and catap's native dylib was missing in the frozen app.
+    full = d["full"] = _build_probe(out, temp, "FullProbe", [], ["--collect-all", "openvino",
+                                                                   "--collect-binaries", "catap"])
     fixes = [s["lib"] for s in stripped if s.get("replaced")]
+    if full.get("app"):
+        app = Path(full["app"])
+        full["openvino_files"] = sorted(str(p.relative_to(app)) for p in app.rglob("*")
+                                        if "plugin" in p.name or p.name == "plugins.xml")[:30]
+        d["tap_in_app"] = _tap_in_app(out, app)
     lp, fp = light.get("probe", {}), full.get("probe", {})
     ok = (light.get("codesign_verify", {}).get("rc") == 0 and len(_hits(lp.get("text", ""), KEYWORDS_EN)) >= 3)
     return {"status": "ok" if ok else "fail",
@@ -1074,7 +1122,9 @@ def check_pyinstaller(out: Path) -> dict:
                        f"{full.get('codesign_verify', {}).get('rc')}, hits={len(_hits(fp.get('text', ''), KEYWORDS_EN))}, "
                        f"openvino={fp.get('openvino')}, catap={str(fp.get('catap'))[:120]}, "
                        f"sounddevice={str(fp.get('sounddevice'))[:40]}, soundfile={fp.get('soundfile')}, "
-                       f"pystray={fp.get('pystray')}",
+                       f"pystray={fp.get('pystray')}, genai={fp.get('openvino_genai')}; tap in .app: "
+                       + "; ".join(f"{k}: {str(((d.get('tap_in_app') or {}).get(k) or {}).get('result'))[:160]}"
+                                   for k in ("direct", "open", "open_granted")),
             "details": d}
 
 
@@ -1094,7 +1144,7 @@ CHECKS: dict[str, tuple[Callable[[Path], dict], int]] = {
     "microphone": (check_microphone, 60),
     "tap": (check_tap, 240),
     "tap_granted": (check_tap_granted, 300),
-    "pyinstaller": (check_pyinstaller, 2700),
+    "pyinstaller": (check_pyinstaller, 3000),
 }
 
 
@@ -1163,12 +1213,13 @@ def main() -> int:
     parser.add_argument("name", nargs="*")
     parser.add_argument("--out", type=Path, default=Path("spike-out"))
     parser.add_argument("--home", default=str(Path.home()))
+    parser.add_argument("--client")
     args = parser.parse_args()
     if args.command == "hotkey-holder":
         hotkey_holder()
         return 0
     if args.command == "tcc-grant":
-        tcc_grant(args.out, args.home)
+        tcc_grant(args.out, args.home, args.client)
         return 0
     args.out.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
