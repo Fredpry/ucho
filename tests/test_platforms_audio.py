@@ -259,7 +259,7 @@ def test_recorder_null_override_warning_and_restart_streams(monkeypatch, tmp_pat
         assert len(opened) == 2
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only backends")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only: WASAPI audio and Segoe fonts backends")
 def test_windows_fonts_audio_and_protocol_contracts():
     from ucho.platforms.windows import audio as win_audio
     from ucho.platforms.windows import fonts as win_fonts

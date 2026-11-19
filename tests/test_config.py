@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Migrating v0.1 settings (Polish keys) to settings.json, on synthetic files."""
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -144,6 +145,8 @@ def test_shared_dictation_model_resolves_to_the_transcription_model(tmp_path):
     assert not settings.dictation_shared()
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows only: OneDrive variables and drive-letter paths")
 def test_onedrive_folder(monkeypatch):
     monkeypatch.setenv("OneDrive", r"C:\Users\Test\OneDrive")
     monkeypatch.delenv("OneDriveCommercial", raising=False)

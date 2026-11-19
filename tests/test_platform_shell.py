@@ -20,7 +20,7 @@ from ucho import config, diarize, hotkeys, instance, platforms
 ROOT = Path(__file__).resolve().parent.parent
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="WindowsShell is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only: WindowsShell (registry, COM, .lnk)")
 def test_windows_shell_commands_and_labels():
     from ucho.platforms.windows import shell as win_shell
 
@@ -31,7 +31,7 @@ def test_windows_shell_commands_and_labels():
     assert sh.autostart_label() == "Start with Windows"
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="WindowsShell is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only: WindowsShell (registry, COM, .lnk)")
 def test_windows_shell_autostart_set_and_sync(monkeypatch):
     from ucho.platforms.windows import shell as win_shell
 
@@ -74,7 +74,7 @@ def test_windows_shell_autostart_set_and_sync(monkeypatch):
     assert set_calls == []
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="WindowsShell is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only: WindowsShell (registry, COM, .lnk)")
 def test_windows_shell_after_start_and_describe_window(monkeypatch):
     from ucho.platforms.windows import shell as win_shell
 
@@ -132,7 +132,7 @@ def test_windows_shell_after_start_and_describe_window(monkeypatch):
     ]
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="WindowsShell is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only: WindowsShell (registry, COM, .lnk)")
 def test_windows_shell_progress_and_work_area(monkeypatch):
     from ucho.platforms.windows import shell as win_shell
 

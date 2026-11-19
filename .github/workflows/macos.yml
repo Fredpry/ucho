@@ -1,0 +1,119 @@
+# macOS CI (issue #22, docs/macos-plan.md M3b). Windows CI stays in ci.yml.
+# Runners: macos-15 and macos-26, Apple M1 (Virtual), arm64, with an Aqua
+# session, Metal (paravirtual GPU) and TCC permissions granted; details in
+# docs/macos-spike.md.
+name: macOS
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ["macos/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-tests:
+    # The same packages as the Windows `test` job in ci.yml: the tests need no
+    # audio stack, models, OpenVINO or PyObjC. Tests that only make sense on
+    # Windows are marked "Windows only: ..."; the step summary lists every
+    # skipped test with its reason (tests/conftest.py).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python -m pip install pytest==9.2.0 ruff==0.17.5 numpy==2.5.3 soundfile==0.14.0
+      - name: Tests
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          echo "## Tests on ${{ matrix.os }} (macOS $(sw_vers -productVersion))" >> "$GITHUB_STEP_SUMMARY"
+          UCHO_SKIPPED_REPORT="$GITHUB_STEP_SUMMARY" python -m pytest -q -rs
+
+  macos-smoke:
+    # Starts the full UI with the real dependencies (requirements.txt with
+    # its darwin lines), without audio capture and without a model, and fails
+    # when anything logged an error. Data, settings and logs go to a temporary
+    # folder instead of ~/Library.
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Data folder
+        run: echo "UCHO_DATA_DIR=$RUNNER_TEMP/ucho" >> "$GITHUB_ENV"
+      - name: Install app dependencies
+        run: python -m pip install -r requirements.txt
+      - name: GUI start test
+        run: python -m ucho --smoke-test 3
+      - name: Upload the log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-smoke-log
+          path: ${{ runner.temp }}/ucho/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  macos-asr:
+    # whisper.cpp end to end: `say` speech (English and Polish) transcribed by
+    # ucho.whispercpp.Engine with the hidden CI model ggml-base-q5_1 at the
+    # pinned revision; checks the keywords, the language and that the engine
+    # runs on Metal (tools/macos_asr_check.py). The model (57 MB) is cached
+    # under a key with the pinned revision from config.REVISIONS.
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      PYTHONIOENCODING: utf-8
+      UCHO_RUNNER: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Data folder
+        run: echo "UCHO_DATA_DIR=$RUNNER_TEMP/ucho" >> "$GITHUB_ENV"
+      - name: Install app dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Model cache key
+        id: model
+        run: |
+          python - >> "$GITHUB_OUTPUT" <<'EOF'
+          from ucho import config, whispercpp
+          print(f"revision={config.REVISIONS[whispercpp.REPO]}")
+          print(f"dir={config.MODELS_DIR / 'hub'}")
+          EOF
+      - uses: actions/cache@v6
+        with:
+          path: ${{ steps.model.outputs.dir }}
+          key: whispercpp-ggml-base-q5_1-${{ steps.model.outputs.revision }}
+      - name: Transcribe say speech with whisper.cpp
+        run: python tools/macos_asr_check.py --out "$RUNNER_TEMP/asr"
+      - name: Upload the logs and audio
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-asr
+          path: |
+            ${{ runner.temp }}/ucho/*.log
+            ${{ runner.temp }}/asr
+          if-no-files-found: ignore
+          retention-days: 14

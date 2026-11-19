@@ -1,12 +1,28 @@
 # Versions tested on Windows 11, Python 3.12 (November 2026).
+# Lines without a marker install everywhere; pip skips lines whose
+# sys_platform marker does not match, so install.ps1 installs the same set
+# on Windows as before (tests/test_package.py checks it).
 openvino-genai==2026.4.1.0
 openvino==2026.4.1
 openvino-tokenizers==2026.4.1.0
 huggingface_hub==1.30.0
-PyAudioWPatch==0.2.12.8
+PyAudioWPatch==0.2.12.8; sys_platform == "win32"
 soxr==1.1.0
 soundfile==0.14.0
 numpy==2.5.4
 customtkinter==6.0.0
 pillow==13.0.0
 pystray==0.19.5
+# macOS (Apple Silicon, macOS 15 or later; wheels checked on the macos-15 and
+# macos-26 runners, docs/macos-spike.md): microphone, system audio (Core
+# Audio Process Tap), whisper.cpp with Metal, and the Cocoa/Quartz APIs for
+# pasting, the clipboard and permissions.
+sounddevice==0.5.6; sys_platform == "darwin"
+catap==0.6.1; sys_platform == "darwin"
+pywhispercpp==1.5.1; sys_platform == "darwin"
+pyobjc-core==13.0; sys_platform == "darwin"
+pyobjc-framework-Cocoa==13.0; sys_platform == "darwin"
+pyobjc-framework-Quartz==13.0; sys_platform == "darwin"
+pyobjc-framework-ApplicationServices==13.0; sys_platform == "darwin"
+pyobjc-framework-AVFoundation==13.0; sys_platform == "darwin"
+pyobjc-framework-CoreAudio==13.0; sys_platform == "darwin"

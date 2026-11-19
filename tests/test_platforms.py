@@ -68,7 +68,7 @@ def test_platform_base_and_null_import_everywhere():
     assert hasattr(null, "NullClipboard")
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only WinAPI modules")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows only: WinAPI modules")
 def test_windows_platform_modules_import_on_windows():
     from ucho.platforms.windows import clipboard, hotkeys, inserter, instance, shell, sounds
 

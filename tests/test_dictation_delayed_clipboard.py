@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Win32 clipboard")
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows only: Win32 clipboard")
 
 ISOLATED = 3  # exit code of the child when it could not isolate itself
 
