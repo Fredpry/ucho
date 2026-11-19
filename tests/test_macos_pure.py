@@ -172,12 +172,21 @@ def test_shell_autostart_plist_and_commands(tmp_path, monkeypatch):
     assert data["WorkingDirectory"] == str(paths.app_dir())
     assert sh.autostart_get() == shlex.join([sys.executable, "-m", "ucho", "--minimized"])
 
-    # autostart_sync(True) does not rewrite when already matching.
-    plist_path.chmod(0o444)
-    try:
-        sh.autostart_sync(True)
-    finally:
-        plist_path.chmod(0o644)
+    # autostart_sync writes only when the plist differs from the wanted command.
+    writes: list[bool] = []
+    real_set = sh.autostart_set
+    monkeypatch.setattr(sh, "autostart_set", lambda enabled: writes.append(enabled) or real_set(enabled))
+    sh.autostart_sync(True)
+    assert writes == []
+    plist_path.write_bytes(plistlib.dumps({"Label": "app.ucho", "ProgramArguments": ["/old/python"]}))
+    sh.autostart_sync(True)
+    assert writes == [True]
+    assert sh.autostart_get() == shlex.join([sys.executable, "-m", "ucho", "--minimized"])
+    sh.autostart_sync(False)
+    assert writes == [True, False]
+    assert not plist_path.exists()
+    sh.autostart_sync(False)
+    assert writes == [True, False]
 
     assert sh.autostart_set(False) is True
     assert not plist_path.exists()
@@ -256,7 +265,7 @@ def test_sounds_afplay_fallback_and_nssound(monkeypatch):
     assert not calls
 
 
-def test_fonts_icon_font_and_glyphs(monkeypatch):
+def test_fonts_icon_font_and_glyphs():
     mf = fonts.MacFonts()
     icon_path = mf.icon_font()
     assert icon_path is not None
@@ -273,15 +282,24 @@ def test_fonts_icon_font_and_glyphs(monkeypatch):
         mask = pil_font.getmask(char)
         assert mask.getbbox() is not None, f"Empty glyph mask for {name!r}"
 
-    # Fonts.resolve accepts dot-prefixed macOS system families even when absent from families().
-    import tkinter.font
 
-    monkeypatch.setattr(tkinter.font, "families", lambda: ("Helvetica", "Times", "Courier"))
-    monkeypatch.setattr(theme, "SANS", mf.sans)
-    monkeypatch.setattr(theme, "NUMERIC", mf.numeric)
+def test_theme_resolve_keeps_dot_prefixed_system_family(monkeypatch):
+    # Fonts.resolve accepts dot-prefixed macOS system families even when absent from families().
+    tkinter_font = pytest.importorskip("tkinter.font")
+    mf = fonts.MacFonts()
+    # resolve() rewrites class attributes; monkeypatch restores them for later tests.
+    for attr in ("sans", "display", "mono", "numeric", "semibold"):
+        monkeypatch.setattr(theme.Fonts, attr, getattr(theme.Fonts, attr))
+    monkeypatch.setattr(tkinter_font, "families", lambda: ("Helvetica", "Times", "Courier", "Menlo"))
+    for attr in ("SANS", "DISPLAY", "MONO", "NUMERIC"):
+        monkeypatch.setattr(theme, attr, getattr(mf, attr.lower()))
+    monkeypatch.setattr(theme, "SEMIBOLD", dict(mf.strong))
     theme.Fonts.resolve()
     assert theme.Fonts.sans == ".AppleSystemUIFont"
     assert theme.Fonts.numeric == ".AppleSystemUIFont"
+    assert theme.Fonts.display == "Times"
+    assert theme.Fonts.mono == "Menlo"
+    assert theme.Fonts.semibold == {}
 
 
 def _check_contract(protocol: type, impl: object) -> None:

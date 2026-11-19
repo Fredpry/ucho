@@ -571,7 +571,7 @@ def _forced_kwargs(engine, tokens: int) -> dict:
 def benchmark(model: str, device: str, seconds: float = 10.0) -> BenchmarkResult:
     """Measures the real-time factor of `model` on `device` with a synthetic signal.
 
-    Reuses transcribe.Engine for loading, so the GPU to CPU fallback and the
+    Builds the engine through transcribe.create_engine, so the GPU to CPU fallback and the
     restricted language detection behave as in a real transcription. The first
     call is a warm-up: on the GPU it allocates buffers, which a long recording
     pays only once. Raises when the model is not downloaded.

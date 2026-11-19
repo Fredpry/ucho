@@ -25,7 +25,7 @@ LAUNCH_AGENT_LABEL = "app.ucho"
 
 
 def app_bundle() -> Path | None:
-    """Outermost `.app` bundle path when running frozen, or None."""
+    """The `.app` bundle that contains the frozen executable, or None."""
     if not getattr(sys, "frozen", False):
         return None
     for parent in Path(sys.executable).parents:
