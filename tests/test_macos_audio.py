@@ -414,3 +414,15 @@ def test_track_with_mac_audio_and_fake_sounddevice(monkeypatch):
         samples, rate = sf.read(str(flac_path), dtype="int16")
     assert rate == audio.TARGET_RATE and samples.ndim == 1
     assert np.array_equal(samples, np.concatenate(mono))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="real sounddevice and AVFoundation only on macOS")
+def test_real_backend_on_macos_does_not_raise():
+    pytest.importorskip("sounddevice")
+    backend = MacAudio()
+    result = backend.list_devices()  # the CI runner may have zero or more devices
+    assert result["system"] == [] and result["default_system"] is None
+    assert all(not m.name.strip().lower().startswith("ucho") for m in result["microphones"])
+    if result["microphones"]:
+        assert result["default_microphone"] in result["microphones"]
+    assert backend.permission("microphone") in ("granted", "denied", "unknown", "unsupported")
