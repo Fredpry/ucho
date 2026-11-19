@@ -20,11 +20,13 @@ The total grows while the files start (8 at a time), so the percentage can
 step back a little at the beginning of a download; the largest files of the
 OpenVINO repositories start first, so it settles within seconds.
 
-Readiness: a meeting transcription and a dictation (as its fallback) both use
-the transcription model chosen in Settings, so recording waits until that
-model is on disk. `speech_readiness` turns the disk check and the download
-state into one of five states; `block_reason` is the text shown instead of
-starting a recording.
+Readiness: recording waits only while NO speech model is on the disk (#28).
+When the model chosen in Settings is missing or still downloading, another
+downloaded one is used meanwhile (`fallback_speech_model`): a meeting keeps
+the model it started with for its transcription, a dictation takes it until
+its own model is there. `speech_readiness` turns the disk check and the
+download state into one of six states; `block_reason` is the text shown
+instead of starting a recording.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from __future__ import annotations
 import errno
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from . import config
@@ -51,6 +53,7 @@ UNKNOWN = "unknown"          # not checked yet (the first check runs off the UI 
 DOWNLOADING = "downloading"
 MISSING = "missing"
 FAILED = "failed"
+FALLBACK = "fallback"    # the chosen model is not ready, another downloaded one is used
 
 # The network-bytes bar of snapshot_download: its total is a guess that grows
 # by 25 % steps, so only its bytes are used, never its total.
@@ -333,31 +336,65 @@ class Downloads:
 @dataclass(frozen=True)
 class Readiness:
     state: str
-    model: str
+    model: str                    # the transcription model chosen in Settings
     progress: Progress = Progress()
     error: str | None = None
+    fallback: str | None = None   # FALLBACK: the downloaded model used meanwhile
+    running: bool = False         # the chosen model is downloading right now
 
     @property
     def blocks(self) -> bool:
         """True when recording must not start. Not yet checked does not block."""
         return self.state in (DOWNLOADING, MISSING, FAILED)
 
+    @property
+    def used(self) -> str | None:
+        """The model a recording started now is transcribed with (None: none)."""
+        if self.state == FALLBACK:
+            return self.fallback
+        return None if self.blocks else self.model
 
-def speech_readiness(model: str, on_disk: bool | None, download: Download | None) -> Readiness:
+
+def fallback_speech_model(chosen: str, downloaded: Iterable[str], downloading: Iterable[str] = (),
+                          prefer: Iterable[str] = ()) -> str | None:
+    """The speech model to record with: `chosen` when it is ready, else another one, else None.
+
+    `downloaded`: speech models on the disk; `downloading`: models whose
+    download runs (their files are still being written, so never used).
+    Another model is taken from `prefer` first (the meeting model, the
+    dictation model), then in the order of `config.MODELS`.
+    """
+    usable = set(downloaded) - set(downloading)
+    if chosen in usable:
+        return chosen
+    for model in (*prefer, *config.MODELS):
+        if model in usable:
+            return model
+    return None
+
+
+def speech_readiness(model: str, on_disk: bool | None, download: Download | None,
+                     fallback: str | None = None) -> Readiness:
     """State of the transcription model `model`.
 
     `on_disk`: the last disk check (None: not checked yet). `download`: its
     running or failed download, if any. A running download wins over the
-    disk: its files are still being written.
+    disk: its files are still being written. `fallback`: another downloaded
+    speech model; with it recording works while `model` is not ready.
     """
-    if download is not None and download.running:
-        return Readiness(DOWNLOADING, model, download.progress)
-    if on_disk:
+    running = download is not None and download.running
+    progress = download.progress if running else Progress()
+    error = download.error if download is not None and not running else None
+    if on_disk and not running:
         return Readiness(READY, model)
-    if on_disk is None:
+    if on_disk is None and not running:
         return Readiness(UNKNOWN, model)
-    if download is not None and download.error:
-        return Readiness(FAILED, model, error=download.error)
+    if fallback is not None and fallback != model:
+        return Readiness(FALLBACK, model, progress, error, fallback, running)
+    if running:
+        return Readiness(DOWNLOADING, model, progress, running=True)
+    if error:
+        return Readiness(FAILED, model, error=error)
     return Readiness(MISSING, model)
 
 
@@ -366,6 +403,19 @@ def recording_blocked(app, check: bool = True) -> str | None:
     blocked = getattr(app, "recording_blocked", None)
     reason = blocked(check) if callable(blocked) else None
     return reason if isinstance(reason, str) else None
+
+
+def speech_model_for(app, preferred: str) -> str | None:
+    """`app.speech_model_for(preferred)`: the model to use instead of `preferred`.
+
+    `preferred` itself for an app without the method (tests); None when no
+    speech model is on the disk.
+    """
+    choose = getattr(app, "speech_model_for", None)
+    if not callable(choose):
+        return preferred
+    model = choose(preferred)
+    return model if isinstance(model, str) or model is None else preferred
 
 
 def model_name(repo: str) -> str:
@@ -391,8 +441,16 @@ def block_reason(readiness: Readiness) -> str | None:
     return None
 
 
+def fallback_notice(chosen: str, used: str) -> str:
+    """Shown when a recording starts with another model than the chosen one."""
+    return t("Transcribing with {fallback} until {model} is downloaded.",
+             fallback=model_name(used), model=model_name(chosen))
+
+
 __all__ = [
-    "SPEECH", "SPEAKERS", "LANGUAGE", "SPEAKER_MODELS", "READY", "UNKNOWN", "DOWNLOADING", "MISSING", "FAILED",
-    "Progress", "ByteCounter", "progress_bar_class", "describe_error", "Download", "Downloads",
-    "Readiness", "speech_readiness", "recording_blocked", "model_name", "model_size", "block_reason",
+    "SPEECH", "SPEAKERS", "LANGUAGE", "SPEAKER_MODELS", "READY", "UNKNOWN", "DOWNLOADING", "MISSING",
+    "FAILED", "FALLBACK", "Progress", "ByteCounter", "progress_bar_class", "describe_error",
+    "Download", "Downloads", "Readiness", "fallback_speech_model", "speech_readiness",
+    "recording_blocked", "speech_model_for", "model_name", "model_size", "block_reason",
+    "fallback_notice",
 ]

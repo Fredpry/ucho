@@ -366,3 +366,221 @@ def test_model_names_and_sizes():
     assert downloads.model_name("OpenVINO/whisper-large-v3-int8-ov") == "whisper-large-v3-int8"
     assert downloads.model_size("OpenVINO/whisper-large-v3-int8-ov") == "~1.6 GB"
     assert downloads.model_size("unknown/repo") == "?"
+
+
+# --- fallback: recording waits only while NO speech model is ready ------------------
+
+INT8 = "OpenVINO/whisper-large-v3-int8-ov"
+FP16 = "OpenVINO/whisper-large-v3-fp16-ov"
+
+
+def test_fallback_uses_the_chosen_model_when_it_is_ready():
+    assert downloads.fallback_speech_model(INT8, {INT8, FP16}) == INT8
+
+
+def test_fallback_while_the_chosen_model_downloads():
+    # The new main model is downloading (its files may already be partly there).
+    assert downloads.fallback_speech_model(FP16, {INT8, FP16}, downloading=[FP16]) == INT8
+    assert downloads.fallback_speech_model(FP16, {INT8}, downloading=[FP16]) == INT8
+
+
+def test_no_fallback_when_nothing_else_is_on_the_disk():
+    assert downloads.fallback_speech_model(INT8, set()) is None
+    assert downloads.fallback_speech_model(INT8, {INT8}, downloading=[INT8]) is None
+    assert downloads.fallback_speech_model(INT8, set(), prefer=[FP16]) is None
+
+
+def test_fallback_prefers_the_dictation_model_then_the_model_list():
+    # Only the dictation model is on the disk.
+    assert downloads.fallback_speech_model(INT8, {FP16}, prefer=[INT8, FP16]) == FP16
+    # Preference order wins over the order of config.MODELS.
+    assert downloads.fallback_speech_model("x/new-ov", {INT8, FP16}, prefer=[FP16]) == FP16
+    assert downloads.fallback_speech_model("x/new-ov", {INT8, FP16}) == INT8
+    # Never a model whose download runs, even when preferred.
+    assert downloads.fallback_speech_model("x/new-ov", {INT8, FP16}, [FP16], prefer=[FP16]) == INT8
+
+
+@pytest.mark.parametrize("on_disk, download, state, blocks", [
+    (False, None, downloads.FALLBACK, False),
+    (False, _download(True, done=1, total=4), downloads.FALLBACK, False),
+    (False, _download(False, "No connection"), downloads.FALLBACK, False),
+    (True, _download(True), downloads.FALLBACK, False),
+])
+def test_readiness_with_a_fallback_does_not_block(on_disk, download, state, blocks):
+    readiness = speech_readiness("repo/whisper-x-ov", on_disk, download, fallback=INT8)
+    assert readiness.state == state and readiness.blocks is blocks
+    assert readiness.used == INT8
+    assert block_reason(readiness) is None
+    assert readiness.running is bool(download is not None and download.running)
+    if download is not None and download.error:
+        assert readiness.error == download.error
+
+
+def test_readiness_used_model():
+    assert speech_readiness(INT8, True, None, fallback=FP16).used == INT8   # ready: no fallback
+    assert speech_readiness(INT8, False, None).used is None                 # blocked
+    assert speech_readiness(INT8, None, None).used == INT8                  # not checked yet
+
+
+def test_speech_model_for_helper():
+    assert downloads.speech_model_for(SimpleNamespace(), INT8) == INT8
+    app = SimpleNamespace(speech_model_for=lambda preferred: None)
+    assert downloads.speech_model_for(app, INT8) is None
+    app = SimpleNamespace(speech_model_for=lambda preferred: object())
+    assert downloads.speech_model_for(app, INT8) == INT8
+
+
+# --- meeting with a fallback model ------------------------------------------------------
+
+
+class _FakeRecorder:
+    def __init__(self, **_kwargs):
+        self.warnings: list[str] = []
+        self.levels: dict = {}
+
+    def start(self, folder):
+        folder.mkdir(parents=True)
+        self.folder = folder
+        (folder / "microphone.flac").write_bytes(b"")
+
+    def stop(self):
+        return {"folder": self.folder, "duration_s": 12.0,
+                "tracks": {"microphone": {"file": self.folder / "microphone.flac", "device": "mic"}}}
+
+
+class _MeetingSettings(dict):
+    def __init__(self, folder, **values):
+        super().__init__(model=INT8, device="CPU", language="auto", tracks="microphone",
+                         microphone_name="", system_name="", microphone_index=None,
+                         system_index=None, transcribe_after_stop=True, speaker_detection=False,
+                         summary_enabled=False, auto_title=False, rename_folder=False, **values)
+        self.recordings_dir = folder
+
+    def load(self):
+        pass
+
+    def meeting_live(self):
+        return False
+
+
+class _MeetingApp:
+    def __init__(self, folder, on_disk: set[str]):
+        self.settings = _MeetingSettings(folder)
+        self.on_disk = on_disk
+        self.jobs: list = []
+        self.refused: list = []
+        self.engine = SimpleNamespace(transcribe=self._transcribe)
+
+    def _transcribe(self, files, model, device, language, **kwargs):
+        job = SimpleNamespace(model=model, cancel=threading.Event(), **kwargs)
+        self.jobs.append(job)
+        return job
+
+    def post(self, fn):
+        fn()
+
+    def recording_blocked(self, check=True):
+        return None if self.speech_model_for(self.settings["model"]) else "no speech model"
+
+    def speech_model_for(self, preferred):
+        return downloads.fallback_speech_model(preferred, self.on_disk,
+                                               prefer=(self.settings["model"],))
+
+    def refuse_recording(self, reason):
+        self.refused.append(reason)
+
+
+@pytest.fixture
+def meeting_app(monkeypatch, tmp_path):
+    from ucho import meeting as meeting_mod
+
+    fake_audio = SimpleNamespace(Recorder=_FakeRecorder)
+    monkeypatch.setitem(sys.modules, "ucho.audio", fake_audio)
+    import ucho
+
+    monkeypatch.setattr(ucho, "audio", fake_audio, raising=False)
+    monkeypatch.setattr(meeting_mod.transcribe, "model_downloaded", lambda _m: True)
+    monkeypatch.setattr(meeting_mod.transcribe, "genai_version", lambda: "test")
+
+    def make(on_disk):
+        app = _MeetingApp(tmp_path, on_disk)
+        controller = meeting_mod.MeetingController(app)
+        events: list = []
+        controller.listen(lambda event, data: events.append((event, data)))
+        return app, controller, events
+
+    return make
+
+
+def test_meeting_records_and_transcribes_with_the_fallback_model(meeting_app):
+    import json
+
+    app, controller, events = meeting_app({FP16})   # the chosen INT8 is not on the disk
+    assert controller.start("Standup")
+    assert controller.session_model == FP16
+    notices = [data for event, data in events if event == "notice"]
+    assert notices and "whisper-large-v3-fp16" in notices[0] and "whisper-large-v3-int8" in notices[0]
+    folder = controller.recording_dir
+    controller.stop()
+    assert json.loads((folder / "meta.json").read_text(encoding="utf-8"))["model"] == FP16
+    assert [job.model for job in app.jobs] == [FP16]
+    assert controller.last_meta["model"] == FP16
+
+
+def test_queued_session_keeps_the_model_it_was_recorded_with(meeting_app):
+    app, controller, _events = meeting_app({FP16})
+    controller.transcribing = True          # another session is being transcribed
+    assert controller.start("Standup")
+    controller.stop()
+    assert controller.queued == 1 and app.jobs == []
+    app.on_disk.add(INT8)                   # the chosen model arrived meanwhile
+    controller.transcribing = False
+    controller._advance()
+    assert [job.model for job in app.jobs] == [FP16]
+
+
+def test_transcribe_again_uses_the_chosen_model_when_it_is_ready(meeting_app, tmp_path):
+    app, controller, _events = meeting_app({FP16, INT8})
+    folder = tmp_path / "old-session"
+    folder.mkdir()
+    assert controller.transcribe(folder, {"microphone": folder / "microphone.flac"}, {"model": FP16})
+    assert [job.model for job in app.jobs] == [INT8]
+
+
+def test_transcribe_again_falls_back_while_the_chosen_model_is_missing(meeting_app, tmp_path):
+    app, controller, _events = meeting_app({FP16})
+    folder = tmp_path / "old-session"
+    folder.mkdir()
+    assert controller.transcribe(folder, {"microphone": folder / "microphone.flac"}, {})
+    assert [job.model for job in app.jobs] == [FP16]
+
+
+def test_meeting_is_blocked_only_without_any_speech_model(meeting_app):
+    app, controller, _events = meeting_app(set())
+    assert controller.start("Standup") is False
+    assert app.refused == ["no speech model"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
+def test_dictation_uses_its_own_model_when_only_that_one_is_on_the_disk():
+    from ucho import config, dictation
+
+    settings = config.Settings.__new__(config.Settings)
+    settings._data = {"model": INT8, "dictation_model": FP16, "device": "GPU"}
+    on_disk = {FP16}
+    app = SimpleNamespace(
+        settings=settings,
+        speech_model_for=lambda preferred: downloads.fallback_speech_model(
+            preferred, on_disk, prefer=(INT8, FP16)),
+    )
+    app.recording_blocked = lambda check=True: (
+        None if app.speech_model_for(INT8) else "no speech model")
+    controller = dictation.DictationController.__new__(dictation.DictationController)
+    controller.app = app
+    controller._reported_missing = None
+    assert controller.model_key() == (FP16, "GPU")
+    assert downloads.recording_blocked(app) is None      # dictation is not blocked
+    # The other way round: own model missing, the meeting model on the disk.
+    on_disk.clear()
+    on_disk.add(INT8)
+    assert controller.model_key() == (INT8, "GPU")
