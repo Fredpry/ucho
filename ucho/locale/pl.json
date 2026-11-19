@@ -492,5 +492,7 @@
   "{ram} GB RAM: only the smallest language model fits next to speech recognition.": "{ram} GB RAM: obok rozpoznawania mowy mieści się tylko najmniejszy model językowy.",
   "{ram} GB RAM: the 4B language model on the CPU writes good Polish.": "{ram} GB RAM: model językowy 4B na CPU dobrze pisze po polsku.",
   "{ram} GB RAM: the largest language model fits.": "{ram} GB RAM: mieści się największy model językowy.",
-  "Open at login": "Otwieraj przy logowaniu"
+  "Open at login": "Otwieraj przy logowaniu",
+  "Ucho needs the Accessibility permission to paste. Text is on the clipboard, press {keys}.": "Ucho potrzebuje uprawnienia Dostępność, żeby wklejać. Tekst jest w schowku, wklej go {keys}.",
+  "Secure keyboard entry is on (a password field or a terminal). Text is on the clipboard, press {keys}.": "Włączone jest bezpieczne wprowadzanie (pole hasła albo terminal). Tekst jest w schowku, wklej go {keys}."
 }

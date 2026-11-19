@@ -144,15 +144,38 @@ def activate(window: int) -> bool:
     return platforms.inserter().activate(window)
 
 
+def input_blocked() -> str | None:
+    """NO_PERMISSION or SECURE_INPUT when simulated keys would be lost now, else None.
+
+    Only macOS can block: key events need the Accessibility permission, and a
+    password field or Terminal's "Secure Keyboard Entry" keeps them away. The
+    check is an optional `input_blocked()` of the platform inserter (not part
+    of `base.TextInserter`); other platforms and errors mean "not blocked".
+    """
+    check = getattr(platforms.inserter(), "input_blocked", None)
+    if check is None:
+        return None
+    try:
+        return check()
+    except Exception:
+        log.debug("Could not check whether input is blocked", exc_info=True)
+        return None
+
+
 # Where the dictated text goes, decided by `paste_target` and `insert_text`.
 PASTE = "paste"            # pasted into the foreground window, which is the right one
 OWN_WINDOW = "own_window"  # a Ucho window is active: clipboard only
 FOCUS_LOST = "focus_lost"  # the target window is gone or did not come back: clipboard only
 NO_WINDOW = "no_window"    # only the desktop or the taskbar is active: clipboard only
 NOT_TAKEN = "not_taken"    # Ctrl+V sent, but the window did not take the text in time: clipboard only
+# macOS: no keys sent at all, clipboard only.
+NO_PERMISSION = "no_permission"  # Ucho has no Accessibility permission
+SECURE_INPUT = "secure_input"    # a password field or secure keyboard entry is active
 
 # Results that leave the text on the clipboard for the user to paste by hand.
 CLIPBOARD_ONLY = (FOCUS_LOST, NO_WINDOW, NOT_TAKEN)
+# The same, with their own message (the cause is fixed outside the window).
+INPUT_BLOCKED = (NO_PERMISSION, SECURE_INPUT)
 
 
 def paste_target(target: int | None, foreground: Callable[[], int | None],
@@ -188,7 +211,7 @@ _insert_lock = threading.Lock()
 
 def insert_text(text: str, mode: str, enter: bool, target: int | None = None,
                 delivered: Callable[[str], None] | None = None) -> str:
-    """Inserts text into the target window; returns PASTE, OWN_WINDOW or one of CLIPBOARD_ONLY.
+    """Inserts text into the target window; returns PASTE, OWN_WINDOW, one of CLIPBOARD_ONLY or INPUT_BLOCKED.
 
     With anything but PASTE the text is only on the clipboard, and it stays
     there for the user to paste. `delivered(result)` is called as soon as the
@@ -208,6 +231,11 @@ def insert_text(text: str, mode: str, enter: bool, target: int | None = None,
                 log.info("No window to paste into (%s) - the text stays on the clipboard", where)
             set_clipboard(text)
             return report(where)
+        blocked = input_blocked()
+        if blocked is not None:
+            log.info("Keys cannot be sent (%s) - the text stays on the clipboard", blocked)
+            set_clipboard(text)
+            return report(blocked)
         if mode == "type":
             type_text(text)
             if enter:
@@ -267,6 +295,21 @@ def _paste(text: str, enter: bool, report: Callable[[str], str]) -> str:
         return PASTE
     finally:
         offer.close()
+
+
+_permission_asked = False
+
+
+def _ask_for_input_permission() -> None:
+    """The system prompt for Accessibility, once per run (it leads to System Settings)."""
+    global _permission_asked
+    if _permission_asked:
+        return
+    _permission_asked = True
+    try:
+        platforms.inserter().request_permission()
+    except Exception:
+        log.warning("Could not ask for the input permission", exc_info=True)
 
 
 _BEEP_EVENTS = {1046: "start", 659: "stop", 330: "cancel"}
@@ -791,7 +834,7 @@ class DictationController(Emitter):
         self._emit("state")
 
     def _recognized(self, text: str, seconds: float, where: str | None) -> None:
-        """`where`: PASTE, OWN_WINDOW, one of CLIPBOARD_ONLY, or None when inserting failed."""
+        """`where`: PASTE, OWN_WINDOW, one of CLIPBOARD_ONLY or INPUT_BLOCKED, or None when inserting failed."""
         self.queued = max(0, self.queued - 1)
         self.live_text = ""
         if text:
@@ -800,6 +843,15 @@ class DictationController(Emitter):
                 # The Ctrl+V is still queued in a slow window, which may paste on its own.
                 self.show_message(t("The window has not taken the text yet. If it does not "
                                     "appear, press {keys}.",
+                                    keys=platforms.inserter().paste_label()), "warning", 8)
+            elif where == NO_PERMISSION:
+                self.show_message(t("Ucho needs the Accessibility permission to paste. Text is on "
+                                    "the clipboard, press {keys}.",
+                                    keys=platforms.inserter().paste_label()), "warning", 10)
+                _ask_for_input_permission()
+            elif where == SECURE_INPUT:
+                self.show_message(t("Secure keyboard entry is on (a password field or a terminal). "
+                                    "Text is on the clipboard, press {keys}.",
                                     keys=platforms.inserter().paste_label()), "warning", 8)
             elif where in CLIPBOARD_ONLY:
                 # The window you dictated into is gone, did not come back or

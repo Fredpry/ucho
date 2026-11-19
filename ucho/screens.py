@@ -1138,11 +1138,37 @@ class DictationScreen(Screen):
             ui.focus(self.panel.button)
 
 
+# macOS: a window of a background app that becomes key activates the app and
+# takes the keyboard from the window you dictate into. `noActivates` keeps the
+# window from becoming key, `nonActivating` (an NSPanel style) keeps a click on
+# it from activating Ucho. Both must be set before the window is first mapped.
+MAC_DICTATION_STYLE = ("utility", ("noActivates", "nonActivating"))
+
+
+def float_without_activating(window) -> bool:
+    """Gives a Tk toplevel the non-activating panel style on macOS (no-op elsewhere). True when set."""
+    try:
+        if window.tk.call("tk", "windowingsystem") != "aqua":
+            return False
+    except tkinter.TclError:
+        return False
+    style, attributes = MAC_DICTATION_STYLE
+    for attrs in (attributes, attributes[:1]):  # older Tk may not know nonActivating
+        try:
+            window.tk.call("::tk::unsupported::MacWindowStyle", "style", window._w, style, attrs)
+            return True
+        except tkinter.TclError:
+            log.debug("MacWindowStyle %s %s refused", style, attrs, exc_info=True)
+    log.warning("The dictation window may take the focus: its window style could not be set")
+    return False
+
+
 class DictationWindow(ctk.CTkToplevel):
     """Variant B: a small dictation window opened from the tray, the hotkey or the Jump List."""
 
     def __init__(self, app):
         super().__init__(app)
+        float_without_activating(self)
         self.app = app
         self.title(t("Ucho Dictate"))
         self.geometry("440x320")
