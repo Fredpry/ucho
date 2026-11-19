@@ -4,6 +4,8 @@
 import sys
 import types
 
+import pytest
+
 try:
     import pyaudiowpatch  # noqa: F401
 except ImportError:  # the CI test job does not install the audio stack
@@ -176,6 +178,8 @@ def test_dictation_microphone_reports_a_missing_choice():
     assert (device.index, found) == (7, True)
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows only: PyAudio streams (macOS microphone is M7a)")
 def test_dictation_rereads_devices_when_the_choice_is_missing(monkeypatch):
     """A microphone plugged in after PortAudio started is found by a fresh PortAudio."""
     stale = FakePyAudio([d for d in DEVICES if d["name"] != HEADSET])
@@ -224,6 +228,8 @@ def _start_with(monkeypatch, mic, stale, fresh):
     return opened
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows only: PyAudio streams (macOS microphone is M7a)")
 def test_dictation_follows_a_default_changed_in_windows(monkeypatch):
     """No microphone chosen: the default of a fresh PortAudio, not of the one from startup."""
     opened = _start_with(monkeypatch, dictation.Microphone(None),
@@ -231,6 +237,8 @@ def test_dictation_follows_a_default_changed_in_windows(monkeypatch):
     assert opened == [7]
 
 
+@pytest.mark.skipif(sys.platform != "win32",
+                    reason="Windows only: PyAudio streams (macOS microphone is M7a)")
 def test_missing_choice_is_logged_once(monkeypatch, caplog):
     mic = dictation.Microphone("Bluetooth headset")
     for _ in range(3):

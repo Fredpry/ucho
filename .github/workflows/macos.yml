@@ -62,16 +62,10 @@ jobs:
         run: echo "UCHO_DATA_DIR=$RUNNER_TEMP/ucho" >> "$GITHUB_ENV"
       - name: Install app dependencies
         run: python -m pip install -r requirements.txt
+      # Passes before M4/M5: the null platform backends only log INFO and
+      # WARNING (no hotkeys, no audio devices), see docs/macos-plan.md 3.2.
       - name: GUI start test
         run: python -m ucho --smoke-test 3
-      - name: Upload the log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: macos-smoke-log
-          path: ${{ runner.temp }}/ucho/*.log
-          if-no-files-found: ignore
-          retention-days: 14
 
   macos-asr:
     # whisper.cpp end to end: `say` speech (English and Polish) transcribed by

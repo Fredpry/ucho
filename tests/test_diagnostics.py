@@ -534,3 +534,12 @@ def test_reporter_releases_the_throttle_when_the_dialog_fails():
     reporter.report(ValueError("a"))
     posted.pop()()
     assert not reporter.throttle.is_open
+
+
+def test_redactor_keeps_the_root_of_a_posix_home():
+    # macOS: "/Users/jan/..." becomes "~/...", not "/~/...".
+    redactor = diagnostics.Redactor(home="/Users/jan", user_names=[], computer="")
+    assert redactor.text("/Users/jan/Ucho/recordings") == "~/Ucho/recordings"
+    assert redactor.text("/Users/janek/x") == "/Users/janek/x"
+    windows = diagnostics.Redactor(home=r"C:\Users\jan", user_names=[], computer="")
+    assert windows.text(r"C:\Users\jan\Ucho") == r"~\Ucho"

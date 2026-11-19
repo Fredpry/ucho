@@ -380,7 +380,10 @@ _SESSION_NAME = re.compile(r"(\d{4}-\d{2}-\d{2}_\d{2}-\d{2})_[^\s'\"\\/,;:)\]}]+
 def _path_pattern(path: str) -> str:
     """Regex for a Windows path written with \\, \\\\ (repr) or / separators, any case."""
     parts = [re.escape(part) for part in re.split(r"[\\/]+", path.strip("\\/")) if part]
-    return r"[\\/]{1,2}".join(parts)
+    # A POSIX path (macOS home "/Users/jan") keeps its leading "/", or
+    # "/Users/jan/x" would become "/~/x". Windows paths never start with "/".
+    lead = "/" if path.startswith("/") else ""
+    return lead + r"[\\/]{1,2}".join(parts)
 
 
 def _user_names() -> list[str]:
