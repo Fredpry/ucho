@@ -20,7 +20,7 @@ from ucho.platforms import base, null
 ROOT = Path(__file__).resolve().parent.parent
 
 # Legacy Windows-only modules whose module-level imports are removed in later tasks.
-_M1B_EXCEPTIONS = {"hotkeys.py", "instance.py", "winshell.py"}  # task M1b removes them
+_M1B_EXCEPTIONS: set[str] = set()  # emptied by task M1b
 _M1C_EXCEPTIONS = {"audio.py"}  # task M1c removes it
 MODULE_IMPORT_EXCEPTIONS = _M1B_EXCEPTIONS | _M1C_EXCEPTIONS
 
@@ -70,10 +70,13 @@ def test_platform_base_and_null_import_everywhere():
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only WinAPI modules")
 def test_windows_platform_modules_import_on_windows():
-    from ucho.platforms.windows import clipboard, inserter, sounds
+    from ucho.platforms.windows import clipboard, hotkeys, inserter, instance, shell, sounds
 
     assert callable(clipboard.create)
+    assert callable(hotkeys.create)
     assert callable(inserter.create)
+    assert callable(instance.create)
+    assert callable(shell.create)
     assert callable(sounds.create)
 
 
@@ -268,13 +271,16 @@ def test_protocol_contracts():
         (base.Permissions, null.NullPermissions()),
     ]
     if sys.platform == "win32":
-        from ucho.platforms.windows import clipboard, inserter, sounds
+        from ucho.platforms.windows import clipboard, hotkeys, inserter, instance, shell, sounds
 
         pairs.extend([
             (base.Clipboard, clipboard.WindowsClipboard()),
             (base.DelayedOffer, clipboard.DelayedClipboard("x", None)),
             (base.TextInserter, inserter.WindowsInserter()),
             (base.Sounds, sounds.WindowsSounds()),
+            (base.GlobalHotkeys, hotkeys.Hotkeys(lambda _n: None)),
+            (base.SingleInstance, instance.SingleInstance("Local\\Ucho.Test.Contract")),
+            (base.Shell, shell.WindowsShell()),
         ])
 
     for protocol, impl in pairs:

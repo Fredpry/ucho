@@ -32,7 +32,7 @@ from collections.abc import Callable
 
 import customtkinter as ctk
 
-from . import config, downloads, hardware, i18n, retention, theme, ui, winshell
+from . import config, downloads, hardware, i18n, platforms, retention, theme, ui
 from .archive import Archive
 from .dictation import DictationController
 from .engine import Engine
@@ -47,8 +47,6 @@ from .tray import Item, TrayIcon
 
 log = logging.getLogger(__name__)
 
-ICON_FILE = Path(__file__).resolve().parent / "assets" / "icon.ico"
-DICTATE_ICON_FILE = Path(__file__).resolve().parent / "assets" / "dictate.ico"
 TICK_MS = 66
 SIDEBAR_WIDTH = 212
 # The speech model is looked for on the disk again this often while it is
@@ -183,7 +181,8 @@ class App(ctk.CTk):
     def _setup_window(self) -> None:
         self.title(config.APP_NAME)
         scaling = ctk.ScalingTracker.get_window_scaling(self)
-        work_w, work_h = _work_area()
+        area = platforms.shell().work_area()
+        work_w, work_h = area if area else (0, 0)
         if not work_w:
             work_w, work_h = self.winfo_screenwidth(), self.winfo_screenheight() - 48
         # Logical sizes (customtkinter scales them). A 1366x768 screen at 125 %
@@ -200,51 +199,33 @@ class App(ctk.CTk):
         self.after(400, self._set_icon)
 
     def _set_icon(self) -> None:
-        if not ICON_FILE.exists():
-            return
-        try:
-            self.iconbitmap(default=str(ICON_FILE))
-            self.iconbitmap(str(ICON_FILE))
-        except Exception:
-            pass
+        platforms.shell().set_window_icon(self)
 
     def _on_callback_error(self, exc, value, trace) -> None:
         log.error("Unhandled exception in the UI", exc_info=(exc, value, trace))
 
     def window_handle(self, window=None) -> int:
         """Handle of the top-level window the taskbar sees (wm_frame, not winfo_id)."""
-        window = window or self
-        try:
-            return int(window.wm_frame(), 16)
-        except Exception:
-            return window.winfo_id()
+        return platforms.shell().window_handle(window or self)
 
     def describe_window(self, window=None, dictation: bool = False) -> None:
-        if sys.platform != "win32" or self.smoke:
+        if self.smoke:
             return
-        command = start_command() + (" --dictate" if dictation else "")
-        icon_file = DICTATE_ICON_FILE if dictation else ICON_FILE
-        ok = winshell.describe_window(self.window_handle(window), command, config.APP_NAME,
-                                      f"{icon_file},0", config.APP_ID)
-        log.info("Taskbar description of the %s window: %s", "dictation" if dictation else "main", ok)
+        platforms.shell().describe_window(window or self, dictation)
 
     def _after_start(self) -> None:
         if self.smoke:
             return
         self.describe_window()
-        self._taskbar = winshell.TaskbarProgress(self.window_handle())
+        shell = platforms.shell()
+        self._taskbar = shell.progress(self)
         tasks = [
-            {"title": t("Record a meeting"), "arguments": f'"{STARTER}" --record',
-             "description": t("Start recording a meeting with Ucho"), "icon": f"{ICON_FILE},0"},
-            {"title": t("Dictate"), "arguments": f'"{STARTER}" --dictate',
-             "description": t("Open Ucho dictation"), "icon": f"{DICTATE_ICON_FILE},0"},
+            ("--record", t("Record a meeting"), t("Start recording a meeting with Ucho")),
+            ("--dictate", t("Dictate"), t("Open Ucho dictation")),
         ]
-        for task in tasks:
-            task.update(program=str(_pythonw()), working_dir=str(config.PROJECT_DIR))
 
         def taskbar_setup():
-            log.info("Jump List: %s", winshell.set_jump_list(config.APP_ID, tasks))
-            _stamp_shortcuts()
+            shell.after_start(config.APP_ID, tasks)
             from .settings_screen import sync_autostart
 
             sync_autostart(self.settings)
@@ -486,7 +467,7 @@ class App(ctk.CTk):
 
                 self.dictation_window = DictationWindow(self)
                 self.dictation_window.withdraw()
-            _show_without_focus(self.window_handle(self.dictation_window))
+            platforms.shell().show_without_focus(self.dictation_window)
 
     def on_command(self, command: str) -> None:
         """A second start of Ucho (shortcut, pinned tile, Jump List)."""
@@ -866,11 +847,9 @@ class App(ctk.CTk):
         self.show("settings")
 
     def set_autostart(self, enabled: bool) -> None:
-        from .settings_screen import autostart_command
-
         self.settings["start_with_windows"] = enabled
         self.settings.save()
-        if not self.smoke and not winshell.set_autostart(enabled, autostart_command()):
+        if not self.smoke and not platforms.shell().autostart_set(enabled):
             self.toast(t("Could not change the autostart entry."), "warning")
 
     # --- hardware ------------------------------------------------------------------------
@@ -1012,19 +991,19 @@ class App(ctk.CTk):
         if self._taskbar is not None:
             m = self.meeting
             if active:
-                self._taskbar.set(winshell.TaskbarProgress.ERROR, 100)
+                self._taskbar.set("error", 100)
             elif m.transcribing:
-                self._taskbar.set(winshell.TaskbarProgress.NORMAL, max(1, int(m.progress * 100)))
+                self._taskbar.set("normal", max(1, int(m.progress * 100)))
             elif m.summarizing or self.dictation.queued:
-                self._taskbar.set(winshell.TaskbarProgress.INDETERMINATE)
+                self._taskbar.set("indeterminate")
             elif running := self.downloads.running():
                 fraction = running[0].progress.fraction
                 if fraction is None:
-                    self._taskbar.set(winshell.TaskbarProgress.INDETERMINATE)
+                    self._taskbar.set("indeterminate")
                 else:
-                    self._taskbar.set(winshell.TaskbarProgress.NORMAL, max(1, int(fraction * 100)))
+                    self._taskbar.set("normal", max(1, int(fraction * 100)))
             else:
-                self._taskbar.set(winshell.TaskbarProgress.NONE)
+                self._taskbar.set("none")
 
     def _update_activity(self) -> None:
         if not self._screens or not hasattr(self, "_activity") or not self._activity.winfo_exists():
@@ -1086,78 +1065,11 @@ class App(ctk.CTk):
 
 # --- helpers --------------------------------------------------------------------------------
 
-STARTER = config.PROJECT_DIR / "ucho.pyw"
-
-
-def _pythonw() -> Path:
-    interpreter = Path(sys.executable)
-    windowless = interpreter.with_name("pythonw.exe")
-    return windowless if windowless.exists() else interpreter
-
-
-def start_command() -> str:
-    """Command the taskbar uses to start the app again from a pinned tile.
-
-    Deliberately `ucho.pyw`, not `-m ucho`: the tile starts without the
-    project working directory, and the script adds it to `sys.path` itself.
-    """
-    return f'"{_pythonw()}" "{STARTER}"'
-
 
 def _last_dictation() -> str:
     from .dictate import last_text_from_log
 
     return last_text_from_log()
-
-
-def _stamp_shortcuts() -> None:
-    """Our shortcuts get the AppUserModelID, so a pinned tile and the window are one button.
-
-    Only shortcuts that start this copy of Ucho: another installation (or an
-    older Ucho Dictate) keeps its own id.
-    """
-    for shortcut in winshell.shortcut_paths():
-        arguments = winshell.shortcut_arguments(shortcut) if shortcut.exists() else None
-        if arguments and str(STARTER).lower() in arguments.lower():
-            log.info("Shortcut %s id: %s", shortcut.name,
-                     winshell.set_shortcut_app_id(shortcut, config.APP_ID))
-
-
-def _work_area() -> tuple[int, int]:
-    """Size of the primary monitor without the taskbar, in physical pixels."""
-    if sys.platform != "win32":
-        return 0, 0
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        rect = wintypes.RECT()
-        ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA
-        return rect.right - rect.left, rect.bottom - rect.top
-    except Exception:
-        return 0, 0
-
-
-def _show_without_focus(hwnd: int) -> None:
-    if sys.platform == "win32" and hwnd:
-        import ctypes
-
-        ctypes.windll.user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
-
-
-def _set_app_id() -> None:
-    """Our own AppUserModelID; otherwise the taskbar shows the pythonw.exe icon.
-
-    Must be called before the first window is created.
-    """
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(config.APP_ID)
-    except Exception:
-        log.debug("Could not set AppUserModelID", exc_info=True)
 
 
 class _ErrorCounter(logging.Handler):
@@ -1203,7 +1115,7 @@ def run(argv: list[str] | None = None) -> int:
     used = i18n.set_language(settings["ui_language"])
     log.info("Start %s %s (UI: %s, layout: %s)", config.APP_NAME, config.VERSION, used,
              settings["layout"])
-    _set_app_id()
+    platforms.shell().set_app_identity()
     config.prepare_dirs(settings)
     app = App(settings, options)
     instance.listen(lambda c: app.post(lambda: app.on_command(c)))
@@ -1285,4 +1197,4 @@ def _synthetic_session(recordings: Path) -> None:
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
 
-__all__ = ["App", "Options", "run", "smoke_test", "start_command"]
+__all__ = ["App", "Options", "run", "smoke_test"]

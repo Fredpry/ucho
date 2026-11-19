@@ -10,14 +10,13 @@ while visible) and listens to controller events for content changes.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import tkinter
 from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, retention, session, theme, ui
+from . import config, platforms, retention, session, theme, ui
 from .archive import Match, fold, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
@@ -66,7 +65,7 @@ def header(master, title: str, subtitle: str | None = None) -> tuple[ctk.CTkFram
 
 def open_path(path: Path) -> None:
     try:
-        os.startfile(str(path))  # opens the user's own folder in Explorer
+        platforms.shell().open_path(path)  # the user's own folder in the system file manager
     except Exception as error:
         log.warning("Could not open a folder in Explorer: %s", type(error).__name__)
 
@@ -1158,12 +1157,7 @@ class DictationWindow(ctk.CTkToplevel):
     def _icon(self) -> None:
         if not self.winfo_exists():
             return
-        icon_file = config.PROJECT_DIR / "ucho" / "assets" / "dictate.ico"
-        try:
-            if icon_file.exists():
-                self.iconbitmap(str(icon_file))
-        except Exception:
-            pass
+        platforms.shell().set_window_icon(self, dictation=True)
         self.app.describe_window(self, dictation=True)
 
     def show(self) -> None:
