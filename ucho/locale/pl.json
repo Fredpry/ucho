@@ -89,7 +89,6 @@
   "Recognizing…": "Rozpoznaję…",
   "Inserted": "Wstawiono",
   "Copied to clipboard": "Skopiowano do schowka",
-  "Text is on the clipboard, press Ctrl+V": "Tekst jest w schowku, wklej Ctrl+V",
   "I didn't hear anything": "Nic nie usłyszałem",
   "Recognition error": "Błąd rozpoznawania",
   "The model failed to load": "Model się nie załadował",
@@ -379,7 +378,6 @@
   "Space": "Spacja",
   "The recording was only partly deleted. The rest is in the folder {folder}. Ucho deletes it at the next start; you can also close the programs that use it and delete the folder yourself.": "Nagranie usunięto tylko częściowo. Reszta jest w folderze {folder}. Ucho usunie go przy następnym uruchomieniu. Możesz też zamknąć programy, które go używają, i usunąć folder samodzielnie.",
   "The recordings folder could not be read. The setting was not changed.": "Nie udało się odczytać folderu z nagraniami. Ustawienie się nie zmieniło.",
-  "The window has not taken the text yet. If it does not appear, press Ctrl+V.": "Okno jeszcze nie przyjęło tekstu. Jeśli się nie pojawi, wklej go Ctrl+V.",
   "{device} (not connected)": "{device} (niepodłączony)",
   "While speaking": "W trakcie mówienia",
   "Recognize while speaking": "Rozpoznawaj w trakcie mówienia",
@@ -477,5 +475,9 @@
   "{percent}% · {done} / {total} MB": "{percent}% · {done} / {total} MB",
   "Recording uses {model} meanwhile.": "Do tego czasu nagrania transkrybuje {model}.",
   "Speech model not downloaded": "Model mowy nie jest pobrany",
-  "Transcribing with {fallback} until {model} is downloaded.": "Transkrybuję modelem {fallback}, dopóki {model} nie zostanie pobrany."
+  "Transcribing with {fallback} until {model} is downloaded.": "Transkrybuję modelem {fallback}, dopóki {model} nie zostanie pobrany.",
+  "The window has not taken the text yet. If it does not appear, press {keys}.": "Okno jeszcze nie przyjęło tekstu. Jeśli się nie pojawi, wklej go {keys}.",
+  "Text is on the clipboard, press {keys}": "Tekst jest w schowku, wklej {keys}",
+  "Global hotkeys are not supported on this system.": "Skróty globalne nie są obsługiwane w tym systemie.",
+  "Start at login": "Uruchamiaj przy logowaniu"
 }

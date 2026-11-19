@@ -14,7 +14,7 @@ PL = json.loads((PACKAGE / "locale" / "pl.json").read_text(encoding="utf-8"))
 
 def _keys_from_code() -> set[str]:
     keys = set()
-    for file in PACKAGE.glob("*.py"):
+    for file in PACKAGE.rglob("*.py"):
         for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"))):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "t" and node.args

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 from types import SimpleNamespace
 
@@ -385,7 +384,6 @@ def test_live_dictation_fallback_on_failed_piece():
 # --- Microphone.take / stop & config ----------------------------------------
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 def test_microphone_take_and_stop_match_prefix():
     from ucho import dictation
 
@@ -484,7 +482,6 @@ class _FakeApp:
             self.scheduled.pop(0)()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 @pytest.mark.parametrize("live_on", [True, False])
 def test_controller_stop_submits_only_the_tail(monkeypatch, live_on):
     from ucho import dictation
