@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import faulthandler
 import json
 import os
 import platform
@@ -719,6 +720,33 @@ def check_whisper(out: Path) -> dict:
             "details": d}
 
 
+def bounded(details: dict, key: str, func: Callable[[], object], seconds: float) -> object:
+    """guard() in a daemon thread: a call that blocks longer than `seconds` is recorded, not waited for."""
+    box: dict = {}
+
+    def target():
+        try:
+            box["value"] = func()
+        except BaseException as error:
+            box["error"] = f"{type(error).__name__}: {error}"
+            box["traceback"] = traceback.format_exc()[-1500:]
+
+    print(f"[{time.strftime('%X')}] {key} ...", file=sys.stderr, flush=True)
+    start = time.monotonic()
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    took = round(time.monotonic() - start, 2)
+    if thread.is_alive():
+        details[key] = {"error": f"still blocked after {seconds} s"}
+    elif "error" in box:
+        details[key] = {"error": box["error"], "traceback": box["traceback"], "seconds": took}
+    else:
+        details[key] = {"value": box.get("value"), "seconds": took}
+    print(f"[{time.strftime('%X')}] {key}: {str(details[key])[:300]}", file=sys.stderr, flush=True)
+    return box.get("value")
+
+
 def check_tap(out: Path) -> dict:
     import ctypes
 
@@ -733,15 +761,16 @@ def check_tap(out: Path) -> dict:
         return str(objc.lookUpClass("CATapDescription"))
 
     guard(d, "CATapDescription_class", lookup)
-    import catap
-
+    catap = bounded(d, "import_catap", lambda: __import__("catap"), 30)
+    if catap is None:
+        return {"status": "fail", "summary": f"import catap: {d['import_catap']}", "details": d}
     d["catap_version"] = catap.__version__
-    guard(d, "bundle_id_taps_supported", lambda: bool(catap.bundle_id_taps_supported()))
-    guard(d, "audio_processes", lambda: [str(getattr(p, "name", p)) for p in catap.list_audio_processes()][:20])
-    guard(d, "audio_devices", lambda: [str(getattr(x, "name", x)) for x in catap.list_audio_devices()][:20])
-    guard(d, "own_process", lambda: str(catap.find_process_by_pid(os.getpid())))
     native = Path(catap.__file__).parent / "native" / "libcatap_coreaudio.dylib"
     d["native_lib"] = {"exists": native.exists(), "kb": round(native.stat().st_size / 1024) if native.exists() else None}
+    bounded(d, "bundle_id_taps_supported", lambda: bool(catap.bundle_id_taps_supported()), 10)
+    bounded(d, "audio_devices", lambda: [str(getattr(x, "name", x)) for x in catap.list_audio_devices()][:20], 15)
+    bounded(d, "audio_processes", lambda: [str(getattr(p, "name", p)) for p in catap.list_audio_processes()][:20], 15)
+    bounded(d, "own_process", lambda: str(catap.find_process_by_pid(os.getpid())), 15)
 
     stats = {"buffers": 0, "frames": 0, "nonzero": 0, "peak": 0.0, "format": None}
 
@@ -758,34 +787,29 @@ def check_tap(out: Path) -> dict:
             if samples.size:
                 stats["peak"] = max(stats["peak"], float(np.abs(samples.astype(np.float64)).max()))
 
-    session = None
-    try:
-        session = catap.RecordingSession.from_system_audio(on_buffer=on_buffer)
-        start = time.monotonic()
-        session.start()
-        d["start_seconds"] = round(time.monotonic() - start, 2)
-        wav = out / "tts_en.wav"
-        if wav.exists():
-            d["afplay"] = run_cmd(["afplay", str(wav)], timeout=20)
-        else:
-            time.sleep(3)
-        time.sleep(0.5)
-        d["capture_failed"] = bool(session.capture_failed)
-        session.stop()
-        d["captured_only_silence"] = guard(d, "captured_only_silence", lambda: bool(session.captured_only_silence))
-        d["frames_recorded"] = guard(d, "frames_recorded", lambda: int(session.frames_recorded))
-        d["result"] = "started"
-    except BaseException as error:
-        d["result"] = f"{type(error).__name__}: {error}"
-        d["traceback"] = traceback.format_exc()[-2000:]
-        if session is not None:
-            with contextlib.suppress(BaseException):
-                session.stop()
+    session = bounded(d, "session_create", lambda: catap.RecordingSession.from_system_audio(on_buffer=on_buffer), 20)
+    started = False
+    if session is not None:
+        bounded(d, "session_start", lambda: session.start() or True, 30)
+        started = (d["session_start"].get("value") is True)
+    if started:
+        player = subprocess.Popen(["afplay", str(out / "tts_en.wav")]) if (out / "tts_en.wav").exists() else None
+        time.sleep(4)
+        if player is not None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                d["afplay_rc"] = player.wait(timeout=10)
+        bounded(d, "capture_failed", lambda: bool(session.capture_failed), 5)
+        bounded(d, "session_stop", lambda: session.stop() or True, 30)
+        bounded(d, "captured_only_silence", lambda: bool(session.captured_only_silence), 5)
+        bounded(d, "frames_recorded", lambda: int(session.frames_recorded), 5)
     d["stats"] = stats
     d["permissions_after"] = permission_snapshot()
+    step = "stop" if started else "start" if session is not None else "create"
+    result = d.get(f"session_{step}") or {}
     return {"status": "info",
-            "summary": f"start: {d['result']}; buffers={stats['buffers']}, frames={stats['frames']}, "
-                       f"nonzero={stats['nonzero']}, peak={round(stats['peak'], 4)}, format={stats['format']}",
+            "summary": f"last step {step}: {result.get('error') or 'ok'}; buffers={stats['buffers']}, "
+                       f"frames={stats['frames']}, nonzero={stats['nonzero']}, peak={round(stats['peak'], 4)}, "
+                       f"format={stats['format']}",
             "details": d}
 
 
@@ -857,7 +881,10 @@ def check_pyinstaller(out: Path) -> dict:
     return {"status": "ok" if ok else "fail",
             "summary": f"build {d['build']['seconds']} s, .app {d['app_mb']} MB, dmg {d.get('dmg_mb')} MB, "
                        f"codesign rc={d['codesign_verify'].get('rc')}, frozen run rc={d.get('run', {}).get('rc')}, "
-                       f"text hits={len(_hits(probe.get('text', ''), KEYWORDS_EN))}, tk={probe.get('tk')}",
+                       f"text hits={len(_hits(probe.get('text', ''), KEYWORDS_EN))}, tk={probe.get('tk')}, "
+                       f"openvino={probe.get('openvino')}, catap={str(probe.get('catap'))[:120]}, "
+                       f"sounddevice={str(probe.get('sounddevice'))[:40]}, soundfile={probe.get('soundfile')}, "
+                       f"pystray={probe.get('pystray')}",
             "details": d}
 
 
@@ -875,13 +902,15 @@ CHECKS: dict[str, tuple[Callable[[Path], dict], int]] = {
     "tts": (check_tts, 120),
     "whisper": (check_whisper, 900),
     "microphone": (check_microphone, 60),
-    "tap": (check_tap, 120),
+    "tap": (check_tap, 240),
     "pyinstaller": (check_pyinstaller, 1500),
 }
 
 
 def run_one(name: str, out: Path) -> None:
-    func, _timeout = CHECKS[name]
+    func, timeout = CHECKS[name]
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(max(timeout - 10, 5), exit=False)
     start = time.monotonic()
     try:
         result = func(out)
@@ -890,6 +919,11 @@ def run_one(name: str, out: Path) -> None:
                   "details": {"traceback": traceback.format_exc()[-3000:]}}
     result["seconds"] = round(time.monotonic() - start, 2)
     (out / f"{name}.json").write_text(json.dumps(result, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
+    faulthandler.cancel_dump_traceback_later()
+    # A blocked daemon thread (Core Audio) must not keep the process alive after the result is written.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def run_all(out: Path, only: list[str] | None) -> None:
