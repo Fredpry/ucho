@@ -596,6 +596,7 @@ def poll():
             entry.delete(0, "end")
             enters.clear()
             events.clear()
+            print("cleared", flush=True)
         elif command == "dump":
             print(json.dumps({"text": entry.get(), "enters": enters, "events": events,
                               "focus": str(root.focus_get())}), flush=True)
@@ -637,6 +638,11 @@ class TargetApp:
     def send(self, command: str) -> None:
         self.proc.stdin.write(command + "\n")
         self.proc.stdin.flush()
+
+    def clear(self) -> None:
+        """Empties the entry and waits for it, so the clear cannot overtake the keys of a test."""
+        self.send("clear")
+        assert self.line() == "cleared"
 
     def dump(self) -> dict:
         mac_inserter.settle(0.5)  # let Tk handle the posted keys
@@ -696,7 +702,7 @@ def test_real_foreground_is_the_target_app(target_app):
 
 @MACOS_ONLY
 def test_real_paste_with_enter_restores_the_clipboard(target_app, real_clipboard):
-    target_app.send("clear")
+    target_app.clear()
     real_clipboard.set_text("the previous clipboard")
     delivered: list[str] = []
     result = dictation.insert_text("hello from Ucho", "paste", True, target_app.pid, delivered.append)
@@ -709,7 +715,7 @@ def test_real_paste_with_enter_restores_the_clipboard(target_app, real_clipboard
 
 @MACOS_ONLY
 def test_real_offer_confirmed_by_the_target(target_app, real_clipboard):
-    target_app.send("clear")
+    target_app.clear()
     offer = real_clipboard.offer_delayed("confirmed text", target_app.pid)
     offer.offer()
     try:
@@ -724,7 +730,7 @@ def test_real_offer_confirmed_by_the_target(target_app, real_clipboard):
 
 @MACOS_ONLY
 def test_real_type_mode(target_app, real_clipboard):
-    target_app.send("clear")
+    target_app.clear()
     real_clipboard.set_text("untouched")
     text = "zażółć gęślą jaźń, typed by Ucho in pieces"
     assert dictation.insert_text(text, "type", False, target_app.pid) == dictation.PASTE
