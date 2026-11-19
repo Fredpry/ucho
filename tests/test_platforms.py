@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Legacy Windows-only modules whose module-level imports are removed in later tasks.
 _M1B_EXCEPTIONS = {"hotkeys.py", "instance.py", "winshell.py"}  # task M1b removes them
-_M1C_EXCEPTIONS = {"audio.py"}  # task M1c removes it
+_M1C_EXCEPTIONS: set[str] = set()  # task M1c removed audio.py
 MODULE_IMPORT_EXCEPTIONS = _M1B_EXCEPTIONS | _M1C_EXCEPTIONS
 
 FORBIDDEN_MODULES = {

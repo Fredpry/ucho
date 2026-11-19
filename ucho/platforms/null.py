@@ -204,7 +204,7 @@ class NullAudio:
         }
 
     def open_input(self, device: DeviceInfo, channels: int, rate: int, frames: int,
-                   on_data: Callable[[bytes], None]) -> Any:
+                   on_data: Callable[[bytes], None], host: object | None = None) -> Any:
         raise OSError("Audio input is not available on this system")
 
     def permission(self, kind: Literal["microphone", "system_audio"]) -> Permission:

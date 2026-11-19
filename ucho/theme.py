@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config
+from . import config, platforms
 
 log = logging.getLogger(__name__)
 
@@ -160,17 +159,13 @@ C = palette()
 
 # --- fonts ---------------------------------------------------------------------
 
-SANS = ("Segoe UI Variable Text", "Segoe UI", "Arial")
-DISPLAY = ("Sitka Heading", "Georgia", "Times New Roman")  # Iowan/Charter are rare on Windows
-MONO = ("Cascadia Mono", "Cascadia Code", "Consolas", "Courier New")
-# Large numbers (the timer): the display cut of Segoe UI, tabular digits.
-NUMERIC = ("Segoe UI Variable Display", "Segoe UI Light", "Segoe UI", "Arial")
-# Windows ships semibold cuts as separate families; they read calmer than bold.
-SEMIBOLD = {
-    "sans": ("Segoe UI Variable Text Semibold", "Segoe UI Semibold"),
-    "display": ("Sitka Heading Semibold",),
-    "numeric": ("Segoe UI Variable Display Semib", "Segoe UI Semibold"),
-}
+# Font families come from the active platform backend (`ucho/platforms/`).
+_FONTS = platforms.fonts()
+SANS = _FONTS.sans
+DISPLAY = _FONTS.display
+MONO = _FONTS.mono
+NUMERIC = _FONTS.numeric
+SEMIBOLD = dict(_FONTS.strong)
 
 
 class Fonts:
@@ -293,17 +288,9 @@ def apply_fonts() -> None:
 
 
 def reduced_motion() -> bool:
-    """Windows "Animation effects" turned off (Settings > Accessibility > Visual effects)."""
-    if sys.platform != "win32":
-        return False
+    """Whether the system prefers reduced motion (animations turned off)."""
     try:
-        import ctypes
-
-        enabled = ctypes.c_int(1)
-        spi_getclientareaanimation = 0x1042
-        ctypes.windll.user32.SystemParametersInfoW(spi_getclientareaanimation, 0,
-                                                   ctypes.byref(enabled), 0)
-        return not enabled.value
+        return bool(platforms.sysinfo().reduce_motion())
     except Exception:
         return False
 
