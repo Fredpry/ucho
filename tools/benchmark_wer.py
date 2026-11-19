@@ -20,6 +20,7 @@ Usage:
     python tools/benchmark_wer.py DATA_DIR --baseline old.json  # show the change vs a past run
     python tools/benchmark_wer.py DATA_DIR --backend parakeet   # optional Parakeet backend
                                                                 # (needs sherpa-onnx)
+    python tools/benchmark_wer.py DATA_DIR --backend whispercpp # macOS whisper.cpp backend
 
 Scoring needs only the standard library. Transcription imports `ucho.transcribe`
 (OpenVINO) lazily, so `--wer-only` works in the dev environment without models.
@@ -233,6 +234,10 @@ class Transcriber:
             from ucho import parakeet
 
             self.engine = parakeet.Engine(model or parakeet.REPO_ID, device, threads)
+        elif backend == "whispercpp":
+            from ucho import whispercpp
+
+            self.engine = whispercpp.Engine(model or whispercpp.MODEL_LARGE, device)
         else:
             self.engine = transcribe.Engine(model or config.DEFAULT_MODEL, device)
         # Load (and on GPU compile) before the first file, so that file's
@@ -388,9 +393,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("folder", type=Path, help="folder with audio, <stem>.txt and <stem>.hyp.txt")
     parser.add_argument("--wer-only", action="store_true",
                         help="do not transcribe, score existing <stem>.hyp.txt files")
-    parser.add_argument("--backend", choices=("whisper", "parakeet"), default="whisper",
-                        help="whisper (OpenVINO, the app default) or parakeet (optional, sherpa-onnx, "
-                             "CPU only)")
+    parser.add_argument("--backend", choices=("whisper", "parakeet", "whispercpp"), default="whisper",
+                        help="whisper (OpenVINO, the app default), parakeet (optional, sherpa-onnx, "
+                             "CPU only) or whispercpp (macOS, pywhispercpp)")
     parser.add_argument("--model", default="",
                         help="model repo id (default: the backend's default model)")
     parser.add_argument("--threads", type=int, default=None,

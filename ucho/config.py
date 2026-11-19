@@ -13,6 +13,7 @@ import importlib.util
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from . import paths
@@ -105,6 +106,39 @@ MODELS = {
         "size": "~2.5 GB",
         "backend": "parakeet",
     },
+    # macOS models (ucho/whispercpp.py, whisper.cpp via Metal or CPU).
+    # `hidden` models are only for CI and tests and are not offered in
+    # Settings; the shared repo has one pinned revision in REVISIONS.
+    "ggerganov/whisper.cpp:ggml-large-v3-q5_0.bin": {
+        "name": "large-v3-q5_0",
+        "description": "Large-v3 Q5 (whisper.cpp) — best language detection on Mac",
+        "size": "~1.1 GB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+    },
+    "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin": {
+        "name": "large-v3-turbo-q5_0",
+        "description": "Turbo Q5 (whisper.cpp) — faster on Mac, worse with mixed languages",
+        "size": "~570 MB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+    },
+    "ggerganov/whisper.cpp:ggml-tiny-q5_1.bin": {
+        "name": "tiny-q5_1",
+        "description": "Tiny Q5 (whisper.cpp) — smallest test model",
+        "size": "~32 MB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+        "hidden": True,
+    },
+    "ggerganov/whisper.cpp:ggml-base-q5_1.bin": {
+        "name": "base-q5_1",
+        "description": "Base Q5 (whisper.cpp) — small test model",
+        "size": "~60 MB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+        "hidden": True,
+    },
 }
 
 DEFAULT_MODEL = "OpenVINO/whisper-large-v3-int8-ov"
@@ -186,6 +220,9 @@ REVISIONS = {
     #   c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5
     "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0": "9403a6902bb58e3d5ae8c7e77c3422de279db2e0",
     "csukuangfj/speaker-embedding-models": "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
+    # whisper.cpp GGML models (checked in Hugging Face API 2026-11-19; MIT,
+    # ggml conversions of OpenAI Whisper weights).
+    "ggerganov/whisper.cpp": "5359861c739e955e79d9a303bcbc70fb988958b1",
 }
 
 # Repos of which only some files are downloaded (the Parakeet repos also hold
@@ -205,6 +242,10 @@ DOWNLOAD_PATTERNS = {
     "csukuangfj/speaker-embedding-models": [
         "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
     ],
+    "ggerganov/whisper.cpp:ggml-large-v3-q5_0.bin": ["ggml-large-v3-q5_0.bin"],
+    "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin": ["ggml-large-v3-turbo-q5_0.bin"],
+    "ggerganov/whisper.cpp:ggml-tiny-q5_1.bin": ["ggml-tiny-q5_1.bin"],
+    "ggerganov/whisper.cpp:ggml-base-q5_1.bin": ["ggml-base-q5_1.bin"],
 }
 
 # Whisper expects the language token in this form. None = auto-detection.
@@ -592,3 +633,19 @@ def prepare_dirs(settings: Settings | None = None) -> None:
 def onedrive_folder(path: Path) -> bool:
     """True when `path` lies in a OneDrive-synced folder (recordings would go to the cloud)."""
     return paths.is_cloud_path(path)
+
+
+def split_model_id(key: str) -> tuple[str, str | None]:
+    """Splits a `repo:filename` model key into `(repo, filename)`, or `(key, None)`."""
+    if ":" not in key:
+        return key, None
+    repo, filename = key.split(":", 1)
+    if len(repo) > 1 and "/" in repo and filename:
+        return repo, filename
+    return key, None
+
+
+def model_supported(key: str) -> bool:
+    """True when `key` has no platform restriction or supports `sys.platform`."""
+    platforms = MODELS.get(key, {}).get("platforms")
+    return platforms is None or sys.platform in platforms

@@ -98,18 +98,23 @@ def model_path(repo_id: str, download: bool = False, tqdm_class: type | None = N
     """
     from huggingface_hub import snapshot_download
 
-    revision = config.REVISIONS.get(repo_id)
+    repo, filename = config.split_model_id(repo_id)
+    revision = config.REVISIONS.get(repo)
     patterns = config.DOWNLOAD_PATTERNS.get(repo_id)
     if download:
-        return Path(snapshot_download(repo_id, revision=revision, allow_patterns=patterns,
-                                      tqdm_class=tqdm_class))
-    try:
-        return Path(snapshot_download(repo_id, revision=revision, allow_patterns=patterns,
-                                      local_files_only=True))
-    except Exception:
-        if revision is None:
-            raise
-        return Path(snapshot_download(repo_id, allow_patterns=patterns, local_files_only=True))
+        folder = Path(snapshot_download(repo, revision=revision, allow_patterns=patterns,
+                                        tqdm_class=tqdm_class))
+    else:
+        try:
+            folder = Path(snapshot_download(repo, revision=revision, allow_patterns=patterns,
+                                            local_files_only=True))
+        except Exception:
+            if revision is None:
+                raise
+            folder = Path(snapshot_download(repo, allow_patterns=patterns, local_files_only=True))
+    if filename is not None and not (folder / filename).exists():
+        raise FileNotFoundError(filename)
+    return folder
 
 
 def model_downloaded(repo_id: str) -> bool:
@@ -117,24 +122,32 @@ def model_downloaded(repo_id: str) -> bool:
         model_path(repo_id, download=False)
         return True
     except Exception as error:
-        # A missing model is LocalEntryNotFoundError. Any other exception (e.g. a
-        # broken .pyc in the standard library when importing huggingface_hub)
-        # also ends as "model not downloaded", so without this entry the cause is lost.
-        if type(error).__name__ != "LocalEntryNotFoundError":
+        # A missing model is LocalEntryNotFoundError (or FileNotFoundError for a
+        # single-file `repo:filename` model). Any other exception (e.g. a broken
+        # .pyc in the standard library when importing huggingface_hub) also ends
+        # as "model not downloaded", so without this entry the cause is lost.
+        single_file_missing = (isinstance(error, FileNotFoundError)
+                               and config.split_model_id(repo_id)[1] is not None)
+        if not single_file_missing and type(error).__name__ != "LocalEntryNotFoundError":
             log.warning("Checking model %r failed: %r", repo_id, error)
         return False
 
 
 def create_engine(repo_id: str, device: str = "GPU"):
-    """The engine for `repo_id`: Whisper on OpenVINO, or the optional Parakeet backend.
+    """The engine for `repo_id`: OpenVINO Whisper, Parakeet, or whisper.cpp.
 
-    Both have the same surface (load, release, generate, device), so the rest
-    of the app does not care which one it got.
+    All backends share the same surface (load, release, generate, device), so
+    the rest of the app does not care which one it got.
     """
     from . import parakeet
 
-    if config.MODELS.get(repo_id, {}).get("backend") == parakeet.BACKEND or repo_id in parakeet.FILES:
+    backend = config.MODELS.get(repo_id, {}).get("backend")
+    if backend == parakeet.BACKEND or repo_id in parakeet.FILES:
         return parakeet.Engine(repo_id, device)
+    if backend == "whispercpp":
+        from . import whispercpp
+
+        return whispercpp.Engine(repo_id, device)
     return Engine(repo_id, device)
 
 
@@ -142,8 +155,12 @@ def offered_models() -> list[str]:
     """Transcription models to offer in Settings: Parakeet only when its package is installed."""
     from . import parakeet
 
-    return [repo for repo, info in config.MODELS.items()
-            if info.get("backend") != parakeet.BACKEND or parakeet.available()]
+    return [
+        repo for repo, info in config.MODELS.items()
+        if config.model_supported(repo)
+        and not info.get("hidden")
+        and (info.get("backend") != parakeet.BACKEND or parakeet.available())
+    ]
 
 
 def available_devices() -> list[str]:
