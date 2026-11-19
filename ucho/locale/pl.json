@@ -411,5 +411,8 @@
   "The speech model {model} is not downloaded. Download it to record.": "Model mowy {model} nie jest pobrany. Pobierz go, żeby nagrywać.",
   "{done} MB": "{done} MB",
   "{model}: {error}": "{model}: {error}",
-  "{percent}% · {done} / {total} MB": "{percent}% · {done} / {total} MB"
+  "{percent}% · {done} / {total} MB": "{percent}% · {done} / {total} MB",
+  "Recording uses {model} meanwhile.": "Do tego czasu nagrania transkrybuje {model}.",
+  "Speech model not downloaded": "Model mowy nie jest pobrany",
+  "Transcribing with {fallback} until {model} is downloaded.": "Transkrybuję modelem {fallback}, dopóki {model} nie zostanie pobrany."
 }

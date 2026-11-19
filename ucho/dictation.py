@@ -927,8 +927,20 @@ class DictationController(Emitter):
         return self.app.settings
 
     def model_key(self) -> tuple[str, str]:
-        """(model, device) dictation uses; the transcription model when its own is missing."""
+        """(model, device) dictation uses; another downloaded speech model when its own is missing.
+
+        With the app's model check (#28) the fallback is any speech model on the
+        disk, preferring the transcription model; without it (tests), the
+        transcription model.
+        """
         model = self.settings.dictation_model()
+        picked = (downloads.speech_model_for(self.app, model)
+                  if callable(getattr(self.app, "speech_model_for", None)) else None)
+        if picked is not None:
+            if picked != model and self._reported_missing != model:
+                self._reported_missing = model
+                log.warning("Dictation model %s is not ready - using %s", model, picked)
+            return picked, self.settings["device"]
         if model != self.settings["model"] and not self._model_downloaded(model):
             if self._reported_missing != model:
                 self._reported_missing = model

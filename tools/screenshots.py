@@ -10,7 +10,7 @@ themes and both window layouts, and grabs each window by its rectangle
 Nothing is recorded: the "recording" shots use a fake recorder that only
 reports levels. No model is loaded, and nothing is downloaded: the speech
 model counts as present, and the "model-*" shots show a made-up download or a
-missing model (#28).
+missing model, or a download while another model is used (#28).
 
     python tools/screenshots.py                    # all shots into docs/screens
     python tools/screenshots.py --only meeting     # shots whose name contains "meeting"
@@ -183,11 +183,13 @@ def main(argv: list[str]) -> int:
         from ucho import downloads
 
         name = settings["model"]
+        other = "OpenVINO/whisper-large-v3-turbo-int8-ov"
         app.downloads._items.pop(name, None)
         app._speech_generation += 1  # a disk check still running is ignored
-        app._speech_check = (name, state != "missing")
+        on_disk = {"ready": {name}, "fallback": {other}}.get(state, set())
+        app._speech_downloaded = frozenset(on_disk)
         app._speech_checked_at = time.monotonic() + 3600  # no new disk check meanwhile
-        if state == "downloading":
+        if state in ("downloading", "fallback"):
             item = downloads.Download(name, downloads.model_name(name), downloads.SPEECH)
             item.counter.add_total(1520 * downloads.MB)
             item.counter.advance(640 * downloads.MB)
@@ -226,6 +228,7 @@ def main(argv: list[str]) -> int:
         shot(f"model-downloading-{mode}", lambda: (model("downloading"), app.show("meeting")))
         shot(f"model-downloading-dictation-{mode}", lambda: app.show("dictation"))
         shot(f"model-missing-{mode}", lambda: (model("missing"), app.show("meeting")))
+        shot(f"model-fallback-{mode}", lambda: (model("fallback"), app.show("meeting")))
         shot(f"model-missing-settings-{mode}",
              lambda: app.show("settings", section="hardware"))
     shot("transcript-all-actions-light",

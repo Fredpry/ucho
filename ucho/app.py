@@ -124,7 +124,7 @@ class App(ctk.CTk):
         # Download threads are not joined at quit: a download can take minutes.
         self.downloads = downloads.Downloads(self.post)
         self.downloads.listen(self._download_finished)
-        self._speech_check: tuple[str, bool] | None = None  # (model, on disk)
+        self._speech_downloaded: frozenset[str] | None = None  # speech models on the disk
         self._speech_checked_at = 0.0
         self._speech_generation = 0
         self._speech_checking = False
@@ -286,6 +286,8 @@ class App(ctk.CTk):
     def _meeting_event(self, event: str, data) -> None:
         if event == "error":
             self.toast(str(data), "warning", 6)
+        elif event == "notice":
+            self.toast(str(data), "ready", 6)
         elif event == "summary_error":
             log.warning("Summary skipped: %s", data)
             self.toast(t("No summary: {reason}", reason=data), "warning", 6)
@@ -513,7 +515,7 @@ class App(ctk.CTk):
         if d.queued:
             return t("Recognizing"), "working"
         readiness = self.speech_readiness(False)
-        if readiness.state == downloads.DOWNLOADING:
+        if readiness.running:
             fraction = readiness.progress.fraction
             percent = f" {int(fraction * 100)}%" if fraction is not None else ""
             return t("Downloading the model") + percent, "working"
@@ -556,20 +558,41 @@ class App(ctk.CTk):
     # --- models: downloads and whether recording can start ---------------------------
 
     def speech_readiness(self, check: bool = True) -> downloads.Readiness:
-        """State of the transcription model chosen in Settings.
+        """State of the transcription model chosen in Settings, with the fallback model.
 
         `check`: look at the disk now when it was not checked yet (a start of a
         recording); the UI loop passes False and treats "not checked" as ready.
         """
         model = self.settings["model"]
-        cached = self._speech_check
-        on_disk = cached[1] if cached is not None and cached[0] == model else None
-        if on_disk is None and check:
-            on_disk = self._check_speech_model()
-        return downloads.speech_readiness(model, on_disk, self.downloads.get(model))
+        downloaded = self._speech_downloaded
+        if downloaded is None and check:
+            downloaded = self._check_speech_model()
+        if downloaded is None:
+            return downloads.speech_readiness(model, None, self.downloads.get(model))
+        return downloads.speech_readiness(model, model in downloaded, self.downloads.get(model),
+                                          self._fallback(model, downloaded))
+
+    def _fallback(self, preferred: str, downloaded: frozenset[str]) -> str | None:
+        running = [item.key for item in self.downloads.running()]
+        return downloads.fallback_speech_model(
+            preferred, downloaded, running,
+            prefer=(self.settings["model"], self.settings.dictation_model()))
+
+    def speech_model_for(self, preferred: str, check: bool = True) -> str | None:
+        """The speech model to use instead of `preferred`: itself when ready, else a fallback.
+
+        None when no speech model is on the disk. Not checked yet (and
+        `check` False): `preferred`, as before the check existed.
+        """
+        downloaded = self._speech_downloaded
+        if downloaded is None and check:
+            downloaded = self._check_speech_model()
+        if downloaded is None:
+            return preferred
+        return self._fallback(preferred, downloaded)
 
     def recording_blocked(self, check: bool = True) -> str | None:
-        """Why a meeting or a dictation cannot start now (no speech model), or None."""
+        """Why a meeting or a dictation cannot start now (no speech model at all), or None."""
         return downloads.block_reason(self.speech_readiness(check))
 
     def refuse_recording(self, reason: str) -> None:
@@ -580,18 +603,29 @@ class App(ctk.CTk):
             # The hotkey or the tray while the window is hidden: the toast would be unseen.
             self.tray.notify(reason)
 
-    def _check_speech_model(self) -> bool:
-        """Looks for the chosen speech model on the disk (UI thread, fast after the first import)."""
+    def _speech_candidates(self) -> list[str]:
         from . import transcribe
 
-        model = self.settings["model"]
-        on_disk = transcribe.model_downloaded(model)
+        models = transcribe.offered_models()
+        for model in (self.settings["model"], self.settings.dictation_model()):
+            if model not in models:
+                models.append(model)
+        return models
+
+    def _check_speech_model(self) -> frozenset[str]:
+        """Looks for the speech models on the disk (UI thread, fast after the first import)."""
+        from . import transcribe
+
+        downloaded = frozenset(m for m in self._speech_candidates() if transcribe.model_downloaded(m))
         self._speech_generation += 1
-        self._speech_check = (model, on_disk)
+        self._apply_speech_check(downloaded)
+        return downloaded
+
+    def _apply_speech_check(self, downloaded: frozenset[str]) -> None:
+        self._speech_downloaded = downloaded
         self._speech_checked_at = time.monotonic()
-        if on_disk:
+        for model in downloaded:
             self.downloads.forget(model)
-        return on_disk
 
     def _check_speech_async(self) -> None:
         """The same check off the UI thread: the first one imports huggingface_hub."""
@@ -599,21 +633,19 @@ class App(ctk.CTk):
             return
         self._speech_checking = True
         self._speech_checked_at = time.monotonic()
-        model, generation = self.settings["model"], self._speech_generation
+        candidates, generation = self._speech_candidates(), self._speech_generation
 
         def work() -> None:
             from . import transcribe
 
-            on_disk = transcribe.model_downloaded(model)
+            downloaded = frozenset(m for m in candidates if transcribe.model_downloaded(m))
 
             def apply() -> None:
                 self._speech_checking = False
                 self._speech_checked_at = time.monotonic()
                 # A check on the UI thread (settings change, finished download) is newer.
-                if generation == self._speech_generation and model == self.settings["model"]:
-                    self._speech_check = (model, on_disk)
-                    if on_disk:
-                        self.downloads.forget(model)
+                if generation == self._speech_generation:
+                    self._apply_speech_check(downloaded)
             self.post(apply)
 
         threading.Thread(target=work, name="model check", daemon=True).start()
@@ -667,6 +699,20 @@ class App(ctk.CTk):
         """(style, title, text, fraction or None, button text or None) for the card, or None."""
         readiness = self.speech_readiness(False)
         name = downloads.model_name(readiness.model)
+        size = downloads.model_size(readiness.model)
+        if readiness.state == downloads.FALLBACK:
+            meanwhile = t("Recording uses {model} meanwhile.",
+                          model=downloads.model_name(readiness.fallback or ""))
+            if readiness.running:
+                return ("info", t("Downloading the speech model"),
+                        f"{name}\n{readiness.progress.describe()}\n{meanwhile}",
+                        readiness.progress.fraction or 0.0, None)
+            if readiness.error:
+                return ("warning", t("Download failed"),
+                        t("{model}: {error}", model=name, error=readiness.error) + f"\n{meanwhile}",
+                        None, t("Retry"))
+            return ("info", t("Speech model not downloaded"), f"{name}\n{meanwhile}", None,
+                    t("Download ({size})", size=size))
         if readiness.state == downloads.DOWNLOADING:
             return ("info", t("Downloading the speech model"),
                     f"{name}\n{readiness.progress.describe()}\n"
@@ -676,7 +722,7 @@ class App(ctk.CTk):
             return ("warning", t("No speech model"),
                     t("Recording needs the speech model {model}. It is downloaded once from "
                       "Hugging Face.", model=name),
-                    None, t("Download ({size})", size=downloads.model_size(readiness.model)))
+                    None, t("Download ({size})", size=size))
         if readiness.state == downloads.FAILED:
             return ("warning", t("Download failed"),
                     t("{model}: {error}", model=name, error=readiness.error or ""),
@@ -689,16 +735,15 @@ class App(ctk.CTk):
         return None
 
     def _update_models(self) -> None:
-        blocked = self.recording_blocked(False) is not None
+        readiness = self.speech_readiness(False)
+        blocked = readiness.blocks
         if blocked != self._blocked_shown:
             self._blocked_shown = blocked
             self.tray.refresh()
-        model = self.settings["model"]
-        stale = self._speech_check is not None and self._speech_check[0] != model
-        if stale or ((blocked or self._speech_check is None)
-                     and not self.downloads.is_running(model)
-                     and time.monotonic() - self._speech_checked_at > MODEL_CHECK_S):
-            # Missing: the model may arrive from the installer; changed: the wizard chose another.
+        # Not there yet: the model may arrive from the installer or another Ucho.
+        waiting = readiness.state in (downloads.MISSING, downloads.FAILED, downloads.UNKNOWN) or (
+            readiness.state == downloads.FALLBACK and not readiness.running)
+        if waiting and time.monotonic() - self._speech_checked_at > MODEL_CHECK_S:
             self._check_speech_async()
         if not self._screens or not hasattr(self, "_models") or not self._models.winfo_exists():
             return
