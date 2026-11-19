@@ -885,6 +885,127 @@ def check_tap_granted(out: Path) -> dict:
     return result
 
 
+def _pump_until(done: Callable[[], bool], seconds: float) -> bool:
+    """Run the main thread's NSRunLoop (as Tk would) until done() or the time is up."""
+    import Foundation
+
+    loop = Foundation.NSRunLoop.currentRunLoop()
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if done():
+            return True
+        loop.runUntilDate_(Foundation.NSDate.dateWithTimeIntervalSinceNow_(0.1))
+    return done()
+
+
+def check_tap_runloop(out: Path) -> dict:
+    """Runs 2-5: session.start() blocks in AudioDeviceCreateIOProcID, with or without TCC rows,
+    from python and from the .app. Hypotheses: (A) Core Audio needs the main run loop while a
+    worker thread starts the tap (Ucho's main thread runs Tk, which pumps it); (B) only the
+    system-wide tap blocks, a tap of one process (afplay) does not. (C) start on the main thread
+    under a watchdog. Information only; runs after tap_granted, so the TCC rows exist."""
+    import catap
+    import numpy as np
+
+    d: dict = {"tcc_preflight": None}
+    guard(d, "tcc_preflight", tcc_preflight_audio_capture)
+    stats: dict = {}
+
+    def make_callback(name):
+        entry = stats[name] = {"buffers": 0, "nonzero": 0, "peak": 0.0}
+
+        def on_buffer(buffer):
+            entry["buffers"] += 1
+            if buffer.format.bits_per_sample == 32:
+                samples = np.frombuffer(buffer.data, dtype=np.float32)
+                entry["nonzero"] += int(np.count_nonzero(samples))
+                if samples.size:
+                    entry["peak"] = max(entry["peak"], float(np.abs(samples).max()))
+        return on_buffer
+
+    def attempt(name: str, make_session) -> None:
+        r: dict = d.setdefault(name, {})
+        print(f"[{time.strftime('%X')}] {name} ...", file=sys.stderr, flush=True)
+        try:
+            session = make_session(make_callback(name))
+        except BaseException as error:
+            r["create"] = f"{type(error).__name__}: {error}"
+            return
+        box: dict = {}
+
+        def start():
+            try:
+                session.start()
+                box["ok"] = True
+            except BaseException as error:
+                box["error"] = f"{type(error).__name__}: {error}"
+
+        began = time.monotonic()
+        threading.Thread(target=start, daemon=True).start()
+        finished = _pump_until(lambda: bool(box), 25)
+        r["start"] = ("ok" if box.get("ok") else box.get("error")) if finished else "still blocked after 25 s (main run loop pumped)"
+        r["start_seconds"] = round(time.monotonic() - began, 2)
+        if box.get("ok"):
+            player = subprocess.Popen(["afplay", str(out / "tts_en.wav")])
+            _pump_until(lambda: player.poll() is not None, 15)
+            stopped: dict = {}
+            threading.Thread(target=lambda: stopped.update(ok=session.stop() or True), daemon=True).start()
+            _pump_until(lambda: bool(stopped), 15)
+            r["stopped"] = bool(stopped)
+        r["stats"] = stats[name]
+        print(f"[{time.strftime('%X')}] {name}: {r}", file=sys.stderr, flush=True)
+
+    attempt("A_system_tap_worker_with_runloop", lambda cb: catap.RecordingSession.from_system_audio(on_buffer=cb))
+    # B: tap of one process; afplay plays the WAV in a loop so that it is an audio process
+    player = subprocess.Popen(["/bin/sh", "-c", f"for i in 1 2 3 4 5 6 7 8; do afplay '{out / 'tts_en.wav'}'; done"])
+    time.sleep(1.5)
+
+    def afplay_process():
+        for process in catap.list_audio_processes():
+            if "afplay" in str(getattr(process, "name", "")).lower() or "afplay" in str(getattr(process, "bundle_id", "")):
+                return process
+        return None
+
+    target = bounded(d, "afplay_process", lambda: str(afplay_process()), 10)
+    process = afplay_process() if target and target != "None" else None
+    if process is not None:
+        attempt("B_process_tap_worker_with_runloop",
+                lambda cb: catap.RecordingSession.from_process(process, on_buffer=cb))
+    player.kill()
+
+    # C: start on the main thread; a watchdog writes the result and ends the process if it blocks.
+    name = "C_system_tap_main_thread"
+    d[name] = {"start": "still blocked after 30 s (main thread)"}
+
+    def watchdog():
+        time.sleep(30)
+        print(f"--- stacks while {name} is blocked:", file=sys.stderr, flush=True)
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        result = {"status": "info", "summary": _tap_runloop_summary(d), "details": d, "seconds": None}
+        (out / "tap_runloop.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        os._exit(0)
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    try:
+        session = catap.RecordingSession.from_system_audio(on_buffer=make_callback(name))
+        session.start()
+        d[name]["start"] = "ok"
+        subprocess.run(["afplay", str(out / "tts_en.wav")], timeout=15)
+        session.stop()
+        d[name]["stats"] = stats[name]
+    except BaseException as error:
+        d[name]["start"] = f"{type(error).__name__}: {error}"
+    return {"status": "info", "summary": _tap_runloop_summary(d), "details": d}
+
+
+def _tap_runloop_summary(d: dict) -> str:
+    parts = [f"TCC preflight={d.get('tcc_preflight')}"]
+    for key in ("A_system_tap_worker_with_runloop", "B_process_tap_worker_with_runloop", "C_system_tap_main_thread"):
+        r = d.get(key) or {}
+        parts.append(f"{key[0]}: {r.get('create') or r.get('start')} {r.get('stats', '')}")
+    return "; ".join(parts)
+
+
 def check_microphone(out: Path) -> dict:
     import numpy as np
     import sounddevice as sd
@@ -1144,6 +1265,7 @@ CHECKS: dict[str, tuple[Callable[[Path], dict], int]] = {
     "microphone": (check_microphone, 60),
     "tap": (check_tap, 240),
     "tap_granted": (check_tap_granted, 300),
+    "tap_runloop": (check_tap_runloop, 180),
     "pyinstaller": (check_pyinstaller, 3000),
 }
 
