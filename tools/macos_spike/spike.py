@@ -739,12 +739,28 @@ def bounded(details: dict, key: str, func: Callable[[], object], seconds: float)
     took = round(time.monotonic() - start, 2)
     if thread.is_alive():
         details[key] = {"error": f"still blocked after {seconds} s"}
+        print(f"--- stacks while {key} is blocked:", file=sys.stderr, flush=True)
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
     elif "error" in box:
         details[key] = {"error": box["error"], "traceback": box["traceback"], "seconds": took}
     else:
         details[key] = {"value": box.get("value"), "seconds": took}
     print(f"[{time.strftime('%X')}] {key}: {str(details[key])[:300]}", file=sys.stderr, flush=True)
     return box.get("value")
+
+
+def tcc_preflight_audio_capture() -> int:
+    """Private TCC SPI used by AudioCap: 0 = granted, 1 = denied, 2 = not determined (information only)."""
+    import ctypes
+
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    tcc = ctypes.CDLL("/System/Library/PrivateFrameworks/TCC.framework/TCC")
+    tcc.TCCAccessPreflight.restype = ctypes.c_int
+    tcc.TCCAccessPreflight.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    service = cf.CFStringCreateWithCString(None, b"kTCCServiceAudioCapture", 0x08000100)
+    return int(tcc.TCCAccessPreflight(service, None))
 
 
 def check_tap(out: Path) -> dict:
@@ -761,6 +777,7 @@ def check_tap(out: Path) -> dict:
         return str(objc.lookUpClass("CATapDescription"))
 
     guard(d, "CATapDescription_class", lookup)
+    guard(d, "tcc_preflight_audio_capture_private", tcc_preflight_audio_capture)
     catap = bounded(d, "import_catap", lambda: __import__("catap"), 30)
     if catap is None:
         return {"status": "fail", "summary": f"import catap: {d['import_catap']}", "details": d}
@@ -841,50 +858,114 @@ def check_microphone(out: Path) -> dict:
                                          f"nonzero={d.get('nonzero')}, error={d.get('error')}", "details": d}
 
 
-def check_pyinstaller(out: Path) -> dict:
+LIGHT_EXCLUDES = ["openvino", "openvino_genai", "openvino_tokenizers", "catap", "sounddevice", "soundfile"]
+
+
+def _build_probe(out: Path, temp: Path, name: str, excludes: list[str]) -> dict:
     d: dict = {}
-    temp = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "pyi"
-    shutil.rmtree(temp, ignore_errors=True)
-    build = run_cmd([sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", "WhisperProbe",
-                     "--osx-bundle-identifier", "app.ucho.spike", "--distpath", str(temp / "dist"),
-                     "--workpath", str(temp / "build"), "--specpath", str(temp), str(HERE / "pyi_probe.py")],
-                    timeout=900, tail=6000)
-    (out / "pyinstaller-build.log").write_text(build.get("err", "") + build.get("out", ""), encoding="utf-8")
+    args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", name,
+            "--osx-bundle-identifier", f"app.ucho.spike.{name.lower()}", "--distpath", str(temp / "dist"),
+            "--workpath", str(temp / "build" / name), "--specpath", str(temp)]
+    for module in excludes:
+        args += ["--exclude-module", module]
+    build = run_cmd(args + [str(HERE / "pyi_probe.py")], timeout=900, tail=8000)
+    log = build.get("err", "") + build.get("out", "")
+    (out / f"pyinstaller-{name}.log").write_text(log, encoding="utf-8")
     d["build"] = {"rc": build.get("rc"), "seconds": build.get("seconds")}
-    app = temp / "dist" / "WhisperProbe.app"
-    if not app.exists():
-        return {"status": "fail", "summary": f"build failed rc={build.get('rc')}", "details": d}
+    app = temp / "dist" / f"{name}.app"
+    if build.get("rc") != 0 or not app.exists():
+        failed = re.findall(r"Failed to process binary '([^']+)'", log)
+        d["failed_binary"] = failed[-1] if failed else None
+        d["codesign_error"] = "internal error in Code Signing subsystem" in log
+        return d
     d["app_mb"] = round(sum(p.stat().st_size for p in app.rglob("*") if p.is_file() and not p.is_symlink()) / 2**20, 1)
-    d["dylibs"] = sorted(str(p.relative_to(app)) for p in app.rglob("*.dylib"))[:80]
-    d["codesign_verify"] = run_cmd(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)])
+    d["dylibs"] = sorted(str(p.relative_to(app)) for p in app.rglob("*.dylib"))[:120]
+    d["codesign_verify"] = run_cmd(["codesign", "--verify", "--deep", "--strict", str(app)])
     d["codesign_display"] = run_cmd(["codesign", "-dv", str(app)]).get("err", "")[-800:]
     d["spctl"] = run_cmd(["spctl", "-a", "-vv", "-t", "exec", str(app)])
     model_file = out / "model_path.txt"
     if model_file.exists():
-        probe_out = out / "pyi_probe.json"
-        run = run_cmd([str(app / "Contents" / "MacOS" / "WhisperProbe"), model_file.read_text(encoding="utf-8"),
+        probe_out = out / f"pyi_probe_{name}.json"
+        run = run_cmd([str(app / "Contents" / "MacOS" / name), model_file.read_text(encoding="utf-8"),
                        str(out / "tts_en.wav"), str(probe_out)], timeout=300)
         d["run"] = {k: run.get(k) for k in ("rc", "seconds", "err")}
         if probe_out.exists():
             d["probe"] = json.loads(probe_out.read_text(encoding="utf-8"))
-    dmg = temp / "WhisperProbe.dmg"
-    for attempt in range(3):
-        made = run_cmd(["hdiutil", "create", "-volname", "WhisperProbe", "-srcfolder", str(app), "-format", "ULFO",
-                        "-ov", str(dmg)], timeout=300)
-        d[f"hdiutil_attempt_{attempt + 1}"] = {k: made.get(k) for k in ("rc", "seconds", "err")}
-        if made.get("rc") == 0:
-            d["dmg_mb"] = round(dmg.stat().st_size / 2**20, 1)
+    d["app"] = str(app)
+    return d
+
+
+def _codesign_diagnose(site_lib: Path, temp: Path) -> dict:
+    """Why does ad-hoc signing of an OpenVINO dylib fail? Tries on copies, never on the original."""
+    d: dict = {"lib": site_lib.name}
+    d["lipo"] = run_cmd(["lipo", "-archs", str(site_lib)]).get("out", "").strip()
+    d["original_signature"] = run_cmd(["codesign", "-dvvv", str(site_lib)]).get("err", "")[-600:]
+    load = run_cmd(["otool", "-l", str(site_lib)], tail=200000).get("out", "")
+    d["has_code_signature_cmd"] = "LC_CODE_SIGNATURE" in load
+    d["rpaths"] = re.findall(r"path (\S+) \(offset", load)[:10]
+    plain = temp / f"plain-{site_lib.name}"
+    shutil.copy2(site_lib, plain)
+    d["sign_copy"] = run_cmd(["codesign", "-s", "-", "--force", str(plain)])
+    d["sign_copy_like_pyinstaller"] = run_cmd(["codesign", "-s", "-", "--force", "--all-architectures", "--timestamp",
+                                               str(plain)])
+    stripped = temp / f"stripped-{site_lib.name}"
+    shutil.copy2(site_lib, stripped)
+    d["remove_signature"] = run_cmd(["codesign", "--remove-signature", str(stripped)])
+    d["sign_after_remove"] = run_cmd(["codesign", "-s", "-", "--force", str(stripped)])
+    return d
+
+
+def check_pyinstaller(out: Path) -> dict:
+    import sysconfig
+
+    temp = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "pyi"
+    shutil.rmtree(temp, ignore_errors=True)
+    temp.mkdir(parents=True)
+    site = Path(sysconfig.get_paths()["purelib"])
+    d: dict = {}
+    # 1. Tk + pywhispercpp only (the first run of the spike built this one fine).
+    light = d["light"] = _build_probe(out, temp, "WhisperProbe", LIGHT_EXCLUDES)
+    if light.get("app"):
+        dmg = temp / "WhisperProbe.dmg"
+        for attempt in range(3):
+            made = run_cmd(["hdiutil", "create", "-volname", "WhisperProbe", "-srcfolder", light["app"], "-format",
+                            "ULFO", "-ov", str(dmg)], timeout=300)
+            light[f"hdiutil_attempt_{attempt + 1}"] = {k: made.get(k) for k in ("rc", "seconds", "err")}
+            if made.get("rc") == 0:
+                light["dmg_mb"] = round(dmg.stat().st_size / 2**20, 1)
+                break
+            time.sleep(10)
+    # 2. Everything Ucho needs (OpenVINO, catap, sounddevice, soundfile). The second run failed on
+    #    ad-hoc signing of openvino/libs/libtbb.12.dylib; diagnose it and retry after removing the
+    #    original signature of each failing dylib (CI only, in the runner's site-packages).
+    full = d["full"] = _build_probe(out, temp, "FullProbe", [])
+    fixes = d["full_signature_fixes"] = []
+    for _attempt in range(4):
+        failed = full.get("failed_binary")
+        if full.get("app") or not failed or not full.get("codesign_error"):
             break
-        time.sleep(10)
-    probe = d.get("probe", {})
-    ok = d["codesign_verify"].get("rc") == 0 and len(_hits(probe.get("text", ""), KEYWORDS_EN)) >= 3
+        relative = failed.split("/no-entitlements/", 1)[-1]
+        site_lib = site / relative
+        if not site_lib.exists():
+            fixes.append({"lib": relative, "error": "not found in site-packages"})
+            break
+        if not fixes:
+            d["diagnose"] = _codesign_diagnose(site_lib, temp)
+        fixes.append({"lib": relative, "remove_signature": run_cmd(["codesign", "--remove-signature", str(site_lib)])})
+        shutil.rmtree(Path.home() / "Library" / "Application Support" / "pyinstaller", ignore_errors=True)
+        full = d["full"] = _build_probe(out, temp, "FullProbe", [])
+    lp, fp = light.get("probe", {}), full.get("probe", {})
+    ok = (light.get("codesign_verify", {}).get("rc") == 0 and len(_hits(lp.get("text", ""), KEYWORDS_EN)) >= 3)
     return {"status": "ok" if ok else "fail",
-            "summary": f"build {d['build']['seconds']} s, .app {d['app_mb']} MB, dmg {d.get('dmg_mb')} MB, "
-                       f"codesign rc={d['codesign_verify'].get('rc')}, frozen run rc={d.get('run', {}).get('rc')}, "
-                       f"text hits={len(_hits(probe.get('text', ''), KEYWORDS_EN))}, tk={probe.get('tk')}, "
-                       f"openvino={probe.get('openvino')}, catap={str(probe.get('catap'))[:120]}, "
-                       f"sounddevice={str(probe.get('sounddevice'))[:40]}, soundfile={probe.get('soundfile')}, "
-                       f"pystray={probe.get('pystray')}",
+            "summary": f"light: build {light['build']['seconds']} s, .app {light.get('app_mb')} MB, dmg "
+                       f"{light.get('dmg_mb')} MB, codesign rc={light.get('codesign_verify', {}).get('rc')}, "
+                       f"hits={len(_hits(lp.get('text', ''), KEYWORDS_EN))}, tk={lp.get('tk')}; "
+                       f"full: build rc={full['build']['rc']} {full['build']['seconds']} s, .app {full.get('app_mb')} MB, "
+                       f"signature fixes={[f['lib'] for f in fixes]}, codesign rc="
+                       f"{full.get('codesign_verify', {}).get('rc')}, hits={len(_hits(fp.get('text', ''), KEYWORDS_EN))}, "
+                       f"openvino={fp.get('openvino')}, catap={str(fp.get('catap'))[:120]}, "
+                       f"sounddevice={str(fp.get('sounddevice'))[:40]}, soundfile={fp.get('soundfile')}, "
+                       f"pystray={fp.get('pystray')}",
             "details": d}
 
 
@@ -903,7 +984,7 @@ CHECKS: dict[str, tuple[Callable[[Path], dict], int]] = {
     "whisper": (check_whisper, 900),
     "microphone": (check_microphone, 60),
     "tap": (check_tap, 240),
-    "pyinstaller": (check_pyinstaller, 1500),
+    "pyinstaller": (check_pyinstaller, 2700),
 }
 
 
