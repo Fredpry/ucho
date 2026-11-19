@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import functools
 import json
 import os
 import statistics
@@ -31,7 +32,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -113,21 +113,38 @@ def load(wav: Path):
     return np.ascontiguousarray(audio, dtype=np.float32)
 
 
-class _Counters(ctypes.Structure):
-    _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
-                ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
-                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-                ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t),
-                ("PeakPagefileUsage", ctypes.c_size_t), ("PrivateUsage", ctypes.c_size_t)]
+@functools.cache
+def _counters_type():
+    from ctypes import wintypes
+
+    class _Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t), ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t), ("PrivateUsage", ctypes.c_size_t)]
+
+    return _Counters
 
 
 def memory_gb() -> dict:
-    counters = _Counters()
+    if sys.platform != "win32":
+        import resource
+
+        return {"peak_working_set": round(
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            / (1024 ** 3 if sys.platform == "darwin" else 1024 ** 2),
+            2,
+        )}
+    from ctypes import wintypes
+
+    counters_cls = _counters_type()
+    counters = counters_cls()
     counters.cb = ctypes.sizeof(counters)
     kernel32 = ctypes.WinDLL("kernel32")
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
-    kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Counters),
+    kernel32.K32GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(counters_cls),
                                                  wintypes.DWORD]
     kernel32.K32GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(counters),
                                      counters.cb)

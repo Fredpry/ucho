@@ -479,5 +479,10 @@
   "The window has not taken the text yet. If it does not appear, press {keys}.": "Okno jeszcze nie przyjęło tekstu. Jeśli się nie pojawi, wklej go {keys}.",
   "Text is on the clipboard, press {keys}": "Tekst jest w schowku, wklej {keys}",
   "Global hotkeys are not supported on this system.": "Skróty globalne nie są obsługiwane w tym systemie.",
-  "Start at login": "Uruchamiaj przy logowaniu"
+  "Start at login": "Uruchamiaj przy logowaniu",
+  "Large-v3 Q5 (whisper.cpp) — best language detection on Mac": "Large-v3 Q5 (whisper.cpp), najlepsze rozpoznawanie języka na Macu",
+  "Turbo Q5 (whisper.cpp) — faster on Mac, worse with mixed languages": "Turbo Q5 (whisper.cpp), szybszy na Macu, słabszy przy mieszanych językach",
+  "Tiny Q5 (whisper.cpp) — smallest test model": "Tiny Q5 (whisper.cpp), najmniejszy model testowy",
+  "Base Q5 (whisper.cpp) — small test model": "Base Q5 (whisper.cpp), mały model testowy",
+  "Speech recognition with whisper.cpp needs the pywhispercpp package.": "Rozpoznawanie mowy przez whisper.cpp wymaga pakietu pywhispercpp."
 }

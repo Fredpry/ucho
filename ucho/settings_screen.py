@@ -35,6 +35,9 @@ def model_label(repo: str) -> str:
 
 
 def short_model(repo: str) -> str:
+    _, filename = config.split_model_id(repo)
+    if filename is not None:
+        return filename.removeprefix("ggml-").removesuffix(".bin")
     return repo.split("/")[-1].removeprefix("whisper-").removesuffix("-ov")
 
 

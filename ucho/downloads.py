@@ -367,7 +367,14 @@ def fallback_speech_model(chosen: str, downloaded: Iterable[str], downloading: I
     usable = set(downloaded) - set(downloading)
     if chosen in usable:
         return chosen
-    for model in (*prefer, *config.MODELS):
+    candidates = (
+        *prefer,
+        *(
+            model for model, info in config.MODELS.items()
+            if config.model_supported(model) and not info.get("hidden")
+        ),
+    )
+    for model in candidates:
         if model in usable:
             return model
     return None
@@ -420,6 +427,9 @@ def speech_model_for(app, preferred: str) -> str | None:
 
 def model_name(repo: str) -> str:
     """Short model name for messages: "whisper-large-v3-int8"."""
+    _, filename = config.split_model_id(repo)
+    if filename is not None:
+        return filename.removesuffix(".bin")
     return repo.split("/")[-1].removesuffix("-ov")
 
 
