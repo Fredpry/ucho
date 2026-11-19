@@ -18,6 +18,7 @@ from ucho import dictation, platforms
 from ucho.platforms import base, null
 
 ROOT = Path(__file__).resolve().parent.parent
+MACOS_DIR = ROOT / "ucho" / "platforms" / "macos"
 
 # Legacy Windows-only modules whose module-level imports are removed in later tasks.
 _M1B_EXCEPTIONS: set[str] = set()  # emptied by task M1b
@@ -97,13 +98,10 @@ def test_missing_modules_fall_back_to_null_and_cache():
                 first = accessor()
                 second = accessor()
                 assert first is second
-                if fam == "null":
-                    assert type(first).__module__ == "ucho.platforms.null"
-                else:
-                    assert type(first).__module__ in (
-                        "ucho.platforms.null",
-                        f"ucho.platforms.macos.{accessor.__name__}",
-                    )
+                expected = "ucho.platforms.null"
+                if fam == "macos" and (MACOS_DIR / f"{accessor.__name__}.py").is_file():
+                    expected = f"ucho.platforms.macos.{accessor.__name__}"  # implemented by now
+                assert type(first).__module__ == expected
 
             h1 = platforms.hotkeys(lambda _n: None)
             h2 = platforms.hotkeys(lambda _n: None)
