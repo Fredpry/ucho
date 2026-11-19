@@ -1181,6 +1181,10 @@ def run(argv: list[str] | None = None) -> int:
     if options.smoke_test is not None:
         return smoke_test(options)
 
+    try:
+        config.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     # Capped: about 2 MB plus one older file (ucho.log.1); the log holds dictated text.
     logging.basicConfig(
         level=logging.INFO,
