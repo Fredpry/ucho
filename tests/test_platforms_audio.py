@@ -122,6 +122,46 @@ def test_track_with_fake_audio_backend(monkeypatch, tmp_path):
     assert events == ["start", "stop", "close"]
 
 
+def test_track_downmixes_backend_bytes_without_resampling(monkeypatch, tmp_path):
+    """16 kHz stereo needs no soxr, so the CI test job also covers the backend path."""
+    rng = np.random.default_rng(2)
+    mono = [rng.integers(-4000, 4000, size=audio.BLOCK, dtype=np.int16) for _ in range(10)]
+    blocks = [np.repeat(m, 2).tobytes() for m in mono]  # left == right, interleaved
+
+    class FakeStream:
+        def __init__(self, on_data):
+            self._on_data = on_data
+
+        def start(self):
+            for block in blocks:
+                self._on_data(block)
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeBackend:
+        name = "fake"
+
+        def open_input(self, device, channels, rate, frames, on_data, host=None):
+            assert (channels, rate, frames) == (2, audio.TARGET_RATE, audio.BLOCK)
+            return FakeStream(on_data)
+
+    monkeypatch.setattr(platforms, "audio", lambda: FakeBackend())
+    device = audio.DeviceInfo(0, "Fake Mic", 2, audio.TARGET_RATE, False)
+    flac_path = tmp_path / "microphone.flac"
+    track = audio._Track("microphone", flac_path, device)
+    track.open_file()
+    track.start(None)
+    track.finish()
+
+    samples, rate = sf.read(str(flac_path), dtype="int16")
+    assert rate == audio.TARGET_RATE and samples.ndim == 1
+    assert np.array_equal(samples, np.concatenate(mono))
+
+
 def test_dictation_microphone_with_fake_backend_under_null_override(monkeypatch):
     pytest.importorskip("soxr")  # 48 kHz -> 16 kHz; the CI test job has no soxr
     rng = np.random.default_rng(1)
