@@ -658,3 +658,29 @@ Recenzja planu z 2026-11-19 (Claude, bez delegowania). Twierdzenia o kodzie spra
 - p. 8: ryzyko 6 rozstrzygnięte; nowe D1, D3, `hf-xet`, skróty Carbon.
 
 **Ostateczna lista zadań:** jak w tabeli „Podsumowanie zadań” (19 zadań, ok. 8 700 linii, ok. 5 800 delegowalnych).
+
+## Postęp: fala 1
+
+Baza: 5c95b97 (main + #27, #28, #29, plan). Scalone do `macos/dev`: M1a, M2, M3a (M3b nie było w fali 1).
+
+**Zrobione**
+- M0a i M0b: spełnione już przez #28 (`ucho/downloads.py`: `Downloads`, `ByteCounter`, `speech_readiness`, `fallback_speech_model`, `recording_blocked`; brama w `app.py`, `meeting.py`, `dictation.py`; brak `download_ui.py`). Odwołania do M0a/M0b w planie czytaj jako te nazwy.
+- M1a: `ucho/platforms/` (`base.py`, `null.py`, loader `_load`, accessory singletonowe), kod WinAPI dyktowania przeniesiony 1:1 do `platforms/windows/` (`winapi`, `clipboard`, `inserter`, `sounds`), `dictation.py` jako cienkie delegatory. Testy `tests/test_platforms.py` (w tym test AST zakazanych importów).
+- M2: `ucho/paths.py` (czysty stdlib), `config.DATA_DIR`; `PROJECT_DIR` to teraz kod/zasoby, nie dane. Na Windows wartości bez zmian (jest na to test).
+- M3a: spike CI na macos-15 i macos-26, wyniki w `docs/macos-spike.md`. Tymczasowy workflow spike'u usunięty z `macos/dev`; `tools/macos_spike/` zostaje jako materiał dla M10 (np. `macho_strip_signature`).
+- Decyzje: D1 minimalny macOS 15, D2 podpis ad-hoc, D3 nieaktualne.
+
+**Odchylenia od planu**
+- `base.py`: `DelayedOffer` ma `confirmed` i `offer()`; `Clipboard.offer_delayed` zwraca ofertę jeszcze niewystawioną; `TextInserter.wait_keys_released` ma `limit_s=1.5`; `process_of`, `is_ours`, `is_shell` przyjmują też `None`. Implementacje macOS muszą trzymać ten kształt (test kontraktu).
+- M1a sparametryzował też komunikat `NOT_TAKEN` (pl.json). Zdjęto skipify „uses WinAPI” także w `test_downloads.py`; `test_i18n` skanuje `ucho/**` (rglob).
+- M2 nie dodał `lock_dir()` ani `recordings_dir()` z p. 3 (M5 i ewentualna zmiana domyślnego katalogu nagrań muszą je dodać).
+- Konflikt reguł: AGENTS.md zakazuje `Co-Authored-By`, zlecenia fali 1 je dodają. Do ujednolicenia przy scalaniu do main.
+
+**Uwagi dla fali 2**
+- Loader: kto tworzy `ucho/platforms/macos/`, musi dodać `__init__.py`; do tego czasu na macOS działa `null`. `create()` ma być lekkie (accessory trzymają wspólną blokadę podczas importu i `create()`). `windows/instance.create` i `windows/hotkeys.create` mają przyjmować argumenty dzisiejszych `SingleInstance` i `Hotkeys`.
+- M1b usuwa z listy wyjątków testu AST `hotkeys.py`, `instance.py`, `winshell.py`; M1c usuwa `audio.py`. Test importu pod fałszywym `sys.platform` wymaga wcześniejszego importu numpy, soundfile (i customtkinter).
+- M3b: `tests/test_config.py::test_onedrive_folder` potrzebuje `skipif(sys.platform != "win32")`; test `test_live` bywa flaky pod obciążeniem. `test_dictation_delayed_clipboard.py` zostaje tylko dla Windows.
+- M9: teksty „synced by OneDrive” (settings_screen, wizard) uogólnić na folder synchronizowany z chmurą; na macOS ostrzeżenie pokaże się też dla ~/Documents i ~/Desktop; stare ~/OneDrive - Firma nie jest wykrywane. `diagnostics.py` „App folder” w paczce .app lepiej z `DATA_DIR`.
+- Wyniki spike'u (szczegóły w `docs/macos-spike.md`): pasek menu zostaje pystray (ikona po oknie Tk, `run_detached`, ręczne `removeStatusItem_` w `stop()`); runner ma TCC przyznane i Metal; Carbon `RegisterEventHotKey` z flagą exclusive działa bez uprawnień; sounddevice daje ciszę na runnerze; catap `session.start()` blokuje się na CI, więc start/stop tapu w osobnym wątku z limitem ok. 10 s (prawdziwy test dopiero na Macu, p. 7b-10); pierwsze ładowanie modelu whisper.cpp ok. 20 s; przed PyInstallerem zdjąć podpis Intela z 4 bibliotek openvino/libs; `collect_all('openvino')` z wykluczeniami i `collect_dynamic_libs('catap')`.
+- Sandbox agy nie widzi interpretera `.venv-dev` spoza worktree, więc wykonawca nie uruchomi testów; uruchamia je lider.
+- CI (`ci.yml`) działa tylko na push do main i na pull requesty, więc push `macos/dev` nie uruchomił żadnego przebiegu. Wynik CI da dopiero PR.
