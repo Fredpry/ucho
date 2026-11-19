@@ -30,6 +30,19 @@ def _skip_reason(report) -> str:
     return reason.removeprefix("Skipped: ").strip()
 
 
+def _other_skips(config) -> list:
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    skipped = reporter.stats.get("skipped", []) if reporter is not None else []
+    return [r for r in skipped if not _skip_reason(r).startswith(WINDOWS_ONLY)]
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """With `UCHO_ONLY_WINDOWS_SKIPS` set (macOS CI), any other skip fails the run."""
+    if (os.environ.get("UCHO_ONLY_WINDOWS_SKIPS") and exitstatus == pytest.ExitCode.OK
+            and _other_skips(session.config)):
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     """Lists skipped tests by reason, so a skip that hides a failure stands out.
 
@@ -44,6 +57,10 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.section(f"{len(skipped)} skipped, by reason")
         for reason, nodes in sorted(by_reason.items()):
             terminalreporter.write_line(f"{len(nodes):4d}  {reason}")
+    if os.environ.get("UCHO_ONLY_WINDOWS_SKIPS") and _other_skips(config):
+        terminalreporter.write_line(
+            f"UCHO_ONLY_WINDOWS_SKIPS: skips without the {WINDOWS_ONLY!r} reason fail the run",
+            red=True)
 
     target = os.environ.get("UCHO_SKIPPED_REPORT")
     if not target:

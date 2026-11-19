@@ -20,10 +20,12 @@ concurrency:
 
 jobs:
   macos-tests:
-    # The same packages as the Windows `test` job in ci.yml: the tests need no
-    # audio stack, models, OpenVINO or PyObjC. Tests that only make sense on
-    # Windows are marked "Windows only: ..."; the step summary lists every
-    # skipped test with its reason (tests/conftest.py).
+    # The packages of the Windows `test` job in ci.yml plus customtkinter, Pillow
+    # and soxr, so the UI-import and resampling tests run here instead of being
+    # skipped: the tests need no audio stack, models, OpenVINO or PyObjC. Tests
+    # that only make sense on Windows are marked "Windows only: ...", and any
+    # other skip fails the job (UCHO_ONLY_WINDOWS_SKIPS); the step summary
+    # lists every skipped test with its reason (tests/conftest.py).
     strategy:
       fail-fast: false
       matrix:
@@ -36,10 +38,13 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install test dependencies
-        run: python -m pip install pytest==9.2.0 ruff==0.17.5 numpy==2.5.3 soundfile==0.14.0
+        run: >-
+          python -m pip install pytest==9.2.0 ruff==0.17.5 numpy==2.5.3 soundfile==0.14.0
+          customtkinter==6.0.0 pillow==13.0.0 soxr==1.1.0
       - name: Tests
         env:
           PYTHONIOENCODING: utf-8
+          UCHO_ONLY_WINDOWS_SKIPS: "1"
         run: |
           echo "## Tests on ${{ matrix.os }} (macOS $(sw_vers -productVersion))" >> "$GITHUB_STEP_SUMMARY"
           UCHO_SKIPPED_REPORT="$GITHUB_STEP_SUMMARY" python -m pytest -q -rs

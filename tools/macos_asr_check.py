@@ -54,9 +54,8 @@ SAMPLES = [
 ]
 
 
-def _words(text: str) -> set[str]:
-    text = unicodedata.normalize("NFC", text).lower()
-    return set(re.findall(r"\w+", text))
+def _normalized(text: str) -> str:
+    return " ".join(re.findall(r"\w+", unicodedata.normalize("NFC", text).lower()))
 
 
 def speak(sample: dict, folder: Path) -> Path:
@@ -109,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
         result = engine.generate(audio, language=None)
         took = time.monotonic() - start
         text = " ".join(result.texts)
-        found = _words(text)
+        # Substring match: base glues words now and then ("ranow małej").
+        found = _normalized(text)
         hits = [word for word in sample["keywords"] if word in found]
         expected = f"<|{sample['language']}|>"
         lang_ok = result.languages == [expected]
@@ -127,7 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     lines = [f"### whisper.cpp on {os.environ.get('UCHO_RUNNER', sys.platform)}: "
              f"{'OK' if ok else 'FAILED'}", "", "| Check | Result | Details |", "|---|---|---|"]
     for name, passed, details in checks:
-        lines.append(f"| {name} | {'ok' if passed else 'FAILED'} | {details.replace('|', '/')} |")
+        details = details.replace("|", r"\|")
+        lines.append(f"| {name} | {'ok' if passed else 'FAILED'} | {details} |")
     report = "\n".join(lines) + "\n"
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
