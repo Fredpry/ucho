@@ -50,8 +50,10 @@ def parse(combo: str) -> tuple[int, int] | None:
     return modifiers, key
 
 
-def label(combo: str) -> str:
-    """'<ctrl>+<shift>+space' -> 'Ctrl + Shift + Space' for the UI."""
+def label(combo: str, family: str | None = None) -> str:
+    """'<ctrl>+<shift>+space' -> 'Ctrl + Shift + Space' (Windows) or '⌃⇧Space' (macOS) for the UI."""
+    if (family or platforms.family()) == "macos":
+        return _mac_label(combo)
     names = {"ctrl": "Ctrl", "control": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win",
              "space": t("Space"), "esc": "Esc", "enter": "Enter"}
     parts = []
@@ -60,6 +62,58 @@ def label(combo: str) -> str:
         if token:
             parts.append(names.get(token, token.upper()))
     return " + ".join(parts)
+
+
+# macOS writes modifiers as symbols in this fixed order (Control, Option, Shift, Command).
+_MAC_SYMBOLS = ((MOD_CONTROL, "⌃"), (MOD_ALT, "⌥"), (MOD_SHIFT, "⇧"), (MOD_WIN, "⌘"))
+
+
+def _mac_label(combo: str) -> str:
+    keys = {"space": t("Space"), "esc": "Esc", "escape": "Esc", "enter": "Return", "tab": "Tab"}
+    modifiers, rest = 0, []
+    for token in (combo or "").lower().replace(" ", "").split("+"):
+        token = token.strip("<>")
+        if not token:
+            continue
+        if token in _MODIFIERS:
+            modifiers |= _MODIFIERS[token]
+        else:
+            rest.append(keys.get(token, token.upper()))
+    symbols = "".join(symbol for flag, symbol in _MAC_SYMBOLS if modifiers & flag)
+    return symbols + "".join(rest)
+
+
+def macos_conflict(combo: str) -> str | None:
+    """What macOS itself does with this combination, or None when nothing is known.
+
+    Carbon accepts such hotkeys without an error (M3a spike: Cmd+Space and
+    Ctrl+Space register with noErr), but the system or the front app gets the
+    keys first, so the shortcut may never reach Ucho.
+    """
+    parsed = parse(combo)
+    if parsed is None:
+        return None
+    modifiers, key = parsed
+    space, tab, escape = _KEYS["space"], _KEYS["tab"], VK_ESCAPE
+    known = {
+        (MOD_WIN, space): t("Spotlight"),
+        (MOD_WIN | MOD_ALT, space): t("Finder search"),
+        (MOD_CONTROL, space): t("switching the input source"),
+        (MOD_CONTROL | MOD_ALT, space): t("switching the input source"),
+        (MOD_CONTROL | MOD_WIN, space): t("emoji and symbols"),
+        (MOD_WIN, tab): t("switching apps"),
+        (MOD_WIN | MOD_SHIFT, tab): t("switching apps"),
+        (MOD_WIN | MOD_ALT, escape): t("force quitting apps"),
+        (MOD_CONTROL | MOD_WIN, _KEYS["q"]): t("locking the screen"),
+        **{(MOD_WIN | MOD_SHIFT, _KEYS[d]): t("screenshots") for d in "3456"},
+        **{(MOD_CONTROL | MOD_WIN | MOD_SHIFT, _KEYS[d]): t("screenshots") for d in "345"},
+    }
+    if (modifiers, key) in known:
+        return known[(modifiers, key)]
+    if modifiers in (MOD_WIN, MOD_WIN | MOD_SHIFT):
+        # Cmd+letter and Cmd+Shift+letter are the menu shortcuts of every app.
+        return t("app menu shortcuts")
+    return None
 
 
 class Hotkeys:
