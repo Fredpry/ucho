@@ -15,11 +15,14 @@ import logging
 import os
 from pathlib import Path
 
+from . import paths
+
 log = logging.getLogger(__name__)
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+PROJECT_DIR = paths.app_dir()
+DATA_DIR = Path(paths.data_dir())
 # Before v0.2 the folder was called "modele".
-LEGACY_MODELS_DIR = PROJECT_DIR / "modele"
+LEGACY_MODELS_DIR = Path(paths.legacy_models_dir())
 
 
 def _models_dir() -> Path:
@@ -29,7 +32,7 @@ def _models_dir() -> Path:
     (several GB). If it fails (e.g. another Ucho process still has a model
     open) we keep using the old folder rather than download everything again.
     """
-    new = PROJECT_DIR / "models"
+    new = Path(paths.models_dir())
     if new.exists() or not LEGACY_MODELS_DIR.is_dir():
         return new
     try:
@@ -41,10 +44,10 @@ def _models_dir() -> Path:
 
 MODELS_DIR = _models_dir()
 OV_CACHE_DIR = MODELS_DIR / "ovcache"
-SETTINGS_FILE = PROJECT_DIR / "settings.json"
+SETTINGS_FILE = Path(paths.settings_file())
 # v0.1 settings file name; migrated to settings.json on first start (and kept).
 LEGACY_SETTINGS_NAME = "ustawienia.json"
-LOG_FILE = PROJECT_DIR / "ucho.log"
+LOG_FILE = Path(paths.log_file())
 
 # Recordings deliberately do NOT go to Documents: on many company computers
 # Documents is redirected to OneDrive, so recordings and transcripts would go
@@ -588,9 +591,4 @@ def prepare_dirs(settings: Settings | None = None) -> None:
 
 def onedrive_folder(path: Path) -> bool:
     """True when `path` lies in a OneDrive-synced folder (recordings would go to the cloud)."""
-    text = str(path).lower()
-    for variable in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
-        root = os.environ.get(variable)
-        if root and text.startswith(root.lower().rstrip("\\/")):
-            return True
-    return "onedrive" in text
+    return paths.is_cloud_path(path)

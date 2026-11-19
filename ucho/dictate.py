@@ -23,7 +23,7 @@ from . import config
 
 # Since v0.2 dictation logs to ucho.log; earlier versions had their own log.
 LOG_FILE = config.LOG_FILE
-LEGACY_LOG_FILE = config.PROJECT_DIR / "dictate.log"
+LEGACY_LOG_FILE = config.DATA_DIR / "dictate.log"
 
 
 # Log line of a finished dictation, in the current and the v0.1 wording.

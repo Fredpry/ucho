@@ -36,6 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         trace = traceback.format_exc()
         try:
+            config.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(config.LOG_FILE, "a", encoding="utf-8") as file:
                 file.write("\n=== Unhandled exception ===\n" + trace)
         except OSError:
