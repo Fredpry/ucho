@@ -36,16 +36,26 @@ def _empty_devices() -> dict:
 
 
 def _default_input_index(sd: Any) -> int | None:
-    raw = sd.default.device
-    if raw is None:
+    """PortAudio index of the default input, or None.
+
+    `sd.default.device` is a `sounddevice._InputOutputPair`: it supports
+    indexing but not `len()`, so it is read with `[0]` only. Any failure here
+    must not cost us the device list, so it only drops the default.
+    """
+    try:
+        raw = sd.default.device
+        if raw is None:
+            return None
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            idx = raw
+        else:
+            idx = raw[0]
+        if idx is None:
+            return None
+        val = int(idx)
+    except Exception as error:
+        log.debug("Could not read the default input device: %s", error)
         return None
-    if isinstance(raw, int) and not isinstance(raw, bool):
-        idx = raw
-    else:
-        idx = raw[0] if len(raw) > 0 else None
-    if idx is None:
-        return None
-    val = int(idx)
     return val if val >= 0 else None
 
 
@@ -76,10 +86,10 @@ class MacAudio:
         try:
             sd = _sd()
             raw_devices = sd.query_devices()
-            default_idx = _default_input_index(sd)
         except Exception as error:
             log.warning("Could not query audio devices: %s", error)
             return _empty_devices()
+        default_idx = _default_input_index(sd)
 
         mics: list[DeviceInfo] = []
         names: dict[int, str] = {}

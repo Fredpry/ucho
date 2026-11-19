@@ -152,6 +152,38 @@ def test_list_devices_default_fallbacks_and_missing_index(monkeypatch):
     assert MacAudio().list_devices()["default_microphone"].index == 0
 
 
+class _InputOutputPair:
+    """Shape of `sounddevice._InputOutputPair`: indexable, but without `len()`."""
+
+    def __init__(self, pair):
+        self._pair = pair
+
+    def __getitem__(self, index):
+        return self._pair[index]
+
+
+def test_list_devices_reads_real_sounddevice_default_pair(monkeypatch):
+    fake = _make_fake_sd(_sample_devices(), default_device=_InputOutputPair((1, 2)))
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    result = MacAudio().list_devices()
+    assert [m.index for m in result["microphones"]] == [0, 1]
+    assert result["default_microphone"].index == 1
+
+
+def test_list_devices_keeps_devices_when_default_is_unreadable(monkeypatch):
+    class BrokenDefault:
+        @property
+        def device(self):
+            raise RuntimeError("no default")
+
+    fake = _make_fake_sd(_sample_devices())
+    fake.default = BrokenDefault()
+    monkeypatch.setitem(sys.modules, "sounddevice", fake)
+    result = MacAudio().list_devices()
+    assert [m.index for m in result["microphones"]] == [0, 1]
+    assert result["default_microphone"].index == 0
+
+
 def test_list_devices_handles_errors_and_missing_sounddevice(monkeypatch, caplog):
     empty = {
         "microphones": [],
