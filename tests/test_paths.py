@@ -154,7 +154,7 @@ def test_import_config_creates_no_files(tmp_path):
 
 @pytest.mark.skipif(
     sys.platform != "win32" or bool(os.environ.get("UCHO_DATA_DIR")),
-    reason="Windows paths without the UCHO_DATA_DIR override",
+    reason="Windows only: data paths next to the code (without UCHO_DATA_DIR)",
 )
 def test_windows_config_paths_unchanged():
     # Values as computed before ucho/paths.py existed.

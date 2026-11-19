@@ -77,7 +77,7 @@ def test_install_ps1_pause_on_error():
     assert "Wait-Close $Code" in text
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows PowerShell not available")
+@pytest.mark.skipif(shutil.which("powershell") is None, reason="Windows only: needs Windows PowerShell")
 @pytest.mark.parametrize("name", ["install.ps1", "uninstall.ps1"])
 def test_powershell_scripts_parse(name):
     command = (
@@ -165,3 +165,55 @@ def test_main_builds_zip_and_sha256sums_without_exe(monkeypatch):
         assert not (dist / "Ucho-Setup.exe").exists()
         digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
         assert sums_path.read_text(encoding="utf-8") == f"{digest}  Ucho-Windows.zip\n"
+
+
+# requirements.txt as it was before the macOS work: Windows must keep getting
+# exactly this set (lines without a marker plus the win32-only lines).
+WINDOWS_REQUIREMENTS = {
+    "openvino-genai==2026.4.1.0",
+    "openvino==2026.4.1",
+    "openvino-tokenizers==2026.4.1.0",
+    "huggingface_hub==1.30.0",
+    "PyAudioWPatch==0.2.12.8",
+    "soxr==1.1.0",
+    "soundfile==0.14.0",
+    "numpy==2.5.4",
+    "customtkinter==6.0.0",
+    "pillow==13.0.0",
+    "pystray==0.19.5",
+}
+WINDOWS_MARKER = 'sys_platform == "win32"'
+MAC_MARKER = 'sys_platform == "darwin"'
+
+
+def _requirements() -> list[tuple[str, str | None]]:
+    """(requirement, marker or None) for each line of requirements.txt."""
+    lines = []
+    for raw in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        requirement, _, marker = line.partition(";")
+        marker = " ".join(marker.replace("'", '"').split()) or None
+        lines.append((requirement.strip(), marker))
+    return lines
+
+
+def test_requirements_on_windows_are_unchanged():
+    lines = _requirements()
+    windows = [req for req, marker in lines if marker in (None, WINDOWS_MARKER)]
+    assert sorted(windows) == sorted(WINDOWS_REQUIREMENTS)
+    assert ("PyAudioWPatch==0.2.12.8", WINDOWS_MARKER) in lines
+
+
+def test_requirements_for_macos_are_pinned_and_marked():
+    lines = _requirements()
+    assert {marker for _, marker in lines} <= {None, WINDOWS_MARKER, MAC_MARKER}
+    for requirement, _ in lines:
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][0-9A-Za-z.]*", requirement), requirement
+    mac = {req.split("==")[0].lower() for req, marker in lines if marker == MAC_MARKER}
+    assert {"sounddevice", "catap", "pywhispercpp", "pyobjc-core", "pyobjc-framework-cocoa",
+            "pyobjc-framework-quartz", "pyobjc-framework-applicationservices",
+            "pyobjc-framework-avfoundation", "pyobjc-framework-coreaudio"} <= mac
+    # PortAudio with WASAPI loopback has no macOS wheel.
+    assert "pyaudiowpatch" not in mac

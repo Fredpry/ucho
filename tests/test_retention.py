@@ -39,7 +39,7 @@ def _session(root: Path, name: str, date: datetime | None = None, transcript: bo
 
 def _junction(link: Path, target: Path) -> None:
     if sys.platform != "win32":
-        pytest.skip("junctions are Windows only")
+        pytest.skip("Windows only: directory junctions")
     import _winapi
 
     _winapi.CreateJunction(str(target), str(link))
@@ -59,8 +59,10 @@ def test_guard_accepts_a_direct_session_folder(tmp_path):
     root = tmp_path / "recordings"
     folder = _session(root, "2026-11-01_10-00_Standup")
     assert retention.session_folder(root, folder) == folder.resolve()
-    # Another spelling of the same child is fine: it is still that session.
-    assert retention.session_folder(root, root / "x" / ".." / folder.name) == folder.resolve()
+    # Another spelling of the same child is fine: it is still that session. On
+    # macOS (POSIX) "x/.." needs a real folder "x", so the spelling goes through one.
+    via = "x" if sys.platform == "win32" else folder.name
+    assert retention.session_folder(root, root / via / ".." / folder.name) == folder.resolve()
 
 
 @pytest.mark.parametrize("make", [
@@ -168,7 +170,7 @@ def test_delete_with_an_open_file_deletes_nothing(tmp_path):
     folder = _session(root, "2026-11-02_10-00_Budget")
     before = sorted(p.name for p in folder.iterdir())
     if sys.platform != "win32":
-        pytest.skip("only Windows refuses to rename a folder with an open file")
+        pytest.skip("Windows only: renaming a folder with an open file fails")
     with open(folder / "meeting.flac", "rb"):  # e.g. a media player
         with pytest.raises(retention.DeleteError) as caught:
             retention.delete_session(root, folder)

@@ -54,6 +54,10 @@ def install_fake_pywhispercpp(
             return auto_result
 
         def transcribe(self, audio, **kwargs):
+            # The real binding (pywhispercpp 1.5.1) sets each parameter on a C++
+            # struct and rejects None for a string field with TypeError.
+            if "initial_prompt" in kwargs and not isinstance(kwargs["initial_prompt"], str):
+                raise TypeError("initial_prompt must be str")
             calls.append({"kind": "transcribe", "size": int(audio.size), "kwargs": kwargs})
             return list(segments)
 
@@ -310,15 +314,15 @@ def test_initial_prompt_always_passed_so_a_stale_one_is_cleared(monkeypatch, tmp
 
     engine = whispercpp.Engine(whispercpp.MODEL_LARGE)
     # pywhispercpp keeps transcribe() parameters for later calls, so a call
-    # without a prompt must pass None explicitly.
+    # without a prompt must pass an empty one explicitly.
     engine.generate(speech(1.0), language="pl", prompt="Ala ma kota")
     engine.generate(speech(1.0), language="pl", prompt=None)
     engine.generate(speech(1.0), language="pl", prompt="")
 
     transcribe_calls = [c["kwargs"] for c in calls if c["kind"] == "transcribe"]
     assert transcribe_calls[0]["initial_prompt"] == "Ala ma kota"
-    assert transcribe_calls[1]["initial_prompt"] is None
-    assert transcribe_calls[2]["initial_prompt"] is None
+    assert transcribe_calls[1]["initial_prompt"] == ""
+    assert transcribe_calls[2]["initial_prompt"] == ""
 
 
 def test_short_model_and_downloads_name_and_fallback(monkeypatch):

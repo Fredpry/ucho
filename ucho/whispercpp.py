@@ -160,8 +160,9 @@ class Engine:
             code = self._detect_language(audio)
 
         # pywhispercpp keeps every parameter passed to transcribe() for later
-        # calls, so the prompt is always passed (None clears the previous one).
-        segments = self._model.transcribe(audio, language=code, initial_prompt=prompt or None)
+        # calls, so the prompt is always passed; "" clears the previous one
+        # (the binding accepts only str: None raised TypeError on the macos-asr job).
+        segments = self._model.transcribe(audio, language=code, initial_prompt=prompt or "")
 
         chunks: list[parakeet.Chunk] = []
         for segment in segments:
