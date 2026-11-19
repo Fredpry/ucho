@@ -485,5 +485,12 @@
   "Turbo Q5 (whisper.cpp) — faster on Mac, worse with mixed languages": "Turbo Q5 (whisper.cpp), szybszy na Macu, słabszy przy mieszanych językach",
   "Tiny Q5 (whisper.cpp) — smallest test model": "Tiny Q5 (whisper.cpp), najmniejszy model testowy",
   "Base Q5 (whisper.cpp) — small test model": "Base Q5 (whisper.cpp), mały model testowy",
-  "Speech recognition with whisper.cpp needs the pywhispercpp package.": "Rozpoznawanie mowy przez whisper.cpp wymaga pakietu pywhispercpp."
+  "Speech recognition with whisper.cpp needs the pywhispercpp package.": "Rozpoznawanie mowy przez whisper.cpp wymaga pakietu pywhispercpp.",
+  "Apple Silicon: transcription with whisper.cpp on the GPU (Metal).": "Apple Silicon: transkrypcja przez whisper.cpp na GPU (Metal).",
+  "{ram} GB RAM: the full large-v3 model for meetings, the faster turbo model for dictation.": "{ram} GB RAM: pełny model large-v3 do spotkań, szybszy turbo do dyktowania.",
+  "{ram} GB RAM: the faster turbo model for meetings and dictation.": "{ram} GB RAM: szybszy model turbo do spotkań i dyktowania.",
+  "{ram} GB RAM: only the smallest language model fits next to speech recognition.": "{ram} GB RAM: obok rozpoznawania mowy mieści się tylko najmniejszy model językowy.",
+  "{ram} GB RAM: the 4B language model on the CPU writes good Polish.": "{ram} GB RAM: model językowy 4B na CPU dobrze pisze po polsku.",
+  "{ram} GB RAM: the largest language model fits.": "{ram} GB RAM: mieści się największy model językowy.",
+  "Open at login": "Otwieraj przy logowaniu"
 }

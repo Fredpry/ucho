@@ -187,8 +187,8 @@ class Fonts:
             return
         for attr, stack in (("sans", SANS), ("display", DISPLAY), ("mono", MONO),
                             ("numeric", NUMERIC)):
-            setattr(cls, attr, next((f for f in stack if f in available), stack[-1]))
-        cls.semibold = {key: next((f for f in stack if f in available), None)
+            setattr(cls, attr, next((f for f in stack if f in available or f.startswith(".")), stack[-1]))
+        cls.semibold = {key: next((f for f in stack if f in available or f.startswith(".")), None)
                         for key, stack in SEMIBOLD.items()}
 
     @classmethod
