@@ -50,7 +50,9 @@ _OUTROS = [
     r"^dzi[eę]kuj[eę] za (uwag[eę]|obejrzenie|ogl[aą]danie)",
     r"^subtitles? (by|created by|provided by)",
     r"^transcri(pt|ption) by",
-    r"^thanks? for watching",
+    # "Thank you for watching" is the most common one; "thanks? for" alone
+    # missed it (#27).
+    r"^(thanks|thank you)( (so|very) much)? for watching",
     r"^please subscribe",
     r"^napisy:",
 ]
@@ -63,6 +65,16 @@ _HALLUCINATIONS = _OUTROS + [
 ]
 _HALLUCINATION_RES = [re.compile(p, re.IGNORECASE) for p in _HALLUCINATIONS]
 _OUTRO_RES = [re.compile(p, re.IGNORECASE) for p in _OUTROS]
+# Whisper also glues a video ending to the last sentence without a full stop
+# ("Spotkanie jutro o dziesiątej thank you for watching"), so `strip_outro`
+# cannot find it at a sentence break. Only endings that make no sense in a
+# meeting or a dictation are cut this way; "dziękuję za uwagę" is not, because
+# it can end a real sentence.
+_GLUED_OUTRO = re.compile(
+    r"[\s,;:]+(?:(?:thanks|thank you)(?: (?:so|very) much)? for watching"
+    r"|dzi[eę]kuj[eę] za (?:obejrzenie|ogl[aą]danie))[.!…]*$",
+    re.IGNORECASE,
+)
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?…])\s+")
 
 # Minimum segment duration; shorter ones are usually artifacts.
@@ -160,9 +172,14 @@ def strip_outro(text: str) -> str:
     one text for the whole recording, so "Spotkanie jutro o dziesiątej.
     Dziękuję za uwagę." went through with the invented ending. Only `_OUTROS`
     are cut here: a final "Dziękuję." or "Tak." can be what the user said.
+    A video ending glued on without a full stop is cut too (`_GLUED_OUTRO`).
     """
     text = text.rstrip()
     while True:
+        glued = _GLUED_OUTRO.search(text)
+        if glued:
+            text = text[: glued.start()].rstrip()
+            continue
         breaks = [m.end() for m in _SENTENCE_BREAK.finditer(text)]
         if not breaks or not any(p.search(text[breaks[-1]:]) for p in _OUTRO_RES):
             return text
