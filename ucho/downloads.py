@@ -228,6 +228,8 @@ class Download:
     counter: ByteCounter = field(default_factory=ByteCounter)
     running: bool = True
     error: str | None = None
+    # The original exception of a failed download, for the error dialog (#29).
+    exception: BaseException | None = None
     callbacks: list[Callable[[str | None], None]] = field(default_factory=list)
 
     @property
@@ -278,11 +280,13 @@ class Downloads:
 
         def run() -> None:
             error: str | None = None
+            failure: BaseException | None = None
             try:
                 work(bar_class)
             except Exception as exc:
                 log.exception("Model download failed: %s", key)
-                error = describe_error(exc)
+                error, failure = describe_error(exc), exc
+            item.exception = failure
             self._post(lambda: self._finish(item, error))
 
         self._spawn(run, f"download {key}")

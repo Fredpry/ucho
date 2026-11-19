@@ -245,6 +245,27 @@ def test_one_download_per_key_and_callbacks_join_the_running_one():
     assert first == [None] and second == [None]
 
 
+def test_failed_download_keeps_the_exception_for_the_error_dialog():
+    # #29: the error dialog classifies the original exception, not the short text.
+    from ucho import diagnostics
+    ui = Ui()
+    manager = Downloads(ui.post, spawn=_sync)
+    failure = ConnectError("network is unreachable")
+
+    def failing(_bar_class):
+        raise failure
+
+    manager.start("repo/model", "model", downloads.SPEECH, failing)
+    ui.pump()
+    item = manager.get("repo/model")
+    assert item.exception is failure
+    assert diagnostics.classify(item.exception, diagnostics.MODEL_DOWNLOAD).kind == "network"
+
+    manager.start("repo/model", "model", downloads.SPEECH, lambda _bar: None)
+    ui.pump()
+    assert manager.get("repo/model") is None
+
+
 def test_a_failing_callback_does_not_stop_the_others(caplog):
     ui = Ui()
     manager = Downloads(ui.post, spawn=_sync)

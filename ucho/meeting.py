@@ -777,8 +777,7 @@ class MeetingController(Emitter):
         if self._queue:
             # Not saved: these sessions keep their audio and can be
             # transcribed later with "Transcribe again".
-            log.info("Quit with %d queued transcription(s) not started: %s", len(self._queue),
-                     ", ".join(folder.name for folder, _f, _m in self._queue))
+            log.info("Quit with %d queued transcription(s) not started", len(self._queue))
             self._queue.clear()
         self._caches.clear()
         if self._job is not None:

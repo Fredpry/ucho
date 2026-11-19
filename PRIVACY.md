@@ -2,7 +2,7 @@
 
 ## English
 
-**Ucho has no server, no account and no telemetry of its own.** It never uploads audio, transcripts, settings or logs.
+**Ucho has no server, no account and no telemetry of its own.** It never uploads audio, transcripts, settings or logs. A diagnostics package (below) is only saved on your disk; sending it is up to you.
 
 ### What uses the network, and when
 
@@ -44,6 +44,14 @@ Optional speaker detection (Settings → Transcription → *Speakers*, off by de
 
 Paste mode puts the dictated text on the clipboard for a moment and presses Ctrl+V. The text is marked so that Windows keeps it out of clipboard history (Win+V) and cloud clipboard sync, and the text you had copied before is put back right after the paste (only text: an image or copied files on the clipboard are not restored). Text Ucho copies on request (*Copy all*, *Copy*) is marked the same way. If the window you dictated into is closed or does not come back to the front, nothing is pasted: the text stays on the clipboard for you to paste with Ctrl+V.
 
+### Diagnostics package
+
+When something goes wrong, the error dialog (or Settings → About → *Save diagnostics package*) can save a ZIP file named `ucho-diagnostics-YYYYMMDD-HHMMSS.zip` to your Downloads folder (or the Desktop, or the program folder). **Ucho does not send it.** It shows the file in Explorer and opens an e-mail draft to the author in your own mail program; you decide whether to attach the file and send it. Before saving, the dialog shows the list of files and the end of the log exactly as it will be saved.
+
+The package contains `ucho.log` and `ucho.log.1` (redacted, see below), `system.txt` (Ucho, Python and Windows versions, processor, memory, graphics, free disk space), `settings.json`, `models.txt` (downloaded models and their sizes), `README.txt` and, when it comes from an error dialog, `error.txt` with that error's technical details. It never contains recordings, transcripts, summaries or `meta.json`.
+
+Removed before saving: dictated text (replaced by `<redacted N chars>`; a checkbox, off by default, keeps it), summary topics, meeting titles and folder names, person names the summary filter rejected, your user name (`<user>`), your user folder (`~`), the computer name (`<computer>`) and the words in your dictation dictionary. Microphone and speaker names stay, because they help with audio problems. You can open the ZIP and delete anything before sending.
+
 ### Check it yourself
 
 While Ucho is recording or transcribing, list external connections of its Python processes (no admin rights needed):
@@ -77,7 +85,7 @@ No bot in the call does not make recording legal. In the EU, recording people wi
 
 ## Polski
 
-**Ucho nie ma serwera, konta ani własnej telemetrii.** Nigdy nie wysyła nagrań, transkryptów, ustawień ani logów.
+**Ucho nie ma serwera, konta ani własnej telemetrii.** Nigdy nie wysyła nagrań, transkryptów, ustawień ani logów. Pakiet diagnostyczny (niżej) jest tylko zapisywany na dysku; to Ty decydujesz, czy go wysłać.
 
 ### Co i kiedy łączy się z siecią
 
@@ -118,6 +126,14 @@ Opcjonalne rozpoznawanie mówców (Ustawienia → Transkrypcja → *Mówcy*, dom
 ### Dyktowanie a schowek
 
 W trybie wklejania podyktowany tekst na chwilę trafia do schowka, a Ucho naciska Ctrl+V. Tekst jest oznaczony tak, żeby Windows nie zapisał go w historii schowka (Win+V) ani nie zsynchronizował przez chmurę, a tekst skopiowany wcześniej wraca do schowka zaraz po wklejeniu (tylko tekst: obrazu ani skopiowanych plików Ucho nie przywraca). Tak samo oznaczony jest tekst kopiowany na żądanie (*Kopiuj całość*, *Kopiuj*). Jeśli okno, w którym dyktujesz, zostało zamknięte albo nie wraca na wierzch, Ucho niczego nie wkleja: tekst zostaje w schowku i możesz go wkleić Ctrl+V.
+
+### Pakiet diagnostyczny
+
+Gdy coś pójdzie nie tak, okno błędu (albo Ustawienia → O programie → *Zapisz pakiet diagnostyczny*) może zapisać plik ZIP `ucho-diagnostics-RRRRMMDD-GGMMSS.zip` w folderze Pobrane (albo na Pulpicie, albo w folderze programu). **Ucho go nie wysyła.** Pokazuje plik w Eksploratorze i otwiera w Twoim programie pocztowym szkic e-maila do autora; to Ty decydujesz, czy dołączyć plik i wysłać wiadomość. Przed zapisaniem okno pokazuje listę plików i koniec logu dokładnie w takiej postaci, w jakiej zostanie zapisany.
+
+W pakiecie są: `ucho.log` i `ucho.log.1` (oczyszczone, patrz niżej), `system.txt` (wersje Ucha, Pythona i Windows, procesor, pamięć, grafika, wolne miejsce na dysku), `settings.json`, `models.txt` (pobrane modele i ich rozmiary), `README.txt`, a jeśli pakiet powstaje z okna błędu, także `error.txt` ze szczegółami technicznymi tego błędu. Nigdy nie ma w nim nagrań, transkryptów, podsumowań ani `meta.json`.
+
+Przed zapisaniem Ucho usuwa: podyktowany tekst (zastępuje go `<redacted N chars>`; pole wyboru, domyślnie odznaczone, pozwala go zostawić), tematy podsumowań, tytuły spotkań i nazwy folderów, imiona odrzucone przez filtr podsumowań, nazwę użytkownika Windows (`<user>`), folder użytkownika (`~`), nazwę komputera (`<computer>`) i słowa ze słownika dyktowania. Nazwy mikrofonu i głośników zostają, bo pomagają przy problemach z dźwiękiem. Przed wysłaniem możesz otworzyć plik ZIP i usunąć z niego, co chcesz.
 
 ### Sprawdź sam
 
