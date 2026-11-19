@@ -126,8 +126,9 @@ def model_downloaded(repo_id: str) -> bool:
         # single-file `repo:filename` model). Any other exception (e.g. a broken
         # .pyc in the standard library when importing huggingface_hub) also ends
         # as "model not downloaded", so without this entry the cause is lost.
-        if (not isinstance(error, FileNotFoundError)
-                and type(error).__name__ != "LocalEntryNotFoundError"):
+        single_file_missing = (isinstance(error, FileNotFoundError)
+                               and config.split_model_id(repo_id)[1] is not None)
+        if not single_file_missing and type(error).__name__ != "LocalEntryNotFoundError":
             log.warning("Checking model %r failed: %r", repo_id, error)
         return False
 

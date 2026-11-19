@@ -32,7 +32,7 @@ def install_fake_pywhispercpp(
     *,
     auto_result=(("ko", 0.5), {"ko": 0.5, "pl": 0.4, "en": 0.1}),
     segments=None,
-    log_text: str = "ggml_metal_init: allocating\n",
+    log_text: str = "ggml_metal_init: allocating\nwhisper_backend_init_gpu: using MTL0 backend\n",
 ):
     """Installs fake `pywhispercpp`, `pywhispercpp.model`, and `pywhispercpp.utils`."""
     calls: list[dict] = []
@@ -45,7 +45,8 @@ def install_fake_pywhispercpp(
             calls.append({"kind": "init", "model_path": model_path, "kwargs": kwargs})
             log_file = kwargs.get("redirect_whispercpp_logs_to")
             if log_file and log_text:
-                with open(log_file, "a", encoding="utf-8") as handle:
+                # Like pywhispercpp 1.5.1 utils.redirect_stderr: mode "w".
+                with open(log_file, "w", encoding="utf-8") as handle:
                     handle.write(log_text)
 
         def auto_detect_language(self, audio):
@@ -281,31 +282,43 @@ def test_split_model_id_cases():
 def test_device_fallback_from_whispercpp_log(monkeypatch, tmp_path):
     setup_model_file(monkeypatch, tmp_path)
 
-    install_fake_pywhispercpp(monkeypatch, log_text="whisper_init_state: using CPU backend\n")
+    # A long CPU log first, then a shorter Metal log: the second load must
+    # see its own lines although the library truncates the file.
+    cpu_log = ("whisper_backend_init_gpu: no GPU found\n"
+               "ggml_metal_init: error: failed to create command queue\n"
+               "whisper_backend_init: using BLAS backend\n") * 5
+    install_fake_pywhispercpp(monkeypatch, log_text=cpu_log)
     cpu_engine = whispercpp.Engine(whispercpp.MODEL_LARGE)
     cpu_engine.load()
     assert cpu_engine.requested_device == "METAL"
     assert cpu_engine.device == "CPU"
 
-    install_fake_pywhispercpp(monkeypatch, log_text="ggml_metal_init: found device\n")
+    install_fake_pywhispercpp(monkeypatch, log_text="whisper_backend_init_gpu: using MTL0 backend\n")
     metal_engine = whispercpp.Engine(whispercpp.MODEL_LARGE)
     metal_engine.load()
     assert metal_engine.device == "METAL"
 
+    install_fake_pywhispercpp(monkeypatch, log_text="whisper_backend_init_gpu: using Metal backend\n")
+    old_format = whispercpp.Engine(whispercpp.MODEL_LARGE)
+    old_format.load()
+    assert old_format.device == "METAL"
 
-def test_initial_prompt_passed_only_when_nonempty(monkeypatch, tmp_path):
+
+def test_initial_prompt_always_passed_so_a_stale_one_is_cleared(monkeypatch, tmp_path):
     setup_model_file(monkeypatch, tmp_path)
     calls, _ = install_fake_pywhispercpp(monkeypatch)
 
     engine = whispercpp.Engine(whispercpp.MODEL_LARGE)
+    # pywhispercpp keeps transcribe() parameters for later calls, so a call
+    # without a prompt must pass None explicitly.
+    engine.generate(speech(1.0), language="pl", prompt="Ala ma kota")
     engine.generate(speech(1.0), language="pl", prompt=None)
     engine.generate(speech(1.0), language="pl", prompt="")
-    engine.generate(speech(1.0), language="pl", prompt="Jan Kowalski")
 
     transcribe_calls = [c["kwargs"] for c in calls if c["kind"] == "transcribe"]
-    assert "initial_prompt" not in transcribe_calls[0]
-    assert "initial_prompt" not in transcribe_calls[1]
-    assert transcribe_calls[2]["initial_prompt"] == "Jan Kowalski"
+    assert transcribe_calls[0]["initial_prompt"] == "Ala ma kota"
+    assert transcribe_calls[1]["initial_prompt"] is None
+    assert transcribe_calls[2]["initial_prompt"] is None
 
 
 def test_short_model_and_downloads_name_and_fallback(monkeypatch):
@@ -376,3 +389,16 @@ def test_missing_pywhispercpp_raises_clear_error(monkeypatch, tmp_path):
     engine = whispercpp.Engine(whispercpp.MODEL_LARGE)
     with pytest.raises(RuntimeError, match="pywhispercpp"):
         engine.load()
+
+
+def test_model_downloaded_still_logs_unexpected_errors_for_openvino_keys(monkeypatch, caplog):
+    def broken_snapshot_download(*args, **kwargs):
+        raise FileNotFoundError("broken cache entry")
+
+    fake_hf = ModuleType("huggingface_hub")
+    fake_hf.snapshot_download = broken_snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+    with caplog.at_level("WARNING"):
+        assert transcribe.model_downloaded(config.DEFAULT_MODEL) is False
+    assert "Checking model" in caplog.text

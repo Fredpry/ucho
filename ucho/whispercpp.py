@@ -14,6 +14,7 @@ import gc
 import importlib.util
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,11 @@ MODEL_TURBO = f"{REPO}:ggml-large-v3-turbo-q5_0.bin"
 MODEL_TINY = f"{REPO}:ggml-tiny-q5_1.bin"
 MODEL_BASE = f"{REPO}:ggml-base-q5_1.bin"
 SAMPLE_RATE = 16_000
+# whisper.cpp 1.8.5 logs "whisper_backend_init_gpu: using MTL0 backend" when it
+# runs on Metal (seen on the macos-15/26 runners, docs/macos-spike.md); older
+# builds said "using Metal backend". Other lines mention Metal even when the
+# GPU init fails, so only this one counts.
+_METAL_BACKEND = re.compile(r"using\s+(mtl\d*|metal)\s+backend", re.IGNORECASE)
 
 
 def available() -> bool:
@@ -93,12 +99,15 @@ class Engine:
                 t("Speech recognition with whisper.cpp needs the pywhispercpp package.")
             ) from error
 
+        # pywhispercpp 1.5.1 opens a log path with mode "w" (truncates) for the
+        # model init only, so the file holds just this load. Truncate it here
+        # too, so the check below never reads an older load's lines.
         log_path = config.LOG_FILE.with_name("whispercpp.log")
         log_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            offset = log_path.stat().st_size
+            log_path.write_text("", encoding="utf-8")
         except OSError:
-            offset = 0
+            pass
 
         start = time.monotonic()
         self._model = Model(
@@ -109,15 +118,11 @@ class Engine:
             redirect_whispercpp_logs_to=str(log_path),
         )
 
-        appended = ""
         try:
-            with log_path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(offset)
-                appended = handle.read()
+            init_log = log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            pass
-        lower = appended.lower()
-        if "metal" in lower or "mtl" in lower:
+            init_log = ""
+        if _METAL_BACKEND.search(init_log):
             self.device = "METAL"
         else:
             self.device = "CPU"
@@ -154,10 +159,9 @@ class Engine:
         if code is None:
             code = self._detect_language(audio)
 
-        kwargs: dict = {"language": code}
-        if prompt:
-            kwargs["initial_prompt"] = prompt
-        segments = self._model.transcribe(audio, **kwargs)
+        # pywhispercpp keeps every parameter passed to transcribe() for later
+        # calls, so the prompt is always passed (None clears the previous one).
+        segments = self._model.transcribe(audio, language=code, initial_prompt=prompt or None)
 
         chunks: list[parakeet.Chunk] = []
         for segment in segments:
