@@ -500,6 +500,17 @@ def test_real_promise_is_read_by_another_process(real_clipboard):
 
 
 @MACOS_ONLY
+def test_real_promise_is_not_read_without_a_paste(real_clipboard):
+    """`rendered` must mean "pasted": no system service may read the promise on its own."""
+    offer = real_clipboard.offer_delayed("nobody reads this", None)
+    offer.offer()
+    try:
+        assert offer.pump(2.0, until=lambda: offer.rendered) is False
+    finally:
+        offer.close()
+
+
+@MACOS_ONLY
 def test_real_restore_refused_after_another_copy(real_clipboard):
     real_clipboard.set_text("before")
     offer = real_clipboard.offer_delayed("dictated", None)
@@ -544,7 +555,20 @@ root.geometry("420x120+200+200")
 entry = tkinter.Entry(root, width=40)
 entry.pack(padx=10, pady=10)
 enters = []
+events = []
 entry.bind("<Return>", lambda _e: enters.append(entry.get()))
+
+def on_key(e):
+    events.append(f"key {e.keysym!r} state={e.state:#x} char={e.char!r}")
+
+def on_paste(_e):
+    try:
+        events.append("paste " + repr(root.clipboard_get()))
+    except Exception as exc:
+        events.append("paste error " + repr(exc))
+
+entry.bind("<Key>", on_key, add="+")
+entry.bind("<<Paste>>", on_paste, add="+")
 commands = []
 
 def read_stdin():
@@ -571,8 +595,10 @@ def poll():
         elif command == "clear":
             entry.delete(0, "end")
             enters.clear()
+            events.clear()
         elif command == "dump":
-            print(json.dumps({"text": entry.get(), "enters": enters}), flush=True)
+            print(json.dumps({"text": entry.get(), "enters": enters, "events": events,
+                              "focus": str(root.focus_get())}), flush=True)
         elif command == "quit":
             root.destroy()
             return
@@ -676,7 +702,7 @@ def test_real_paste_with_enter_restores_the_clipboard(target_app, real_clipboard
     result = dictation.insert_text("hello from Ucho", "paste", True, target_app.pid, delivered.append)
     assert result == delivered[0] == dictation.PASTE
     state = target_app.dump()
-    assert state["text"] == "hello from Ucho"
+    assert state["text"] == "hello from Ucho", state
     assert state["enters"] == ["hello from Ucho"]
     assert real_clipboard.get_text() == "the previous clipboard"
 
@@ -692,7 +718,8 @@ def test_real_offer_confirmed_by_the_target(target_app, real_clipboard):
         assert offer.confirmed
     finally:
         offer.close()
-    assert target_app.dump()["text"] == "confirmed text"
+    state = target_app.dump()
+    assert state["text"] == "confirmed text", state
 
 
 @MACOS_ONLY
