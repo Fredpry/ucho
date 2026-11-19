@@ -885,10 +885,17 @@ class SettingsScreen(Screen):
         def buttons(master):
             ui.secondary(master, t("Open the log folder"), lambda: open_path(config.LOG_FILE.parent),
                          "folder", width=10).pack(side="left", padx=(0, 8))
+            ui.secondary(master, t("Save diagnostics package"), self._diagnostics,
+                         width=10).pack(side="left", padx=(0, 8))
             ui.secondary(master, t("Run the first-start setup again"), self.app.show_wizard,
                          width=10).pack(side="left")
         s.full(buttons, pady=(6, 8))
         s.end()
+
+    def _diagnostics(self) -> None:
+        from .error_dialog import open_diagnostics
+
+        open_diagnostics(self.app)
 
 
 def autostart_command() -> str:

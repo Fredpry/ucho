@@ -45,6 +45,7 @@ Instructions for AI coding agents (Claude Code, Codex, Cursor and similar) worki
 | `ucho/summary.py` | Optional LLM summary: JSON schema output, map-reduce for long meetings, name and date filters, folder naming |
 | `ucho/titles.py` | Automatic meeting titles: small LLM pass on an excerpt, filters, `wants_title`; run by meeting.py after the transcription queue is empty |
 | `ucho/dictate.py` | Compatibility: `main()` opens dictation in the app, reading the old `dictate.json`, last dictated text from the log |
+| `ucho/diagnostics.py`, `ucho/error_dialog.py` | Error recognition (`classify`, by type name/errno/winerror, no heavy imports), log redaction, the diagnostics ZIP, mailto draft and dialog throttle (no Tk); the error dialog, the package dialog and the global exception hooks (`install`, `show_error`). A new log line that writes user text needs a marker in `diagnostics._USER_TEXT` |
 | `ucho/tray.py`, `ucho/winshell.py`, `ucho/icon.py` | Tray icon; taskbar AppUserModelID, Jump List, progress and autostart via COM/registry; the ear icon drawn from the design mark |
 | `ucho_mcp/server.py` | Read-only stdio MCP server, standard library only |
 | `tests/` | pytest, no models or audio needed |

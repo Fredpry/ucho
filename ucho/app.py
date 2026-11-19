@@ -36,6 +36,7 @@ from . import config, hardware, i18n, retention, theme, ui, winshell
 from .archive import Archive
 from .dictation import DictationController
 from .engine import Engine
+from . import error_dialog
 from .hotkeys import Hotkeys
 from .hotkeys import label as hotkey_label
 from .i18n import t
@@ -136,6 +137,8 @@ class App(ctk.CTk):
         self.build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.report_callback_exception = self._on_callback_error
+        # Unhandled errors (Tk callbacks, threads) end in the error dialog (#29).
+        error_dialog.install(self)
 
         self.hotkey_errors = self.hotkeys.start({"record": self.settings["hotkey"],
                                                  "dictate": self.settings["dictation_hotkey"]})
@@ -730,8 +733,9 @@ class App(ctk.CTk):
                 break
             try:
                 fn()
-            except Exception:
+            except Exception as error:
                 log.exception("UI callback failed")
+                error_dialog.report(self, error)
         try:
             self._update()
         except Exception:

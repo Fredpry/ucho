@@ -64,6 +64,10 @@ VERSION = "0.5.0"
 # window inherits the pythonw.exe icon instead of ours.
 APP_ID = "Ucho.Transcription"
 
+# Where a diagnostics package goes (ucho/diagnostics.py). The user sends it
+# from their own mail program; Ucho itself sends nothing.
+SUPPORT_EMAIL = "fryderyk@pryjma.pl"
+
 # Ready-made, pre-converted OpenVINO models: no PyTorch and no conversion.
 # Turbo is a distilled model (4 decoder layers instead of 32): fast, but weak
 # at detecting the language of short utterances. With "auto" on a PL/EN

@@ -56,6 +56,7 @@ Windows 10 lub 11, zalecane 16 GB RAM, ok. 3 GB na dysku (8 GB z podsumowaniami)
 - Opcje działają też z plikiem do dwukliku: `install.cmd -WithSummary`.
 - Przebieg każdej instalacji trafia do `install.log` w folderze programu. Ucho nie ma jeszcze podpisu cyfrowego, więc Windows może ostrzec przed uruchomieniem `Ucho-Setup.exe` albo `install.cmd`.
 - Cicha instalacja dla działu IT: `Ucho-Setup.exe /VERYSILENT` (bez pytań; instalator czeka na `install.ps1`, przebieg trafia do `install.log`).
+- **Coś poszło nie tak?** Okno błędu albo Ustawienia → O programie → *Zapisz pakiet diagnostyczny* zapisuje plik ZIP w Pobranych (log bez podyktowanego tekstu i tytułów spotkań, wersje, sprzęt, ustawienia bez prywatnych ścieżek) i otwiera szkic e-maila; plik dołączasz i wysyłasz sam. Szczegóły w [PRIVACY.md](PRIVACY.md#pakiet-diagnostyczny).
 
 </details>
 
