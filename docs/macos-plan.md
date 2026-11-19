@@ -596,6 +596,8 @@ Refaktory przenoszą kod WinAPI, którego testy automatyczne nie sprawdzają do 
 | 5 | Skróty globalne, druga instancja (show), autostart włącz i wyłącz, Jump List, postęp na pasku zadań | Jak w wersji z `main` |
 | 6 | Zmiana modelu na większy i nagranie w trakcie jego pobierania | Nagrywanie działa starszym modelem, baner informuje |
 | 7 | (M1c, backendy audio, sprzętu i czcionek) Ustawienia → lista mikrofonów i wyjść; nagranie 1 min z mikrofonem i dźwiękiem systemowym (film), w trakcie odłącz i podłącz słuchawki USB lub Bluetooth; potem zmień domyślny mikrofon w Windows i podyktuj zdanie; kreator: rekomendacja modelu | Listy urządzeń jak w wersji z `main`; obie ścieżki (`microphone.flac`, `meeting.flac`) niepuste; po odłączeniu nagranie wznawia się na nowym urządzeniu (w logu „Track ... resumed on”); dyktowanie używa nowego domyślnego mikrofonu; ikony, czcionki, język interfejsu i rekomendacja modelu (RAM, procesor, karta) jak dawniej |
+| 8 | (M8, modele) Ustawienia → lista modeli mowy; pobranie i wybór modelu; test fallbacku | Dokładnie 4 modele OpenVINO (+ Parakeet, gdy zainstalowany), bez wpisów whisper.cpp; pobieranie i wybór działają jak dotąd; fallback nie podsuwa modeli whisper.cpp |
+| 9 | (M1b, szczegóły kroku 5) Skróty Ctrl+Alt+R i Ctrl+Shift+Space, Esc anuluje dyktowanie, zajęty skrót daje komunikat; druga instancja (skrót Ucho pokazuje okno, Ucho Dictate otwiera dyktowanie); Jump List „Nagraj spotkanie” i „Dyktuj” przy działającym Ucho, jeden przycisk na pasku (kafelek + okno), ikona `dictate.ico`; autostart: wpis HKCU Run z `--minimized`, toast przy błędzie, start zminimalizowany po restarcie; postęp na pasku (czerwony przy nagrywaniu, pasek przy transkrypcji i pobieraniu, ruchomy przy podsumowaniu); „Otwórz folder”; układ tray: dyktowanie bez zabierania fokusu; aktualizacja instalatorem wykrywa działające Ucho (AppMutex), `install.ps1` ustawia AppUserModelID | Jak w wersji z `main` |
 
 ### 7d. Instrukcja instalacji na Macu (źródło tekstu dla M12 i README)
 
@@ -659,6 +661,34 @@ Recenzja planu z 2026-11-19 (Claude, bez delegowania). Twierdzenia o kodzie spra
 - p. 8: ryzyko 6 rozstrzygnięte; nowe D1, D3, `hf-xet`, skróty Carbon.
 
 **Ostateczna lista zadań:** jak w tabeli „Podsumowanie zadań” (19 zadań, ok. 8 700 linii, ok. 5 800 delegowalnych).
+
+## Postęp: fala 2
+
+Baza: 00afdcf. Scalone do `macos/dev` (`--no-ff`): M1b, M1c, M8. Wynik integracji: pytest 675 passed, 6 skipped; ruff czysto; `set_copyright --check` 0 plików; `--smoke-test 3` OK. Konflikty: `tests/test_platforms.py` (zbiory wyjątków M1b i M1c, oba teraz puste) i `ucho/locale/pl.json` (wpisy M1c i M8 zachowane). `downloads.py` i `settings_screen.py` scaliły się bez konfliktów.
+
+**Zrobione**
+- M1b: skróty, jedna instancja i powłoka za `ucho/platforms/` (`windows/hotkeys.py`, `windows/instance.py`, `windows/shell.py`); `ucho/hotkeys.py` i `ucho/instance.py` to fasady; `ucho/winshell.py` zostaje reeksportem dla `install.ps1`. `diarize` buduje polecenie przez `shell().worker_command`.
+- M1c: audio (`windows/audio.py`), informacje o sprzęcie (`windows/sysinfo.py`), czcionki i ikony (`windows/fonts.py`); `audio`, `hardware`, `i18n`, `theme`, `ui` delegują do backendów. Test AST zakazanych importów działa już bez wyjątków.
+- M8: `ucho/whispercpp.py` (Engine na pywhispercpp, Metal), `config.split_model_id`, `config.model_supported`, 4 modele ggml w `MODELS` (platforma `darwin`, tiny i base ukryte), `REVISIONS['ggerganov/whisper.cpp']`, trasowanie w `transcribe`/`downloads`, `--backend whispercpp` w `tools/benchmark_wer.py`.
+
+**Odchylenia od planu**
+- Protokół `base.Shell` różni się od p. 3.3: `work_area()` zwraca `(szer., wys.)`; `after_start(app_id, tasks)` przyjmuje trójki `(argument, title, description)` i działa na wątku `taskbar`; `describe_window` i `set_window_icon` mają parametr `dictation`; doszło `autostart_sync(enabled)`; `ProgressBar.set(state, value: int | None)` (stany none, normal, indeterminate, paused, error; `error` oznacza nagrywanie); `SingleInstance.listen(on_command)`. `MUTEX_NAME` i `COMMANDS` zostają w `ucho/instance.py` (test_package czyta `AppMutex` z `installer/ucho.iss`).
+- `AudioBackend.open_input(device, channels, rate, frames, on_data, host=None)`; nie startuje strumienia; `on_data` dostaje surowe bytes int16 z przeplotem. `audio.new_pyaudio()` zwraca `None` poza Windows. `Recorder` ma flagę `_running`, a `_restart_streams` działa przy `_pa=None`.
+- `theme.SANS/DISPLAY/MONO/...` i `ui.GLYPHS` liczone raz przy imporcie z `platforms.fonts()`; macOS `Fonts.glyphs()` musi mieć te same 19 kluczy co `windows/fonts.GLYPHS`.
+- M1b nie ruszał `downloads.py` (z #28 nie ma procesu roboczego). M8 nie zmienił `transcribe.available_devices()`.
+- Opisy commitów M1b i M8 zawierały atrybucję narzędzi; w M1b poprawiono (e7a0c60), w M8 (fab67e7) i M1c (8b38d6f) zostaje w historii; przy ewentualnym squashu do `main` pominąć.
+- Kryterium 6 z M8 (job `macos-asr`, benchmark WER q5_0 vs OpenVINO int8) przesunięte do fali 3.
+- Kryterium 2 (grep `windll`/`wintypes` w `ucho/*.py`) nadal ma trafienia w `diagnostics.py` (importy w funkcjach, osłonięte `sys.platform`); test AST na nie nie reaguje.
+
+**Uwagi dla fali 3 (M3b, M4, M7a)**
+- M3b: testy `test_audio_devices.py` dla `dictation.Microphone` i `test_recorder_start_releases_started_tracks...` zakładają backend Windows z atrapą PyAudio; na macOS dać `skipif(sys.platform != "win32")` albo `override('windows')`. Testy z `importorskip` (customtkinter, soxr) pomijają się w jobie `test`. Job `macos-asr`: modele tiny/base przez `transcribe.model_path(key, download=True)`, format logu Metal sprawdzić na prawdziwej bibliotece (wykrywanie po linii `using MTL0 backend`). `tests/test_dictation_delayed_clipboard.py` i `test_live.py` bywają niestabilne pod obciążeniem.
+- M4: zaimplementować `base.Shell` z powyższymi sygnaturami (test kontraktu sprawdza nazwy parametrów i wartości domyślne); `SystemInfo` może zwracać dodatkowe klucze, ale nigdy wyjątek; reguły `hardware.recommend` dla darwin mogą używać kluczy whisper.cpp (muszą być w `config.MODELS`). `worker_command` dla `.app` (M10): `[sys.executable, '--worker', module, *args]`.
+- M5: `platforms.instance()` woła fabrykę bez argumentów (macOS `create` ma przyjmować opcjonalne `name`); `label` w `ucho/hotkeys.py` zmienić na symbole, mapę VK na kVK dodać w `macos/hotkeys.py`. `NullHotkeys.start` loguje WARNING.
+- M7a: backend dokładnie z sygnaturą `open_input` jak wyżej; `Recorder.start` bez źródła systemowego ostrzega tekstem „No system audio source found”.
+- M9: `screens.py` i `dictation.py` skracają nazwę modelu przez `split('/')[-1]`, więc klucze `repo:plik` pokażą się brzydko; użyć `downloads.model_name` albo `settings_screen.short_model`. UI może oferować urządzenia OpenVINO dla whisper.cpp (silnik je ignoruje).
+- M10: log `whispercpp.log` (obok `LOG_FILE`) traktować jak zwykły log przy paczce diagnostycznej; wpis pl.json i `THIRD_PARTY.md` (whisper.cpp MIT, modele ggml) dopisuje M13.
+- Pułapka platforms: moduły importowane przez accessory pod blokadą `_cache_lock` nie mogą przy imporcie wołać accessorów `platforms.*` (zakleszczenie).
+- Kroki ręczne do 7c dopisane: wiersz 7 (M1c), 8 (M8) i 9 (szczegóły M1b do kroku 5).
 
 ## Postęp: fala 1
 
