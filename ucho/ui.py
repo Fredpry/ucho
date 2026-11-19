@@ -11,45 +11,22 @@ focus color shows where you are (design/README.md, "Focus").
 from __future__ import annotations
 
 import logging
-import sys
 import time
 import tkinter
-from pathlib import Path
 from collections.abc import Callable
 
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageFont
 
-from . import theme
+from . import platforms, theme
 from .merge import speaker_track
 from .theme import C, font
 
 log = logging.getLogger(__name__)
 
-# --- icons (Segoe Fluent Icons / Segoe MDL2 Assets, part of Windows) ----------
+# --- icons (from the platform backend's icon font; on Windows Segoe Fluent Icons / Segoe MDL2 Assets) ---
 
-_ICON_FONTS = ("SegoeIcons.ttf", "segmdl2.ttf")
-GLYPHS = {
-    "meeting": "\uE7C8",     # Record
-    "mic": "\uE720",         # Microphone
-    "list": "\uE8FD",        # BulletedList
-    "settings": "\uE713",
-    "search": "\uE721",
-    "copy": "\uE8C8",
-    "folder": "\uE838",      # OpenLocal
-    "back": "\uE72B",
-    "refresh": "\uE72C",
-    "stop": "\uE71A",
-    "info": "\uE946",
-    "warning": "\uE7BA",
-    "check": "\uE73E",
-    "window": "\uE8A7",      # OpenInNewWindow
-    "summary": "\uE8BD",     # Message
-    "speed": "\uEC4A",       # Speed high
-    "close": "\uE711",
-    "delete": "\uE74D",
-    "edit": "\uE70F",
-}
+GLYPHS = platforms.fonts().glyphs()
 _icon_font_path: str | None = None
 _icon_cache: dict = {}
 
@@ -57,8 +34,7 @@ _icon_cache: dict = {}
 def _font_file() -> str | None:
     global _icon_font_path
     if _icon_font_path is None:
-        windir = Path(__import__("os").environ.get("WINDIR", r"C:\Windows")) / "Fonts"
-        _icon_font_path = next((str(windir / f) for f in _ICON_FONTS if (windir / f).exists()), "")
+        _icon_font_path = platforms.fonts().icon_font() or ""
     return _icon_font_path or None
 
 
@@ -203,7 +179,7 @@ _WHEEL_UNIT_PX = 5
 def scrollable(master, **kwargs) -> ctk.CTkScrollableFrame:
     """A transparent `CTkScrollableFrame` that scrolls at the usual wheel speed."""
     frame = ctk.CTkScrollableFrame(master, fg_color="transparent", corner_radius=0, **kwargs)
-    if sys.platform == "win32":
+    if platforms.family() == "windows":
         unit = max(1, round(_WHEEL_UNIT_PX * ctk.ScalingTracker.get_widget_scaling(frame)))
         frame._parent_canvas.configure(yscrollincrement=unit)
     return frame
@@ -535,13 +511,8 @@ _ui_fonts: dict = {}
 
 def _ui_font(size: int):
     if size not in _ui_fonts:
-        windir = Path(__import__("os").environ.get("WINDIR", r"C:\Windows")) / "Fonts"
-        for name in ("segoeuib.ttf", "seguisb.ttf", "arialbd.ttf"):
-            if (windir / name).exists():
-                _ui_fonts[size] = ImageFont.truetype(str(windir / name), size)
-                break
-        else:
-            _ui_fonts[size] = ImageFont.load_default(size)
+        path = platforms.fonts().ui_font_file(True)
+        _ui_fonts[size] = ImageFont.truetype(path, size) if path else ImageFont.load_default(size)
     return _ui_fonts[size]
 
 

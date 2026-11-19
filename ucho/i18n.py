@@ -7,7 +7,7 @@ to Polish. A missing translation falls back to English, so nothing breaks, and
 `tests/test_i18n.py` checks that every `t("...")` has an entry in pl.json.
 
 The language comes from the `ui_language` setting ("auto", "pl", "en"). "auto"
-follows the Windows display language: Polish for a Polish system, English
+follows the system display language: Polish for a Polish system, English
 for everything else.
 """
 
@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 from pathlib import Path
+
+from . import platforms
 
 log = logging.getLogger(__name__)
 
@@ -28,16 +29,14 @@ _translations: dict[str, str] = {}
 
 
 def system_language() -> str:
-    """'pl' for a Polish Windows display language, 'en' for any other."""
-    if sys.platform == "win32":
-        try:
-            import ctypes
-
-            langid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
-            # The lower 10 bits are the primary language; 0x15 = Polish.
-            return "pl" if (langid & 0x3FF) == 0x15 else "en"
-        except Exception:
-            log.debug("Could not read the system language", exc_info=True)
+    """'pl' for a Polish system display language, 'en' for any other."""
+    try:
+        code = platforms.sysinfo().ui_language()
+    except Exception:
+        log.debug("Could not read the system language", exc_info=True)
+        code = None
+    if code:
+        return "pl" if code == "pl" else "en"
     import locale
 
     code = (locale.getlocale()[0] or "").lower()

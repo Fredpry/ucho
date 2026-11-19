@@ -479,5 +479,6 @@
   "The window has not taken the text yet. If it does not appear, press {keys}.": "Okno jeszcze nie przyjęło tekstu. Jeśli się nie pojawi, wklej go {keys}.",
   "Text is on the clipboard, press {keys}": "Tekst jest w schowku, wklej {keys}",
   "Global hotkeys are not supported on this system.": "Skróty globalne nie są obsługiwane w tym systemie.",
-  "Start at login": "Uruchamiaj przy logowaniu"
+  "Start at login": "Uruchamiaj przy logowaniu",
+  "No system audio source found — system audio will not be recorded.": "Nie znaleziono źródła dźwięku systemowego — dźwięk systemowy nie będzie nagrany."
 }

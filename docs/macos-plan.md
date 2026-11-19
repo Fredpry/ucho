@@ -595,6 +595,7 @@ Refaktory przenoszą kod WinAPI, którego testy automatyczne nie sprawdzają do 
 | 4 | Nagranie spotkania 2 min (mikrofon i dźwięk systemowy z odtwarzanego filmu) | Obie ścieżki z dźwiękiem, transkrypt na żywo i po stopie |
 | 5 | Skróty globalne, druga instancja (show), autostart włącz i wyłącz, Jump List, postęp na pasku zadań | Jak w wersji z `main` |
 | 6 | Zmiana modelu na większy i nagranie w trakcie jego pobierania | Nagrywanie działa starszym modelem, baner informuje |
+| 7 | (M1c, backendy audio, sprzętu i czcionek) Ustawienia → lista mikrofonów i wyjść; nagranie 1 min z mikrofonem i dźwiękiem systemowym (film), w trakcie odłącz i podłącz słuchawki USB lub Bluetooth; potem zmień domyślny mikrofon w Windows i podyktuj zdanie; kreator: rekomendacja modelu | Listy urządzeń jak w wersji z `main`; obie ścieżki (`microphone.flac`, `meeting.flac`) niepuste; po odłączeniu nagranie wznawia się na nowym urządzeniu (w logu „Track ... resumed on”); dyktowanie używa nowego domyślnego mikrofonu; ikony, czcionki, język interfejsu i rekomendacja modelu (RAM, procesor, karta) jak dawniej |
 
 ### 7d. Instrukcja instalacji na Macu (źródło tekstu dla M12 i README)
 

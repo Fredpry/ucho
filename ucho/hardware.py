@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from collections.abc import Callable
 
-from . import config
+from . import config, platforms
 from .i18n import language, t
 
 log = logging.getLogger(__name__)
@@ -147,109 +147,34 @@ class HardwareProfile:
 
 
 def _ram() -> tuple[float, float, float | None]:
-    """(visible, free, installed) in GiB via GlobalMemoryStatusEx."""
-    import ctypes
-    from ctypes import wintypes
-
-    class MEMORYSTATUSEX(ctypes.Structure):
-        _fields_ = [
-            ("dwLength", wintypes.DWORD),
-            ("dwMemoryLoad", wintypes.DWORD),
-            ("ullTotalPhys", ctypes.c_ulonglong),
-            ("ullAvailPhys", ctypes.c_ulonglong),
-            ("ullTotalPageFile", ctypes.c_ulonglong),
-            ("ullAvailPageFile", ctypes.c_ulonglong),
-            ("ullTotalVirtual", ctypes.c_ulonglong),
-            ("ullAvailVirtual", ctypes.c_ulonglong),
-            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-        ]
-
-    kernel32 = ctypes.windll.kernel32
-    status = MEMORYSTATUSEX()
-    status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-        raise OSError("GlobalMemoryStatusEx failed")
-
-    installed: float | None = None
-    kb = ctypes.c_ulonglong(0)
-    try:
-        if kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb)) and kb.value:
-            installed = kb.value / 1024**2
-    except Exception:
-        log.debug("GetPhysicallyInstalledSystemMemory unavailable", exc_info=True)
-    return status.ullTotalPhys / GIB, status.ullAvailPhys / GIB, installed
+    """(visible, free, installed) in GiB from the platform backend."""
+    return platforms.sysinfo().ram_gb()
 
 
 def _cpu_name() -> str:
-    import winreg
-
-    with winreg.OpenKey(
-        winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
-    ) as key:
-        return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+    """CPU model name from the platform backend."""
+    return platforms.sysinfo().cpu_name()
 
 
 def _physical_cores() -> int | None:
-    """Number of RelationProcessorCore records from GetLogicalProcessorInformationEx."""
-    import ctypes
-    from ctypes import wintypes
+    """Physical CPU core count from the platform backend."""
+    return platforms.sysinfo().physical_cores()
 
-    kernel32 = ctypes.windll.kernel32
-    relation_processor_core = 0
-    length = wintypes.DWORD(0)
-    kernel32.GetLogicalProcessorInformationEx(relation_processor_core, None, ctypes.byref(length))
-    if not length.value:
-        return None
-    buffer = ctypes.create_string_buffer(length.value)
-    if not kernel32.GetLogicalProcessorInformationEx(
-        relation_processor_core, buffer, ctypes.byref(length)
-    ):
-        return None
-    # Records have variable length: DWORD Relationship, DWORD Size, then data.
-    count, offset = 0, 0
-    while offset + 8 <= length.value:
-        size = int.from_bytes(buffer.raw[offset + 4: offset + 8], "little")
-        if size <= 0:
-            break
-        count += 1
-        offset += size
-    return count or None
+
+_CPU_FEATURES = {
+    PF_AVX2_INSTRUCTIONS_AVAILABLE: "avx2",
+    PF_AVX512F_INSTRUCTIONS_AVAILABLE: "avx512",
+}
 
 
 def _cpu_feature(feature: int) -> bool:
-    import ctypes
-
-    return bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(feature))
+    """Whether CPU `feature` is supported according to the platform backend."""
+    return bool(platforms.sysinfo().cpu_features().get(_CPU_FEATURES.get(feature, ""), False))
 
 
 def _adapters() -> list[GraphicsAdapter]:
-    """Display adapters from the registry (device class "Display")."""
-    import winreg
-
-    path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-    result: list[GraphicsAdapter] = []
-    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as device_class:
-        i = 0
-        while True:
-            try:
-                subkey = winreg.EnumKey(device_class, i)
-            except OSError:
-                break
-            i += 1
-            if not subkey.isdigit():
-                continue  # "Properties" and similar are not adapters
-            try:
-                with winreg.OpenKey(device_class, subkey) as adapter:
-                    name = str(winreg.QueryValueEx(adapter, "DriverDesc")[0])
-                    try:
-                        version = str(winreg.QueryValueEx(adapter, "DriverVersion")[0])
-                    except OSError:
-                        version = ""
-            except OSError:
-                continue
-            if all(a.name != name for a in result):
-                result.append(GraphicsAdapter(name, version))
-    return result
+    """Display adapters from the platform backend."""
+    return platforms.sysinfo().adapters()
 
 
 def _ov_property(core, device: str, name: str):
@@ -314,13 +239,12 @@ def _safe(probe: Callable, default):
 def profile() -> HardwareProfile:
     """Reads the hardware profile. Every probe may fail without breaking the rest."""
     p = HardwareProfile(logical_cores=os.cpu_count() or 0)
-    if sys.platform == "win32":
-        p.ram_total_gb, p.ram_free_gb, p.ram_installed_gb = _safe(_ram, (0.0, 0.0, None))
-        p.cpu_name = _safe(_cpu_name, "")
-        p.physical_cores = _safe(_physical_cores, None)
-        p.avx2 = _safe(lambda: _cpu_feature(PF_AVX2_INSTRUCTIONS_AVAILABLE), False)
-        p.avx512 = _safe(lambda: _cpu_feature(PF_AVX512F_INSTRUCTIONS_AVAILABLE), False)
-        p.adapters = _safe(_adapters, [])
+    p.ram_total_gb, p.ram_free_gb, p.ram_installed_gb = _safe(_ram, (0.0, 0.0, None))
+    p.cpu_name = _safe(_cpu_name, "")
+    p.physical_cores = _safe(_physical_cores, None)
+    p.avx2 = _safe(lambda: _cpu_feature(PF_AVX2_INSTRUCTIONS_AVAILABLE), False)
+    p.avx512 = _safe(lambda: _cpu_feature(PF_AVX512F_INSTRUCTIONS_AVAILABLE), False)
+    p.adapters = _safe(_adapters, [])
     p.devices, p.openvino_version = _safe(_ov_devices, ([], ""))
     if not p.cpu_name:
         cpu = next((d for d in p.devices if d.id == "CPU"), None)

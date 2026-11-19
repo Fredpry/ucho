@@ -346,8 +346,6 @@ class Microphone:
         self._pa = None
 
     def start(self) -> None:
-        import pyaudiowpatch as pyaudio
-
         from . import audio
 
         # PortAudio lists the devices (and the Windows default) present when it
@@ -372,13 +370,10 @@ class Microphone:
                 self._reset_take()
                 self.level = 0.0
                 self.ready.clear()
-                self._stream = self._pa.open(
-                    format=pyaudio.paInt16, channels=self._channels,
-                    rate=self._rate, input=True,
-                    input_device_index=device.index, frames_per_buffer=1024,
-                    stream_callback=self._callback,
+                self._stream = platforms.audio().open_input(
+                    device, self._channels, self._rate, 1024, self._callback, host=self._pa,
                 )
-                self._stream.start_stream()
+                self._stream.start()
                 self.name = device.name
                 return
             except Exception:
@@ -388,16 +383,13 @@ class Microphone:
                     raise
                 log.warning("Opening the microphone failed - retrying", exc_info=True)
 
-    def _callback(self, in_data, frame_count, time_info, status):
-        import pyaudiowpatch as pyaudio
-
+    def _callback(self, in_data: bytes) -> None:
         self._blocks.append(in_data)
         self.ready.set()
         try:
             self.level = float(np.abs(np.frombuffer(in_data, dtype=np.int16)).max()) / 32768.0
         except ValueError:
             pass
-        return (None, pyaudio.paContinue)
 
     def _blocks_to_mono(self, blocks: list[bytes]) -> np.ndarray:
         if not blocks:
@@ -436,7 +428,7 @@ class Microphone:
     def stop(self) -> np.ndarray:
         stream, self._stream = self._stream, None
         if stream is not None:
-            for method in (stream.stop_stream, stream.close):
+            for method in (stream.stop, stream.close):
                 try:
                     method()
                 except Exception:
