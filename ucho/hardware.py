@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass, field
 from collections.abc import Callable
 
-from . import config
+from . import config, platforms
 from .i18n import language, t
 
 log = logging.getLogger(__name__)
@@ -39,6 +39,8 @@ LARGE_INT8 = "OpenVINO/whisper-large-v3-int8-ov"
 LARGE_FP16 = "OpenVINO/whisper-large-v3-fp16-ov"
 TURBO_INT8 = "OpenVINO/whisper-large-v3-turbo-int8-ov"
 TURBO_INT4 = "OpenVINO/whisper-large-v3-turbo-int4-ov"
+WCPP_LARGE = "ggerganov/whisper.cpp:ggml-large-v3-q5_0.bin"
+WCPP_TURBO = "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin"
 
 # Language models for meeting names and summaries. The recommendation never
 # changes their device: they use the transcription device, with CPU fallback.
@@ -113,12 +115,15 @@ class HardwareProfile:
     devices: list[OvDevice] = field(default_factory=list)
     adapters: list[GraphicsAdapter] = field(default_factory=list)
     openvino_version: str = ""
+    system: str = ""
 
     @property
     def ram_gb(self) -> float:
         """RAM used by the rules: nominal when known, otherwise visible + tolerance."""
         if self.ram_installed_gb:
             return self.ram_installed_gb
+        if self.system == "darwin":
+            return self.ram_total_gb
         return self.ram_total_gb + RAM_TOLERANCE_GB
 
     @property
@@ -147,109 +152,34 @@ class HardwareProfile:
 
 
 def _ram() -> tuple[float, float, float | None]:
-    """(visible, free, installed) in GiB via GlobalMemoryStatusEx."""
-    import ctypes
-    from ctypes import wintypes
-
-    class MEMORYSTATUSEX(ctypes.Structure):
-        _fields_ = [
-            ("dwLength", wintypes.DWORD),
-            ("dwMemoryLoad", wintypes.DWORD),
-            ("ullTotalPhys", ctypes.c_ulonglong),
-            ("ullAvailPhys", ctypes.c_ulonglong),
-            ("ullTotalPageFile", ctypes.c_ulonglong),
-            ("ullAvailPageFile", ctypes.c_ulonglong),
-            ("ullTotalVirtual", ctypes.c_ulonglong),
-            ("ullAvailVirtual", ctypes.c_ulonglong),
-            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-        ]
-
-    kernel32 = ctypes.windll.kernel32
-    status = MEMORYSTATUSEX()
-    status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-    if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-        raise OSError("GlobalMemoryStatusEx failed")
-
-    installed: float | None = None
-    kb = ctypes.c_ulonglong(0)
-    try:
-        if kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb)) and kb.value:
-            installed = kb.value / 1024**2
-    except Exception:
-        log.debug("GetPhysicallyInstalledSystemMemory unavailable", exc_info=True)
-    return status.ullTotalPhys / GIB, status.ullAvailPhys / GIB, installed
+    """(visible, free, installed) in GiB from the platform backend."""
+    return platforms.sysinfo().ram_gb()
 
 
 def _cpu_name() -> str:
-    import winreg
-
-    with winreg.OpenKey(
-        winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
-    ) as key:
-        return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+    """CPU model name from the platform backend."""
+    return platforms.sysinfo().cpu_name()
 
 
 def _physical_cores() -> int | None:
-    """Number of RelationProcessorCore records from GetLogicalProcessorInformationEx."""
-    import ctypes
-    from ctypes import wintypes
+    """Physical CPU core count from the platform backend."""
+    return platforms.sysinfo().physical_cores()
 
-    kernel32 = ctypes.windll.kernel32
-    relation_processor_core = 0
-    length = wintypes.DWORD(0)
-    kernel32.GetLogicalProcessorInformationEx(relation_processor_core, None, ctypes.byref(length))
-    if not length.value:
-        return None
-    buffer = ctypes.create_string_buffer(length.value)
-    if not kernel32.GetLogicalProcessorInformationEx(
-        relation_processor_core, buffer, ctypes.byref(length)
-    ):
-        return None
-    # Records have variable length: DWORD Relationship, DWORD Size, then data.
-    count, offset = 0, 0
-    while offset + 8 <= length.value:
-        size = int.from_bytes(buffer.raw[offset + 4: offset + 8], "little")
-        if size <= 0:
-            break
-        count += 1
-        offset += size
-    return count or None
+
+_CPU_FEATURES = {
+    PF_AVX2_INSTRUCTIONS_AVAILABLE: "avx2",
+    PF_AVX512F_INSTRUCTIONS_AVAILABLE: "avx512",
+}
 
 
 def _cpu_feature(feature: int) -> bool:
-    import ctypes
-
-    return bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(feature))
+    """Whether CPU `feature` is supported according to the platform backend."""
+    return bool(platforms.sysinfo().cpu_features().get(_CPU_FEATURES.get(feature, ""), False))
 
 
 def _adapters() -> list[GraphicsAdapter]:
-    """Display adapters from the registry (device class "Display")."""
-    import winreg
-
-    path = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-    result: list[GraphicsAdapter] = []
-    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as device_class:
-        i = 0
-        while True:
-            try:
-                subkey = winreg.EnumKey(device_class, i)
-            except OSError:
-                break
-            i += 1
-            if not subkey.isdigit():
-                continue  # "Properties" and similar are not adapters
-            try:
-                with winreg.OpenKey(device_class, subkey) as adapter:
-                    name = str(winreg.QueryValueEx(adapter, "DriverDesc")[0])
-                    try:
-                        version = str(winreg.QueryValueEx(adapter, "DriverVersion")[0])
-                    except OSError:
-                        version = ""
-            except OSError:
-                continue
-            if all(a.name != name for a in result):
-                result.append(GraphicsAdapter(name, version))
-    return result
+    """Display adapters from the platform backend."""
+    return platforms.sysinfo().adapters()
 
 
 def _ov_property(core, device: str, name: str):
@@ -313,14 +243,13 @@ def _safe(probe: Callable, default):
 
 def profile() -> HardwareProfile:
     """Reads the hardware profile. Every probe may fail without breaking the rest."""
-    p = HardwareProfile(logical_cores=os.cpu_count() or 0)
-    if sys.platform == "win32":
-        p.ram_total_gb, p.ram_free_gb, p.ram_installed_gb = _safe(_ram, (0.0, 0.0, None))
-        p.cpu_name = _safe(_cpu_name, "")
-        p.physical_cores = _safe(_physical_cores, None)
-        p.avx2 = _safe(lambda: _cpu_feature(PF_AVX2_INSTRUCTIONS_AVAILABLE), False)
-        p.avx512 = _safe(lambda: _cpu_feature(PF_AVX512F_INSTRUCTIONS_AVAILABLE), False)
-        p.adapters = _safe(_adapters, [])
+    p = HardwareProfile(logical_cores=os.cpu_count() or 0, system=sys.platform)
+    p.ram_total_gb, p.ram_free_gb, p.ram_installed_gb = _safe(_ram, (0.0, 0.0, None))
+    p.cpu_name = _safe(_cpu_name, "")
+    p.physical_cores = _safe(_physical_cores, None)
+    p.avx2 = _safe(lambda: _cpu_feature(PF_AVX2_INSTRUCTIONS_AVAILABLE), False)
+    p.avx512 = _safe(lambda: _cpu_feature(PF_AVX512F_INSTRUCTIONS_AVAILABLE), False)
+    p.adapters = _safe(_adapters, [])
     p.devices, p.openvino_version = _safe(_ov_devices, ([], ""))
     if not p.cpu_name:
         cpu = next((d for d in p.devices if d.id == "CPU"), None)
@@ -355,6 +284,8 @@ RULES: dict[str, Rule] = {
         Rule("low_ram", TURBO_INT4, "CPU", TURBO_INT4, None),
         Rule("gpu_turbo", TURBO_INT8, "GPU", TURBO_INT8, "gpu_turbo_int4"),
         Rule("gpu_turbo_int4", TURBO_INT4, "GPU", TURBO_INT4, None),
+        Rule("mac_large", WCPP_LARGE, "METAL", WCPP_TURBO, "mac_turbo"),
+        Rule("mac_turbo", WCPP_TURBO, "METAL", WCPP_TURBO, None),
     )
 }
 
@@ -386,6 +317,20 @@ def _choose_rule(p: HardwareProfile) -> tuple[str, list[str], list[str]]:
     gpu = p.usable_gpu()
     reasons: list[str] = []
     warnings: list[str] = []
+
+    if p.system == "darwin":
+        reasons.append(t("Apple Silicon: transcription with whisper.cpp on the GPU (Metal)."))
+        if ram >= 16:
+            reasons.append(t(
+                "{ram} GB RAM: the full large-v3 model for meetings, the faster turbo model for dictation.",
+                ram=_num(ram),
+            ))
+            return "mac_large", reasons, warnings
+        reasons.append(t(
+            "{ram} GB RAM: the faster turbo model for meetings and dictation.",
+            ram=_num(ram),
+        ))
+        return "mac_turbo", reasons, warnings
 
     if ram < 8:
         warnings.append(t("Less than 8 GB RAM ({ram} GB): the smallest model was chosen. "
@@ -471,6 +416,21 @@ def recommend_llm(p: HardwareProfile) -> LlmRecommendation:
     the system RAM, so RAM decides unless a discrete GPU brings its own memory.
     """
     ram = p.ram_gb
+    if p.system == "darwin":
+        if ram <= 8:
+            return LlmRecommendation(LLM_SMALL, [t(
+                "{ram} GB RAM: only the smallest language model fits next to speech recognition.",
+                ram=_num(ram),
+            )])
+        if ram <= 16:
+            return LlmRecommendation(LLM_MEDIUM, [t(
+                "{ram} GB RAM: the 4B language model on the CPU writes good Polish.",
+                ram=_num(ram),
+            )])
+        return LlmRecommendation(LLM_LARGE, [t(
+            "{ram} GB RAM: the largest language model fits.",
+            ram=_num(ram),
+        )])
     gpu = p.usable_gpu()
     if ram < 8:
         rec = LlmRecommendation(LLM_SMALL, [t(
@@ -611,14 +571,14 @@ def _forced_kwargs(engine, tokens: int) -> dict:
 def benchmark(model: str, device: str, seconds: float = 10.0) -> BenchmarkResult:
     """Measures the real-time factor of `model` on `device` with a synthetic signal.
 
-    Reuses transcribe.Engine for loading, so the GPU to CPU fallback and the
+    Builds the engine through transcribe.create_engine, so the GPU to CPU fallback and the
     restricted language detection behave as in a real transcription. The first
     call is a warm-up: on the GPU it allocates buffers, which a long recording
     pays only once. Raises when the model is not downloaded.
     """
     from . import transcribe
 
-    engine = transcribe.Engine(model, device)
+    engine = transcribe.create_engine(model, device)
     start = time.monotonic()
     engine.load()
     load_s = time.monotonic() - start

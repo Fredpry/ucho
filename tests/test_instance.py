@@ -9,7 +9,7 @@ import pytest
 
 from ucho.instance import SingleInstance
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows kernel objects")
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows only: named mutex and events")
 
 
 def test_second_start_passes_its_command():

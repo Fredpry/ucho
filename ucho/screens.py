@@ -10,14 +10,13 @@ while visible) and listens to controller events for content changes.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import tkinter
 from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, retention, session, theme, ui
+from . import config, platform_text, platforms, retention, session, theme, ui
 from .archive import Match, fold, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
@@ -66,7 +65,7 @@ def header(master, title: str, subtitle: str | None = None) -> tuple[ctk.CTkFram
 
 def open_path(path: Path) -> None:
     try:
-        os.startfile(str(path))  # opens the user's own folder in Explorer
+        platforms.shell().open_path(path)  # the user's own folder in the system file manager
     except Exception as error:
         log.warning("Could not open a folder in Explorer: %s", type(error).__name__)
 
@@ -362,7 +361,9 @@ class MeetingScreen(Screen):
 
     def tick(self) -> None:
         m = self.meeting
-        self.button.set_state(m.recording)
+        # No speech model yet: the button is off and the notice says why (#28).
+        blocked = None if m.recording else self.app.recording_blocked(False)
+        self.button.set_state(m.recording, enabled=blocked is None)
         self.button.render()
         self.timer.configure(text=format_hms(m.elapsed()))
         levels = m.levels()
@@ -373,7 +374,7 @@ class MeetingScreen(Screen):
         shortcut = hotkey_label(self.app.settings["hotkey"])
         self.hint.configure(text=error or t("Shortcut: {shortcut}", shortcut=shortcut))
         self.name.configure(state="disabled" if m.recording else "normal")
-        message = m.message[0] if m.message else ""
+        message = blocked or (m.message[0] if m.message else "")
         if not self.app.audio_ok and not m.recording:
             message = message or t("No audio devices found. Connect a microphone or headphones.")
         if self.notice.cget("text") != message:
@@ -654,7 +655,7 @@ class TranscriptScreen(Screen):
         self.segments = []
         self.names = {}
         self.title.configure(text=m.last_meta.get("name") or (self.folder.name if self.folder else ""))
-        model = self.app.settings["model"].split("/")[-1]
+        model = platform_text.model_tail(self.app.settings["model"])
         self.subtitle.configure(text=f"{self.app.settings['device']}  ·  {model}")
         self.text.clear()
         for line in m.live_text:
@@ -669,7 +670,7 @@ class TranscriptScreen(Screen):
         if meta.get("device"):
             details.append(str(meta["device"]))
         if meta.get("model"):
-            details.append(str(meta["model"]).split("/")[-1])
+            details.append(platform_text.model_tail(str(meta["model"])))
         if retention.audio_removed(meta):
             details.append(t("audio deleted"))
         self.title.configure(text=title)
@@ -1083,7 +1084,8 @@ class DictationPanel(ctk.CTkFrame):
             self.headline.configure(text=headline, text_color=color)
         if self.hint.cget("text") != hint:
             self.hint.configure(text=hint)
-        self.button.set_state(d.recording)
+        blocked = not d.recording and self.app.recording_blocked(False) is not None
+        self.button.set_state(d.recording, enabled=not blocked)
         self.button.render()
         self.meter.set(d.level())
         showing_live = bool((d.recording or d.queued) and d.live_text)
@@ -1105,8 +1107,10 @@ class DictationPanel(ctk.CTkFrame):
             shared = model == self.app.settings["model"]
             state = {"ready": t("loaded"), "loading": t("loading"), "error": t("not loaded"),
                      "idle": t("loads on first use")}.get(d.model_state, "")
-            line = t("Model: {model} on {device} ({state})", model=model.split("/")[-1].removeprefix(
-                "whisper-").removesuffix("-ov"), device=d.model_device or device, state=state)
+            from .settings_screen import short_model
+
+            line = t("Model: {model} on {device} ({state})", model=short_model(model),
+                     device=d.model_device or device, state=state)
             if shared:
                 line += "  ·  " + t("shared with transcription")
             if self.model.cget("text") != line:
@@ -1136,11 +1140,37 @@ class DictationScreen(Screen):
             ui.focus(self.panel.button)
 
 
+# macOS: a window of a background app that becomes key activates the app and
+# takes the keyboard from the window you dictate into. `noActivates` keeps the
+# window from becoming key, `nonActivating` (an NSPanel style) keeps a click on
+# it from activating Ucho. Both must be set before the window is first mapped.
+MAC_DICTATION_STYLE = ("utility", ("noActivates", "nonActivating"))
+
+
+def float_without_activating(window) -> bool:
+    """Gives a Tk toplevel the non-activating panel style on macOS (no-op elsewhere). True when set."""
+    try:
+        if window.tk.call("tk", "windowingsystem") != "aqua":
+            return False
+    except tkinter.TclError:
+        return False
+    style, attributes = MAC_DICTATION_STYLE
+    for attrs in (attributes, attributes[:1]):  # older Tk may not know nonActivating
+        try:
+            window.tk.call("::tk::unsupported::MacWindowStyle", "style", window._w, style, attrs)
+            return True
+        except tkinter.TclError:
+            log.debug("MacWindowStyle %s %s refused", style, attrs, exc_info=True)
+    log.warning("The dictation window may take the focus: its window style could not be set")
+    return False
+
+
 class DictationWindow(ctk.CTkToplevel):
     """Variant B: a small dictation window opened from the tray, the hotkey or the Jump List."""
 
     def __init__(self, app):
         super().__init__(app)
+        float_without_activating(self)
         self.app = app
         self.title(t("Ucho Dictate"))
         self.geometry("440x320")
@@ -1155,12 +1185,7 @@ class DictationWindow(ctk.CTkToplevel):
     def _icon(self) -> None:
         if not self.winfo_exists():
             return
-        icon_file = config.PROJECT_DIR / "ucho" / "assets" / "dictate.ico"
-        try:
-            if icon_file.exists():
-                self.iconbitmap(str(icon_file))
-        except Exception:
-            pass
+        platforms.shell().set_window_icon(self, dictation=True)
         self.app.describe_window(self, dictation=True)
 
     def show(self) -> None:

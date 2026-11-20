@@ -9,15 +9,17 @@ the file before it starts, see meeting.py).
 from __future__ import annotations
 
 import logging
-import threading
+import time
 from pathlib import Path
 from collections.abc import Callable
 
 import customtkinter as ctk
 
-from . import config, diarize, hardware, i18n, llm, retention, theme, transcribe, ui, winshell
+from . import (config, diarize, downloads, hardware, i18n, llm, platform_text, platforms, retention,
+               theme, transcribe, ui)
 from .hotkeys import label as hotkey_label
 from .i18n import t
+from .permissions_ui import PermissionsPanel
 from .screens import PAD, Screen, header, open_path
 from .theme import C
 
@@ -30,10 +32,13 @@ MODE_LABELS = config.DICTATION_MODE_LABELS
 
 def model_label(repo: str) -> str:
     info = config.MODELS.get(repo, {})
-    return f"{info.get('name', repo.split('/')[-1])}  ({info.get('size', '?')})"
+    return f"{info.get('name', platform_text.model_tail(repo))}  ({info.get('size', '?')})"
 
 
 def short_model(repo: str) -> str:
+    _, filename = config.split_model_id(repo)
+    if filename is not None:
+        return filename.removeprefix("ggml-").removesuffix(".bin")
     return repo.split("/")[-1].removeprefix("whisper-").removesuffix("-ov")
 
 
@@ -59,6 +64,7 @@ class LanguageModelPicker(ctk.CTkFrame):
         self.state.pack(side="left")
         self.download = ui.secondary(row, t("Download model"), self._download, width=10,
                                      height=30)
+        self._poll: str | None = None
         self.after(400, self.refresh)
 
     def _menu_items(self) -> tuple[list[str], str]:
@@ -160,44 +166,53 @@ class LanguageModelPicker(ctk.CTkFrame):
                 )
             return
         size = llm.size(model)
-        if llm.available(model):
+        item = self.app.downloads.get(model)
+        if item is not None and item.running:
+            self.state.configure(text=t("Downloading: {progress}", progress=item.progress.describe()),
+                                 text_color=C.info)
+            # The picker has no tick of its own (the wizard shows it too).
+            if self._poll is None:
+                self._poll = self.after(500, self._poll_download)
+        elif llm.available(model):
             self.state.configure(
                 text=t("Model downloaded ({size})", size=size),
                 text_color=C.success,
             )
         else:
-            self.state.configure(
-                text=t("Not downloaded ({size}). Transcription works without it.", size=size),
-                text_color=C.text_muted,
-            )
-            self.download.configure(text=t("Download model ({size})", size=size), state="normal")
+            if item is not None and item.error:
+                self.state.configure(
+                    text=t("Language model download failed: {error}", error=item.error),
+                    text_color=C.warning,
+                )
+                button = t("Retry download")
+            else:
+                self.state.configure(
+                    text=t("Not downloaded ({size}). Transcription works without it.", size=size),
+                    text_color=C.text_muted,
+                )
+                button = t("Download model ({size})", size=size)
+            self.download.configure(text=button, state="normal")
             self.download.pack(side="left", padx=(12, 0))
+
+    def _poll_download(self) -> None:
+        self._poll = None
+        self.refresh()
 
     def _download(self) -> None:
         model = self.value
         if not model or llm.is_custom(model):
             return
-        self.download.configure(state="disabled", text=t("Downloading..."))
 
-        def job() -> None:
-            error_message: str | None = None
-            try:
-                transcribe.model_path(model, download=True)
-            except Exception as error:
-                error_message = str(error)
-                log.exception("Language model download failed")
-            self.app.post(lambda: self.winfo_exists() and self.refresh())
-            if error_message is None:
+        def done(error: str | None) -> None:
+            if not self.winfo_exists():
+                return
+            self.refresh()
+            if error is None and self.value == model:
                 # Lets the owner update what depends on the model (the meeting names state).
-                self.app.post(lambda: self.winfo_exists() and self.value == model
-                              and self._on_change(model))
-            else:
-                self.app.post(lambda m=error_message: self.winfo_exists() and self.state.configure(
-                    text=t("Language model download failed: {error}", error=m),
-                    text_color=C.warning,
-                ))
+                self._on_change(model)
 
-        threading.Thread(target=job, daemon=True).start()
+        self.app.download_model(model, downloads.LANGUAGE, on_done=done)
+        self.refresh()
 
 
 class Section(ctk.CTkFrame):
@@ -261,12 +276,14 @@ class SettingsScreen(Screen):
         self._build_transcription()
         self._build_dictation()
         self._build_audio()
+        self._build_permissions()
         self._build_llm()
         self._build_titles()
         self._build_summary()
         self._build_storage()
         self._build_about()
         self._profile_loaded = False
+        self._download_tick = 0.0
 
     def _section(self, title: str, description: str | None = None) -> Section:
         section = Section(self.scroll, title, description)
@@ -282,9 +299,14 @@ class SettingsScreen(Screen):
 
     def _build_appearance(self) -> None:
         s = self._section(t("Appearance and windows"))
-        themes = {t(v): k for k, v in THEME_LABELS.items()}
+        themes = {
+            (platform_text.system_theme_label() if k == "system" else t(v)): k
+            for k, v in THEME_LABELS.items()
+        }
+        theme_by_key = {k: label for label, k in themes.items()}
+        current_theme = theme_by_key.get(self.settings["theme"], theme_by_key["system"])
         s.row(t("Theme"), lambda m: ui.segmented(
-            m, list(themes), t(THEME_LABELS.get(self.settings["theme"], "Same as Windows")),
+            m, list(themes), current_theme,
             lambda v: self.app.set_theme(themes[v])))
         layouts = {t(v): k for k, v in LAYOUT_LABELS.items()}
         s.row(t("Window layout"), lambda m: ui.option_menu(
@@ -297,7 +319,7 @@ class SettingsScreen(Screen):
             m, list(languages), t(config.UI_LANGUAGE_LABELS.get(self.settings["ui_language"],
                                                                  config.UI_LANGUAGE_LABELS["auto"])),
             lambda v: self.app.set_ui_language(languages[v])))
-        s.row(t("Start with Windows"), lambda m: ui.switch(
+        s.row(platforms.shell().autostart_label(), lambda m: ui.switch(
             m, t("Start Ucho in the tray when I sign in"), self.settings["start_with_windows"],
             self.app.set_autostart))
         s.row(t("Closing the window"), lambda m: ui.switch(
@@ -474,9 +496,19 @@ class SettingsScreen(Screen):
         # Parakeet (optional backend) ignores the device setting.
         cpu_only = config.MODELS.get(model, {}).get("backend") == "parakeet"
         note = " " + t("Runs on the CPU only.") if cpu_only else ""
-        if transcribe.model_downloaded(model):
+        item = self.app.downloads.get(model)
+        if item is not None and item.running:
+            self.model_state.configure(
+                text=t("Downloading: {progress}", progress=item.progress.describe()) + note,
+                text_color=C.info)
+        elif transcribe.model_downloaded(model):
             self.model_state.configure(text=t("Model downloaded ({size})", size=size) + note,
                                        text_color=C.success)
+        elif item is not None and item.error:
+            self.model_state.configure(text=t("Model download failed: {error}", error=item.error),
+                                       text_color=C.warning)
+            self.download.configure(text=t("Retry download"), state="normal")
+            self.download.pack(side="left", padx=(12, 0))
         else:
             self.model_state.configure(text=t("Model not downloaded ({size})", size=size) + note,
                                        text_color=C.warning)
@@ -484,21 +516,21 @@ class SettingsScreen(Screen):
             self.download.pack(side="left", padx=(12, 0))
 
     def _download(self) -> None:
-        model = self.settings["model"]
-        self.download.configure(state="disabled", text=t("Downloading..."))
+        # The app reloads dictation when the model arrives (App._download_finished).
+        self.app.download_model(self.settings["model"],
+                                on_done=lambda _error: self.winfo_exists() and self._refresh_model())
+        self._refresh_model()
 
-        def job():
-            try:
-                transcribe.model_path(model, download=True)
-            except Exception as error:
-                message = str(error)
-                log.exception("Model download failed")
-                self.app.post(lambda: self.app.toast(t("Model download failed: {error}", error=message),
-                                                     "warning"))
-            self.app.post(self._refresh_model)
-            self.app.post(self.app.settings_changed)
-
-        threading.Thread(target=job, daemon=True).start()
+    def tick(self) -> None:
+        # Progress of a running download next to its button; the main window has the bar.
+        now = time.monotonic()
+        if now - self._download_tick < 0.5:
+            return
+        self._download_tick = now
+        if self.app.downloads.is_running(self.settings["model"]):
+            self._refresh_model()
+        if self.app.downloads.is_running(downloads.SPEAKER_MODELS):
+            self._refresh_speakers()
 
     # --- transcription ----------------------------------------------------------------
 
@@ -549,34 +581,38 @@ class SettingsScreen(Screen):
                 text=t("Needs the optional sherpa-onnx package: run the installer again with -WithSpeakers."),
                 text_color=C.warning,
             )
+            return
+        item = self.app.downloads.get(downloads.SPEAKER_MODELS)
+        if item is not None and item.running:
+            self.speaker_state.configure(
+                text=t("Downloading: {progress}", progress=item.progress.describe()),
+                text_color=C.info,
+            )
         elif diarize.models_downloaded():
             self.speaker_state.configure(
                 text=t("Models downloaded ({size})", size=size),
                 text_color=C.success,
             )
         else:
-            self.speaker_state.configure(
-                text=t("Models not downloaded ({size})", size=size),
-                text_color=C.text_muted,
-            )
-            self.speaker_download.configure(
-                text=t("Download models ({size})", size=size), state="normal")
+            if item is not None and item.error:
+                self.speaker_state.configure(
+                    text=t("Speaker model download failed: {error}", error=item.error),
+                    text_color=C.warning,
+                )
+                button = t("Retry download")
+            else:
+                self.speaker_state.configure(
+                    text=t("Models not downloaded ({size})", size=size),
+                    text_color=C.text_muted,
+                )
+                button = t("Download models ({size})", size=size)
+            self.speaker_download.configure(text=button, state="normal")
             self.speaker_download.pack(side="left", padx=(12, 0))
 
     def _download_speakers(self) -> None:
-        self.speaker_download.configure(state="disabled", text=t("Downloading..."))
-
-        def job():
-            try:
-                diarize.download_models()
-            except Exception as error:
-                message = str(error)
-                log.exception("Speaker model download failed")
-                self.app.post(lambda: self.app.toast(
-                    t("Speaker model download failed: {error}", error=message), "warning"))
-            self.app.post(self._refresh_speakers)
-
-        threading.Thread(target=job, daemon=True).start()
+        self.app.download_speaker_models(
+            on_done=lambda _error: self.winfo_exists() and self._refresh_speakers())
+        self._refresh_speakers()
 
     # --- dictation --------------------------------------------------------------------
 
@@ -605,9 +641,11 @@ class SettingsScreen(Screen):
             lambda v: self._save("dictation_live", v)),
             t("The text is recognized in pieces during the dictation, so it is pasted right after "
               "you stop. Off: the whole dictation is recognized after the stop."))
-        modes = {t(v): k for k, v in MODE_LABELS.items()}
+        mode_labels = platform_text.dictation_mode_labels()
+        modes = {label: key for key, label in mode_labels.items()}
+        current_mode = mode_labels.get(self.settings["dictation_mode"], mode_labels["paste"])
         s.row(t("Insert text by"), lambda m: ui.option_menu(
-            m, list(modes), t(MODE_LABELS.get(self.settings["dictation_mode"], MODE_LABELS["paste"])),
+            m, list(modes), current_mode,
             lambda v: self._save("dictation_mode", modes[v]), width=320))
         s.row(t("Sounds"), lambda m: ui.switch(
             m, t("Short beeps at start and end"), self.settings["dictation_sounds"],
@@ -679,6 +717,18 @@ class SettingsScreen(Screen):
         # A name replaces the index saved by an earlier version.
         self.settings[f"{key}_index"] = None
         self.settings.save()
+
+    # --- permissions (macOS) ------------------------------------------------------------
+
+    def _build_permissions(self) -> None:
+        if platforms.family() != "macos":
+            return
+        s = self._section(
+            t("Permissions"),
+            t("macOS asks for each permission once. If you denied one, open the settings and switch Ucho on."),
+        )
+        s.full(lambda m: PermissionsPanel(m).pack(fill="x"))
+        s.end()
 
     # --- language model -----------------------------------------------------------------
 
@@ -848,8 +898,7 @@ class SettingsScreen(Screen):
     def _folder_warning(self) -> None:
         path = Path(self.folder.get().strip() or ".")
         if config.onedrive_folder(path):
-            self.folder_note.configure(text=t("This folder is synced by OneDrive: recordings and transcripts "
-                                              "would go to the cloud. Choose a folder outside OneDrive."),
+            self.folder_note.configure(text=platform_text.cloud_folder_note(),
                                        text_color=C.warning)
         else:
             self.folder_note.configure(text=t("Recordings and transcripts stay on this computer."),
@@ -885,25 +934,19 @@ class SettingsScreen(Screen):
         def buttons(master):
             ui.secondary(master, t("Open the log folder"), lambda: open_path(config.LOG_FILE.parent),
                          "folder", width=10).pack(side="left", padx=(0, 8))
+            ui.secondary(master, t("Save diagnostics package"), self._diagnostics,
+                         width=10).pack(side="left", padx=(0, 8))
             ui.secondary(master, t("Run the first-start setup again"), self.app.show_wizard,
                          width=10).pack(side="left")
         s.full(buttons, pady=(6, 8))
         s.end()
 
+    def _diagnostics(self) -> None:
+        from .error_dialog import open_diagnostics
 
-def autostart_command() -> str:
-    from .app import start_command
-
-    return start_command() + " --minimized"
+        open_diagnostics(self.app)
 
 
 def sync_autostart(settings: config.Settings) -> None:
     """Makes the Run entry match the setting (also fixes a moved installation)."""
-    enabled = bool(settings["start_with_windows"])
-    current = winshell.autostart_command()
-    wanted = autostart_command()
-    if enabled and current != wanted:
-        winshell.set_autostart(True, wanted)
-    elif not enabled and current is not None and "ucho.pyw" in current.lower():
-        # Only an entry this app wrote; a "Ucho" entry made by hand stays.
-        winshell.set_autostart(False, wanted)
+    platforms.shell().autostart_sync(bool(settings["start_with_windows"]))

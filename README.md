@@ -56,6 +56,7 @@ Windows 10 or 11, 16 GB RAM recommended, about 3 GB of disk (8 GB with summaries
 - Options also work with the double-click file: `install.cmd -WithSummary`.
 - Every run is logged to `install.log` in the app folder. Ucho is not code-signed yet, so Windows may warn before running `Ucho-Setup.exe` or `install.cmd`.
 - Silent install for IT: `Ucho-Setup.exe /VERYSILENT` (no questions; Setup waits for `install.ps1` and logs to `install.log`).
+- **Something went wrong?** The error dialog, or Settings → About → *Save diagnostics package*, saves a ZIP to Downloads (log with your dictated text and meeting titles removed, versions, hardware, settings without personal paths) and opens an e-mail draft; you attach the file and send it yourself. Details in [PRIVACY.md](PRIVACY.md#diagnostics-package).
 
 </details>
 

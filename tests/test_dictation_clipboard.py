@@ -8,11 +8,7 @@ fakes; nothing touches the real clipboard or sends keys. The real
 """
 from __future__ import annotations
 
-import sys
-
 import pytest
-
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 
 TARGET, OTHER, OURS, DESKTOP = 101, 202, 303, 404
 PIDS = {TARGET: 11, OTHER: 22, OURS: 33, DESKTOP: 44}

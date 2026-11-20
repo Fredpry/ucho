@@ -52,7 +52,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import config, llm, session, titles, transcribe
+from . import config, downloads, llm, session, titles, transcribe
 from .events import Emitter
 from .i18n import t
 from .merge import (META_FILE, TRANSCRIPT_COMPLETE, TRANSCRIPT_PARTIAL, TRANSCRIPTION_CANCELLED,
@@ -94,6 +94,11 @@ class MeetingController(Emitter):
         self.live_segments: list[Segment] = []
         self._live_meta: dict = {}
         self._caches: dict[str, object] = {}  # folder key -> live_meeting.ChunkCache
+        # Folder key -> the speech model the session was recorded for (#28): a
+        # fallback model stays the session's model even when the chosen one
+        # arrives before its transcription starts.
+        self._models: dict[str, str] = {}
+        self.session_model = ""  # the speech model of the recording running now
 
     @property
     def settings(self) -> config.Settings:
@@ -139,6 +144,7 @@ class MeetingController(Emitter):
             if same_folder(entry[0], folder):
                 self._queue.remove(entry)
                 self._caches.pop(_folder_key(entry[0]), None)
+                self._models.pop(_folder_key(entry[0]), None)
                 self._emit("state")
                 return True
         return False
@@ -180,6 +186,15 @@ class MeetingController(Emitter):
     def start(self, name: str = "") -> bool:
         if self.recording:
             return False
+        # No speech model on the disk at all (still downloading, or missing): nothing
+        # could transcribe the recording, so it does not start (#28).
+        blocked = downloads.recording_blocked(self.app)
+        if blocked:
+            self.app.refuse_recording(blocked)
+            return False
+        chosen = self.settings["model"]
+        # The chosen model, or another downloaded one while it is not ready.
+        model = downloads.speech_model_for(self.app, chosen) or chosen
         from . import audio
 
         typed = name.strip()
@@ -188,7 +203,7 @@ class MeetingController(Emitter):
         now = datetime.now()
         stamp = now.strftime("%Y-%m-%d_%H-%M")
         folder = self.settings.recordings_dir / f"{stamp}_{slug(name) or 'Meeting'}"
-        live = self._new_live(folder, name, now, name_source=name_source)
+        live = self._new_live(folder, name, now, model, name_source=name_source)
         recorder = audio.Recorder(
             tracks=self.settings["tracks"],
             microphone=self.settings["microphone_name"],
@@ -196,6 +211,7 @@ class MeetingController(Emitter):
             microphone_index=self.settings["microphone_index"],
             system_index=self.settings["system_index"],
             listener=live.feed if live is not None else None,
+            on_notice=self._audio_notice,
         )
         try:
             recorder.start(folder)
@@ -217,10 +233,24 @@ class MeetingController(Emitter):
         self.session_name = name
         self.session_name_source = name_source
         self.recording_start = time.time()
+        self.session_model = model
         self.message = (("; ".join(recorder.warnings)), "warning") if recorder.warnings else None
+        if model != chosen:
+            notice = downloads.fallback_notice(chosen, model)
+            log.info("Recording with %s: %s is not ready", model, chosen)
+            self.message = self.message or (notice, "working")
+            self._emit("notice", notice)
         log.info("Recording started")
         self._emit("state")
         return True
+
+    def _audio_notice(self, code: str, message: str) -> None:
+        """A problem found while recording (macOS system audio: silent or failed tap).
+
+        Runs on a recorder thread; the event reaches the UI on the Tk thread as
+        `("audio_warning", {"code": audio.NOTICE_*, "message": translated text})`.
+        """
+        self._emit("audio_warning", {"code": code, "message": message})
 
     def stop(self) -> None:
         if not self.recording or self.recorder is None:
@@ -247,7 +277,7 @@ class MeetingController(Emitter):
             "name": self.session_name,
             "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "duration_s": result["duration_s"],
-            "model": self.settings["model"],
+            "model": self.session_model or self.settings["model"],
             "language": self.settings["language"],
             "microphone_device": result["tracks"].get("microphone", {}).get("device"),
             "system_device": result["tracks"].get("system", {}).get("device"),
@@ -270,7 +300,7 @@ class MeetingController(Emitter):
                 self.message = (t("Could not save the recording details (meta.json)."), "warning")
         self._emit("state")
         if self.settings["transcribe_after_stop"]:
-            self.transcribe(result["folder"], files, meta, cache=cache)
+            self.transcribe(result["folder"], files, meta, cache=cache, model=meta["model"])
         else:
             self._emit("saved", result["folder"])
 
@@ -280,13 +310,12 @@ class MeetingController(Emitter):
         """Live transcription runs only when the recording is transcribed after the stop anyway."""
         return bool(self.settings["transcribe_after_stop"]) and self.settings.meeting_live()
 
-    def _new_live(self, folder: Path, name: str, started: datetime,
+    def _new_live(self, folder: Path, name: str, started: datetime, model: str,
                   name_source: str | None = None):
         """A LiveMeeting for a new recording, or None when off or the model is missing."""
         if not self.live_wanted():
             return None
-        model, device, language = (self.settings["model"], self.settings["device"],
-                                   self.settings["language"])
+        device, language = self.settings["device"], self.settings["language"]
         if not transcribe.model_downloaded(model):
             return None
         from .live_meeting import LiveMeeting
@@ -391,12 +420,15 @@ class MeetingController(Emitter):
         self._emit("speakers", folder)
         return True
 
-    def transcribe(self, folder: Path, files: dict, meta: dict, cache=None) -> bool:
+    def transcribe(self, folder: Path, files: dict, meta: dict, cache=None,
+                   model: str | None = None) -> bool:
         """Transcribes the session now, or queues it while another one is being worked on.
 
         True when the session is running or waiting in the queue (also when it
         already was: a session is never queued twice). `cache`: chunks
-        recognized while recording (live_meeting.ChunkCache).
+        recognized while recording (live_meeting.ChunkCache). `model`: the
+        speech model the session was recorded for; None ("Transcribe again"):
+        the chosen model, or a downloaded fallback while it is not ready.
         """
         if self.is_active(folder) or self.queue_position(folder):
             log.info("Transcription already running or queued")
@@ -405,20 +437,23 @@ class MeetingController(Emitter):
             self._queue.append((folder, files, meta))
             if cache is not None:
                 self._caches[_folder_key(folder)] = cache
+            if model is not None:
+                self._models[_folder_key(folder)] = model
             log.info("Transcription queued (%d waiting)", len(self._queue))
             self._emit("state")
             return True
-        return self._start(folder, files, meta, cache)
+        return self._start(folder, files, meta, cache, model)
 
     def _advance(self) -> None:
         """Starts the next queued session when nothing is running (UI thread)."""
         while self._queue and not self.busy:
             folder, files, meta = self._queue.popleft()
             cache = self._caches.pop(_folder_key(folder), None)
+            model = self._models.pop(_folder_key(folder), None)
             if not folder.is_dir():
                 log.warning("Queued session no longer exists - skipped")
                 continue
-            if self._start(folder, files, meta, cache):
+            if self._start(folder, files, meta, cache, model):
                 return
         self._emit("state")
         self._next_title()
@@ -427,12 +462,16 @@ class MeetingController(Emitter):
         """The current session is done (transcript, and summary when expected) or failed."""
         self.app.post(self._advance)
 
-    def _start(self, folder: Path, files: dict, meta: dict, cache=None) -> bool:
+    def _start(self, folder: Path, files: dict, meta: dict, cache=None,
+               model: str | None = None) -> bool:
         # Settings are read once at start and the app can sit in the tray for
         # weeks; every UI change goes to disk at once, so the file is at least
         # as fresh as memory.
         self.settings.load()
-        model, device = self.settings["model"], self.settings["device"]
+        if model is None:
+            chosen = self.settings["model"]
+            model = downloads.speech_model_for(self.app, chosen) or chosen
+        device = self.settings["device"]
         if not transcribe.model_downloaded(model):
             log.warning("Transcription skipped: model %r is not downloaded", model)
             self._emit("error", t("The model is not downloaded — open Settings."))
@@ -771,10 +810,10 @@ class MeetingController(Emitter):
         if self._queue:
             # Not saved: these sessions keep their audio and can be
             # transcribed later with "Transcribe again".
-            log.info("Quit with %d queued transcription(s) not started: %s", len(self._queue),
-                     ", ".join(folder.name for folder, _f, _m in self._queue))
+            log.info("Quit with %d queued transcription(s) not started", len(self._queue))
             self._queue.clear()
         self._caches.clear()
+        self._models.clear()
         if self._job is not None:
             self._job.cancel.set()
 

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -328,7 +327,6 @@ class _FakeDictApp:
         return "Ctrl+Shift+Space"
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 def test_dictation_controller_pause_cancel_quit_and_mic_failure(monkeypatch):
     from ucho import dictation
 
@@ -363,7 +361,6 @@ def test_dictation_controller_pause_cancel_quit_and_mic_failure(monkeypatch):
         eng.stop()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 @pytest.mark.parametrize("live_on", [True, False])
 def test_dictation_controller_finish_queues_final_job_before_resume(monkeypatch, live_on):
     from ucho import dictation
@@ -414,7 +411,6 @@ def test_dictation_controller_finish_queues_final_job_before_resume(monkeypatch,
         eng.stop()
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 def test_dictation_controller_status_waiting_text(monkeypatch):
     from ucho import dictation
 
@@ -509,7 +505,6 @@ def test_meeting_controller_shown_status():
     assert m_raises.shown_status == "Transcribing on GPU..."
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictation uses WinAPI")
 def test_cancel_during_tail_window_invalidates_scheduled_finish(monkeypatch):
     from ucho import dictation
 

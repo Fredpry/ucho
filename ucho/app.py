@@ -32,10 +32,11 @@ from collections.abc import Callable
 
 import customtkinter as ctk
 
-from . import config, hardware, i18n, retention, theme, ui, winshell
+from . import config, downloads, hardware, i18n, platforms, retention, theme, ui
 from .archive import Archive
 from .dictation import DictationController
 from .engine import Engine
+from . import diagnostics, error_dialog
 from .hotkeys import Hotkeys
 from .hotkeys import label as hotkey_label
 from .i18n import t
@@ -46,10 +47,12 @@ from .tray import Item, TrayIcon
 
 log = logging.getLogger(__name__)
 
-ICON_FILE = Path(__file__).resolve().parent / "assets" / "icon.ico"
-DICTATE_ICON_FILE = Path(__file__).resolve().parent / "assets" / "dictate.ico"
 TICK_MS = 66
 SIDEBAR_WIDTH = 212
+# The speech model is looked for on the disk again this often while it is
+# missing (it may arrive from the installer or another Ucho), and once more
+# after a download.
+MODEL_CHECK_S = 10.0
 # Audio retention runs 20 s after start (the window and the dictation preload
 # come first), then about once a day. The hourly check only compares two
 # numbers; a single 24 h timer could drift a lot across sleep and hibernation.
@@ -115,14 +118,27 @@ class App(ctk.CTk):
         self._toast_until = 0.0
         self._taskbar = None
         self._threads: list[threading.Thread] = []
+        # Model downloads (wizard, Settings, the main window) and the speech
+        # model check that blocks recording while no model is on the disk.
+        # Download threads are not joined at quit: a download can take minutes.
+        self.downloads = downloads.Downloads(self.post)
+        self.downloads.listen(self._download_finished)
+        self._speech_downloaded: frozenset[str] | None = None  # speech models on the disk
+        self._speech_checked_at = 0.0
+        self._speech_generation = 0
+        self._speech_checking = False
+        self._blocked_shown: bool | None = None
+        self._models_shown = None
 
         self._setup_window()
         self.tray = TrayIcon(config.APP_NAME, [
             Item(lambda: t("Show Ucho"), lambda: self.post(self.show_main), default=True),
             Item(lambda: t("Stop recording") if self.meeting.recording else t("Record a meeting"),
-                 lambda: self.post(self.toggle_recording)),
+                 lambda: self.post(self.toggle_recording),
+                 enabled=lambda: self.meeting.recording or not self.recording_blocked(False)),
             Item(lambda: t("Stop dictation") if self.dictation.recording else t("Dictate"),
-                 lambda: self.post(self.dictation.toggle)),
+                 lambda: self.post(self.dictation.toggle),
+                 enabled=lambda: self.dictation.recording or not self.recording_blocked(False)),
             Item(lambda: t("Dictation window"), lambda: self.post(self.show_dictation),
                  visible=lambda: self.settings["layout"] == "tray"),
             None,
@@ -136,12 +152,15 @@ class App(ctk.CTk):
         self.build()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.report_callback_exception = self._on_callback_error
+        # Unhandled errors (Tk callbacks, threads) end in the error dialog (#29).
+        error_dialog.install(self)
 
         self.hotkey_errors = self.hotkeys.start({"record": self.settings["hotkey"],
                                                  "dictate": self.settings["dictation_hotkey"]})
         if self.settings["tray"] or self.settings["layout"] == "tray":
             self.tray.start()
         self._start_thread(self._load_devices, "devices")
+        self._check_speech_async()
         if not self.smoke:
             # Describe the window for the taskbar before anything heavy starts:
             # loading an OpenVINO model holds the GIL for 10+ s, and a window
@@ -162,7 +181,8 @@ class App(ctk.CTk):
     def _setup_window(self) -> None:
         self.title(config.APP_NAME)
         scaling = ctk.ScalingTracker.get_window_scaling(self)
-        work_w, work_h = _work_area()
+        area = platforms.shell().work_area()
+        work_w, work_h = area if area else (0, 0)
         if not work_w:
             work_w, work_h = self.winfo_screenwidth(), self.winfo_screenheight() - 48
         # Logical sizes (customtkinter scales them). A 1366x768 screen at 125 %
@@ -173,57 +193,53 @@ class App(ctk.CTk):
         self.geometry(f"{width}x{height}")
         self.minsize(min(820, width), min(500, height))
         self.configure(fg_color=C.bg)
+        if platforms.family() == "macos":
+            self._install_macos_handlers()
         self._set_icon()
         # customtkinter repaints the title bar after ~200 ms (dark mode) and
         # Windows can lose the icon on the way; set it again afterwards.
         self.after(400, self._set_icon)
 
+    def _install_macos_handlers(self) -> None:
+        """Dock and app menu events that Tk on macOS turns into Tcl commands.
+
+        A click on the Dock icon while the window is closed (withdrawn) calls
+        `::tk::mac::ReopenApplication`: show the window like a second start.
+        Cmd+Q and "Quit" in the app menu call `::tk::mac::Quit`; without it Tk
+        ends the process with Tcl `exit`, skipping the shutdown (recording,
+        engine, settings).
+        """
+        self.createcommand("::tk::mac::ReopenApplication", lambda *_args: self.on_command("show"))
+        self.createcommand("::tk::mac::Quit", lambda *_args: self.quit_app())
+
     def _set_icon(self) -> None:
-        if not ICON_FILE.exists():
-            return
-        try:
-            self.iconbitmap(default=str(ICON_FILE))
-            self.iconbitmap(str(ICON_FILE))
-        except Exception:
-            pass
+        platforms.shell().set_window_icon(self)
 
     def _on_callback_error(self, exc, value, trace) -> None:
         log.error("Unhandled exception in the UI", exc_info=(exc, value, trace))
 
     def window_handle(self, window=None) -> int:
         """Handle of the top-level window the taskbar sees (wm_frame, not winfo_id)."""
-        window = window or self
-        try:
-            return int(window.wm_frame(), 16)
-        except Exception:
-            return window.winfo_id()
+        return platforms.shell().window_handle(window or self)
 
     def describe_window(self, window=None, dictation: bool = False) -> None:
-        if sys.platform != "win32" or self.smoke:
+        if self.smoke:
             return
-        command = start_command() + (" --dictate" if dictation else "")
-        icon_file = DICTATE_ICON_FILE if dictation else ICON_FILE
-        ok = winshell.describe_window(self.window_handle(window), command, config.APP_NAME,
-                                      f"{icon_file},0", config.APP_ID)
-        log.info("Taskbar description of the %s window: %s", "dictation" if dictation else "main", ok)
+        platforms.shell().describe_window(window or self, dictation)
 
     def _after_start(self) -> None:
         if self.smoke:
             return
         self.describe_window()
-        self._taskbar = winshell.TaskbarProgress(self.window_handle())
+        shell = platforms.shell()
+        self._taskbar = shell.progress(self)
         tasks = [
-            {"title": t("Record a meeting"), "arguments": f'"{STARTER}" --record',
-             "description": t("Start recording a meeting with Ucho"), "icon": f"{ICON_FILE},0"},
-            {"title": t("Dictate"), "arguments": f'"{STARTER}" --dictate',
-             "description": t("Open Ucho dictation"), "icon": f"{DICTATE_ICON_FILE},0"},
+            ("--record", t("Record a meeting"), t("Start recording a meeting with Ucho")),
+            ("--dictate", t("Dictate"), t("Open Ucho dictation")),
         ]
-        for task in tasks:
-            task.update(program=str(_pythonw()), working_dir=str(config.PROJECT_DIR))
 
         def taskbar_setup():
-            log.info("Jump List: %s", winshell.set_jump_list(config.APP_ID, tasks))
-            _stamp_shortcuts()
+            shell.after_start(config.APP_ID, tasks)
             from .settings_screen import sync_autostart
 
             sync_autostart(self.settings)
@@ -268,6 +284,12 @@ class App(ctk.CTk):
     def _meeting_event(self, event: str, data) -> None:
         if event == "error":
             self.toast(str(data), "warning", 6)
+        elif event == "notice":
+            self.toast(str(data), "ready", 6)
+        elif event == "audio_warning":
+            from .permissions_ui import show_system_audio_unavailable
+
+            show_system_audio_unavailable(self, str(data.get("message") or "") or None)
         elif event == "summary_error":
             log.warning("Summary skipped: %s", data)
             self.toast(t("No summary: {reason}", reason=data), "warning", 6)
@@ -338,6 +360,8 @@ class App(ctk.CTk):
         if self.settings["layout"] == "tray":
             ui.ghost(sidebar, t("Dictation window"), self.show_dictation, "window",
                      color=C.text_muted, anchor="w").grid(row=11, column=0, sticky="ew", padx=12)
+
+        self._build_models_card(sidebar)
 
         self._activity = ctk.CTkFrame(sidebar, fg_color=C.info_soft, corner_radius=theme.RADIUS_MD)
         self._activity.grid_columnconfigure(0, weight=1)
@@ -461,7 +485,7 @@ class App(ctk.CTk):
 
                 self.dictation_window = DictationWindow(self)
                 self.dictation_window.withdraw()
-            _show_without_focus(self.window_handle(self.dictation_window))
+            platforms.shell().show_without_focus(self.dictation_window)
 
     def on_command(self, command: str) -> None:
         """A second start of Ucho (shortcut, pinned tile, Jump List)."""
@@ -492,6 +516,13 @@ class App(ctk.CTk):
             return t("Summarizing") + queued, "working"
         if d.queued:
             return t("Recognizing"), "working"
+        readiness = self.speech_readiness(False)
+        if readiness.running:
+            fraction = readiness.progress.fraction
+            percent = f" {int(fraction * 100)}%" if fraction is not None else ""
+            return t("Downloading the model") + percent, "working"
+        if readiness.blocks:
+            return t("No speech model"), "warning"
         return t("Ready"), "ready"
 
     def dictation_hotkey_label(self) -> str:
@@ -515,6 +546,7 @@ class App(ctk.CTk):
 
     def settings_changed(self) -> None:
         """Model, device or dictation settings changed: reload what dictation keeps in memory."""
+        self._check_speech_model()
         if not self.smoke:
             self.dictation.preload()
 
@@ -524,6 +556,230 @@ class App(ctk.CTk):
             self.settings.recordings_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             pass
+
+    # --- models: downloads and whether recording can start ---------------------------
+
+    def speech_readiness(self, check: bool = True) -> downloads.Readiness:
+        """State of the transcription model chosen in Settings, with the fallback model.
+
+        `check`: look at the disk now when it was not checked yet (a start of a
+        recording); the UI loop passes False and treats "not checked" as ready.
+        """
+        model = self.settings["model"]
+        downloaded = self._speech_downloaded
+        if downloaded is None and check:
+            downloaded = self._check_speech_model()
+        if downloaded is None:
+            return downloads.speech_readiness(model, None, self.downloads.get(model))
+        return downloads.speech_readiness(model, model in downloaded, self.downloads.get(model),
+                                          self._fallback(model, downloaded))
+
+    def _fallback(self, preferred: str, downloaded: frozenset[str]) -> str | None:
+        running = [item.key for item in self.downloads.running()]
+        return downloads.fallback_speech_model(
+            preferred, downloaded, running,
+            prefer=(self.settings["model"], self.settings.dictation_model()))
+
+    def speech_model_for(self, preferred: str, check: bool = True) -> str | None:
+        """The speech model to use instead of `preferred`: itself when ready, else a fallback.
+
+        None when no speech model is on the disk. Not checked yet (and
+        `check` False): `preferred`, as before the check existed.
+        """
+        downloaded = self._speech_downloaded
+        if downloaded is None and check:
+            downloaded = self._check_speech_model()
+        if downloaded is None:
+            return preferred
+        return self._fallback(preferred, downloaded)
+
+    def recording_blocked(self, check: bool = True) -> str | None:
+        """Why a meeting or a dictation cannot start now (no speech model at all), or None."""
+        return downloads.block_reason(self.speech_readiness(check))
+
+    def refuse_recording(self, reason: str) -> None:
+        """A meeting or dictation was asked for without a speech model: say why."""
+        log.info("Recording not started: speech model %s", self.speech_readiness(False).state)
+        self.toast(reason, "warning", 6)
+        if self.state() in ("withdrawn", "iconic"):
+            # The hotkey or the tray while the window is hidden: the toast would be unseen.
+            self.tray.notify(reason)
+
+    def _speech_candidates(self) -> list[str]:
+        from . import transcribe
+
+        models = transcribe.offered_models()
+        for model in (self.settings["model"], self.settings.dictation_model()):
+            if model not in models:
+                models.append(model)
+        return models
+
+    def _check_speech_model(self) -> frozenset[str]:
+        """Looks for the speech models on the disk (UI thread, fast after the first import)."""
+        from . import transcribe
+
+        downloaded = frozenset(m for m in self._speech_candidates() if transcribe.model_downloaded(m))
+        self._speech_generation += 1
+        self._apply_speech_check(downloaded)
+        return downloaded
+
+    def _apply_speech_check(self, downloaded: frozenset[str]) -> None:
+        self._speech_downloaded = downloaded
+        self._speech_checked_at = time.monotonic()
+        for model in downloaded:
+            self.downloads.forget(model)
+
+    def _check_speech_async(self) -> None:
+        """The same check off the UI thread: the first one imports huggingface_hub."""
+        if self._speech_checking:
+            return
+        self._speech_checking = True
+        self._speech_checked_at = time.monotonic()
+        candidates, generation = self._speech_candidates(), self._speech_generation
+
+        def work() -> None:
+            from . import transcribe
+
+            downloaded = frozenset(m for m in candidates if transcribe.model_downloaded(m))
+
+            def apply() -> None:
+                self._speech_checking = False
+                self._speech_checked_at = time.monotonic()
+                # A check on the UI thread (settings change, finished download) is newer.
+                if generation == self._speech_generation:
+                    self._apply_speech_check(downloaded)
+            self.post(apply)
+
+        threading.Thread(target=work, name="model check", daemon=True).start()
+
+    def download_model(self, repo: str, kind: str = downloads.SPEECH,
+                       on_done: Callable[[str | None], None] | None = None) -> bool:
+        """Downloads a model from Hugging Face in the background, with progress in the window."""
+        from . import transcribe
+
+        return self.downloads.start(
+            repo, downloads.model_name(repo), kind,
+            lambda bar: transcribe.model_path(repo, download=True, tqdm_class=bar), on_done)
+
+    def download_speech_model(self) -> None:
+        self.download_model(self.settings["model"])
+
+    def download_speaker_models(self, on_done: Callable[[str | None], None] | None = None) -> bool:
+        from . import diarize
+
+        return self.downloads.start(downloads.SPEAKER_MODELS, t("Speaker detection models"),
+                                    downloads.SPEAKERS, diarize.download_models, on_done)
+
+    def _download_finished(self, item: downloads.Download) -> None:
+        if item.error is not None:
+            if self.state() in ("withdrawn", "iconic"):
+                self.tray.notify(t("Model download failed: {error}", error=item.error))
+            if item.exception is not None:
+                # The cause in plain words, a hint and the diagnostics package (#29).
+                error_dialog.show_error(self, item.exception, context=diagnostics.MODEL_DOWNLOAD)
+            else:
+                self.toast(t("Model download failed: {error}", error=item.error), "warning", 8)
+        if item.kind == downloads.SPEECH:
+            self._check_speech_model()
+            if item.error is None and item.key in (self.settings["model"],
+                                                   self.settings.dictation_model()):
+                self.settings_changed()
+        self.tray.refresh()
+
+    def _build_models_card(self, sidebar) -> None:
+        """Sidebar card: a running download, or the missing speech model with a button."""
+        self._models = ctk.CTkFrame(sidebar, fg_color=C.info_soft, corner_radius=theme.RADIUS_MD)
+        self._models.grid_columnconfigure(0, weight=1)
+        self._models_title = ui.label(self._models, "", theme.XS + 1, "bold", anchor="w",
+                                      justify="left", wraplength=164)
+        self._models_title.grid(row=0, column=0, sticky="ew", padx=12, pady=(8, 2))
+        self._models_text = ui.label(self._models, "", theme.XS, anchor="w", justify="left",
+                                     wraplength=164)
+        self._models_text.grid(row=1, column=0, sticky="ew", padx=12)
+        self._models_bar = ctk.CTkProgressBar(self._models, height=6, progress_color=C.info)
+        self._models_button = ui.secondary(self._models, "", self.download_speech_model,
+                                           width=10, height=30)
+        self._models_shown = None
+
+    def models_card_content(self) -> tuple | None:
+        """(style, title, text, fraction or None, button text or None) for the card, or None."""
+        readiness = self.speech_readiness(False)
+        name = downloads.model_name(readiness.model)
+        size = downloads.model_size(readiness.model)
+        if readiness.state == downloads.FALLBACK:
+            meanwhile = t("Recording uses {model} meanwhile.",
+                          model=downloads.model_name(readiness.fallback or ""))
+            if readiness.running:
+                return ("info", t("Downloading the speech model"),
+                        f"{name}\n{readiness.progress.describe()}\n{meanwhile}",
+                        readiness.progress.fraction or 0.0, None)
+            if readiness.error:
+                return ("warning", t("Download failed"),
+                        t("{model}: {error}", model=name, error=readiness.error) + f"\n{meanwhile}",
+                        None, t("Retry"))
+            return ("info", t("Speech model not downloaded"), f"{name}\n{meanwhile}", None,
+                    t("Download ({size})", size=size))
+        if readiness.state == downloads.DOWNLOADING:
+            return ("info", t("Downloading the speech model"),
+                    f"{name}\n{readiness.progress.describe()}\n"
+                    + t("Recording works when it is done."),
+                    readiness.progress.fraction or 0.0, None)
+        if readiness.state == downloads.MISSING:
+            return ("warning", t("No speech model"),
+                    t("Recording needs the speech model {model}. It is downloaded once from "
+                      "Hugging Face.", model=name),
+                    None, t("Download ({size})", size=size))
+        if readiness.state == downloads.FAILED:
+            return ("warning", t("Download failed"),
+                    t("{model}: {error}", model=name, error=readiness.error or ""),
+                    None, t("Retry"))
+        running = self.downloads.running()
+        if running:
+            item = running[0]
+            return ("info", t("Downloading a model"), f"{item.name}\n{item.progress.describe()}",
+                    item.progress.fraction or 0.0, None)
+        return None
+
+    def _update_models(self) -> None:
+        readiness = self.speech_readiness(False)
+        blocked = readiness.blocks
+        if blocked != self._blocked_shown:
+            self._blocked_shown = blocked
+            self.tray.refresh()
+        # Not there yet: the model may arrive from the installer or another Ucho.
+        waiting = readiness.state in (downloads.MISSING, downloads.FAILED, downloads.UNKNOWN) or (
+            readiness.state == downloads.FALLBACK and not readiness.running)
+        if waiting and time.monotonic() - self._speech_checked_at > MODEL_CHECK_S:
+            self._check_speech_async()
+        if not self._screens or not hasattr(self, "_models") or not self._models.winfo_exists():
+            return
+        content = self.models_card_content()
+        # Progress in whole percents: no reconfiguring 15 times a second.
+        key = None if content is None else (content[:3], None if content[3] is None
+                                            else round(content[3], 2), content[4])
+        if key == self._models_shown:
+            return
+        self._models_shown = key
+        if content is None:
+            self._models.grid_forget()
+            return
+        style, title, text, fraction, button = content
+        color, soft = (C.info, C.info_soft) if style == "info" else (C.warning_ink, C.warning_soft)
+        self._models.configure(fg_color=soft)
+        self._models_title.configure(text=title, text_color=color)
+        self._models_text.configure(text=text)
+        if fraction is not None:
+            self._models_bar.set(fraction)
+            self._models_bar.grid(row=2, column=0, sticky="ew", padx=12, pady=(6, 10))
+        else:
+            self._models_bar.grid_forget()
+        if button is not None:
+            self._models_button.configure(text=button)
+            self._models_button.grid(row=3, column=0, sticky="w", padx=12, pady=(8, 10))
+        else:
+            self._models_button.grid_forget()
+        self._models_text.grid_configure(pady=(0, 10) if fraction is None and button is None else 0)
+        self._models.grid(row=6, column=0, sticky="ew", padx=12, pady=(14, 0))
 
     # --- audio retention -------------------------------------------------------------
 
@@ -609,11 +865,9 @@ class App(ctk.CTk):
         self.show("settings")
 
     def set_autostart(self, enabled: bool) -> None:
-        from .settings_screen import autostart_command
-
         self.settings["start_with_windows"] = enabled
         self.settings.save()
-        if not self.smoke and not winshell.set_autostart(enabled, autostart_command()):
+        if not self.smoke and not platforms.shell().autostart_set(enabled):
             self.toast(t("Could not change the autostart entry."), "warning")
 
     # --- hardware ------------------------------------------------------------------------
@@ -730,8 +984,9 @@ class App(ctk.CTk):
                 break
             try:
                 fn()
-            except Exception:
+            except Exception as error:
                 log.exception("UI callback failed")
+                error_dialog.report(self, error)
         try:
             self._update()
         except Exception:
@@ -748,18 +1003,25 @@ class App(ctk.CTk):
         if self._toast is not None and self._toast.winfo_exists() and time.monotonic() > self._toast_until:
             self._toast.place_forget()
         self._update_activity()
+        self._update_models()
         active = self.meeting.recording or self.dictation.recording
         self.tray.set_state(active, t("{app} - recording", app=config.APP_NAME) if active else None)
         if self._taskbar is not None:
             m = self.meeting
             if active:
-                self._taskbar.set(winshell.TaskbarProgress.ERROR, 100)
+                self._taskbar.set("error", 100)
             elif m.transcribing:
-                self._taskbar.set(winshell.TaskbarProgress.NORMAL, max(1, int(m.progress * 100)))
+                self._taskbar.set("normal", max(1, int(m.progress * 100)))
             elif m.summarizing or self.dictation.queued:
-                self._taskbar.set(winshell.TaskbarProgress.INDETERMINATE)
+                self._taskbar.set("indeterminate")
+            elif running := self.downloads.running():
+                fraction = running[0].progress.fraction
+                if fraction is None:
+                    self._taskbar.set("indeterminate")
+                else:
+                    self._taskbar.set("normal", max(1, int(fraction * 100)))
             else:
-                self._taskbar.set(winshell.TaskbarProgress.NONE)
+                self._taskbar.set("none")
 
     def _update_activity(self) -> None:
         if not self._screens or not hasattr(self, "_activity") or not self._activity.winfo_exists():
@@ -821,78 +1083,11 @@ class App(ctk.CTk):
 
 # --- helpers --------------------------------------------------------------------------------
 
-STARTER = config.PROJECT_DIR / "ucho.pyw"
-
-
-def _pythonw() -> Path:
-    interpreter = Path(sys.executable)
-    windowless = interpreter.with_name("pythonw.exe")
-    return windowless if windowless.exists() else interpreter
-
-
-def start_command() -> str:
-    """Command the taskbar uses to start the app again from a pinned tile.
-
-    Deliberately `ucho.pyw`, not `-m ucho`: the tile starts without the
-    project working directory, and the script adds it to `sys.path` itself.
-    """
-    return f'"{_pythonw()}" "{STARTER}"'
-
 
 def _last_dictation() -> str:
     from .dictate import last_text_from_log
 
     return last_text_from_log()
-
-
-def _stamp_shortcuts() -> None:
-    """Our shortcuts get the AppUserModelID, so a pinned tile and the window are one button.
-
-    Only shortcuts that start this copy of Ucho: another installation (or an
-    older Ucho Dictate) keeps its own id.
-    """
-    for shortcut in winshell.shortcut_paths():
-        arguments = winshell.shortcut_arguments(shortcut) if shortcut.exists() else None
-        if arguments and str(STARTER).lower() in arguments.lower():
-            log.info("Shortcut %s id: %s", shortcut.name,
-                     winshell.set_shortcut_app_id(shortcut, config.APP_ID))
-
-
-def _work_area() -> tuple[int, int]:
-    """Size of the primary monitor without the taskbar, in physical pixels."""
-    if sys.platform != "win32":
-        return 0, 0
-    try:
-        import ctypes
-        from ctypes import wintypes
-
-        rect = wintypes.RECT()
-        ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)  # SPI_GETWORKAREA
-        return rect.right - rect.left, rect.bottom - rect.top
-    except Exception:
-        return 0, 0
-
-
-def _show_without_focus(hwnd: int) -> None:
-    if sys.platform == "win32" and hwnd:
-        import ctypes
-
-        ctypes.windll.user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
-
-
-def _set_app_id() -> None:
-    """Our own AppUserModelID; otherwise the taskbar shows the pythonw.exe icon.
-
-    Must be called before the first window is created.
-    """
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(config.APP_ID)
-    except Exception:
-        log.debug("Could not set AppUserModelID", exc_info=True)
 
 
 class _ErrorCounter(logging.Handler):
@@ -916,6 +1111,10 @@ def run(argv: list[str] | None = None) -> int:
     if options.smoke_test is not None:
         return smoke_test(options)
 
+    try:
+        config.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     # Capped: about 2 MB plus one older file (ucho.log.1); the log holds dictated text.
     logging.basicConfig(
         level=logging.INFO,
@@ -934,7 +1133,7 @@ def run(argv: list[str] | None = None) -> int:
     used = i18n.set_language(settings["ui_language"])
     log.info("Start %s %s (UI: %s, layout: %s)", config.APP_NAME, config.VERSION, used,
              settings["layout"])
-    _set_app_id()
+    platforms.shell().set_app_identity()
     config.prepare_dirs(settings)
     app = App(settings, options)
     instance.listen(lambda c: app.post(lambda: app.on_command(c)))
@@ -1016,4 +1215,4 @@ def _synthetic_session(recordings: Path) -> None:
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
 
-__all__ = ["App", "Options", "run", "smoke_test", "start_command"]
+__all__ = ["App", "Options", "run", "smoke_test"]

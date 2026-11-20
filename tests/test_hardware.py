@@ -3,6 +3,7 @@
 """Rule table, step-down and settings for ucho.hardware on fake hardware profiles."""
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 import sys
@@ -74,7 +75,7 @@ def test_every_model_in_rules_is_known():
     for rule in hardware.RULES.values():
         assert rule.model in config.MODELS
         assert rule.dictation_model in config.MODELS
-        assert rule.model in config.REVISIONS
+        assert config.split_model_id(rule.model)[0] in config.REVISIONS
         assert rule.step_down is None or rule.step_down in hardware.RULES
 
 
@@ -174,7 +175,8 @@ def test_profile_without_openvino(monkeypatch):
     p = hardware.profile()
     assert p.devices == [] and p.openvino_version == ""
     assert p.logical_cores >= 1
-    assert hardware.recommend(p).device == "CPU"
+    # The Windows rules are under test here; the Apple Silicon ones have their own tests.
+    assert hardware.recommend(dataclasses.replace(p, system="win32")).device == "CPU"
 
 
 def test_profile_survives_failing_probes(monkeypatch):
@@ -185,7 +187,7 @@ def test_profile_survives_failing_probes(monkeypatch):
         monkeypatch.setattr(hardware, name, boom)
     p = hardware.profile()
     assert p.ram_total_gb == 0.0 and p.devices == []
-    assert hardware.recommend(p).rule == "low_ram"
+    assert hardware.recommend(dataclasses.replace(p, system="win32")).rule == "low_ram"
 
 
 def test_profile_reads_this_machine():

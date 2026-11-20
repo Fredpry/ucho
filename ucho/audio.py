@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Parallel recording of two independent audio tracks.
 
-The "microphone" track is a normal WASAPI input, the "system" track is WASAPI
-loopback, i.e. whatever comes out of the speakers. Standard PortAudio does not
-expose loopback on Windows, which is why we use the PyAudioWPatch fork.
+Device discovery and stream capture are delegated to the active platform audio
+backend (`ucho/platforms/`). On Windows, the "microphone" track is a normal
+WASAPI input, the "system" track is WASAPI loopback, i.e. whatever comes out of
+the speakers. Standard PortAudio does not expose loopback on Windows, which is
+why we use the PyAudioWPatch fork.
 
 Design assumptions:
-  * the PortAudio callback does NOT touch the disk - it puts raw bytes in a
+  * the audio callback does NOT touch the disk - it puts raw bytes in a
     queue and a separate thread writes. Blocking I/O in the callback causes
     gaps in the audio.
   * WASAPI returns garbage when asked for one channel, so we read stereo and
@@ -23,13 +25,15 @@ import logging
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import soundfile as sf
 
+from . import platforms
 from .i18n import t
 from .session import MEETING_FILE, MICROPHONE_FILE
 
@@ -38,7 +42,8 @@ try:
 except ImportError:  # pragma: no cover - resampling is required
     soxr = None
 
-import pyaudiowpatch as pyaudio
+if TYPE_CHECKING:
+    import pyaudiowpatch as pyaudio
 
 log = logging.getLogger(__name__)
 
@@ -49,9 +54,21 @@ log = logging.getLogger(__name__)
 PORTAUDIO_LOCK = threading.RLock()
 
 
-def new_pyaudio() -> pyaudio.PyAudio:
+def __getattr__(name: str):
+    if name == "pyaudio":
+        import pyaudiowpatch
+
+        return pyaudiowpatch
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def new_pyaudio() -> pyaudio.PyAudio | None:
+    if platforms.family() != "windows":
+        return None
+    import pyaudiowpatch
+
     with PORTAUDIO_LOCK:
-        return pyaudio.PyAudio()
+        return pyaudiowpatch.PyAudio()
 
 
 def close_pyaudio(p) -> None:
@@ -96,98 +113,23 @@ def _from_info(info: dict, loopback: bool) -> DeviceInfo:
     )
 
 
-def _input_api(p) -> int:
-    """The PortAudio host API microphones are listed from.
-
-    PortAudio lists every microphone once per Windows audio API: MME (names cut
-    to 31 characters, plus the "Microsoft Sound Mapper"), DirectSound (plus the
-    "Primary Sound Capture Driver") and WASAPI. We list WASAPI only, the API the
-    system-audio loopback uses too, so each device appears once with its full
-    name. Without WASAPI we fall back to the default API.
-    """
-    try:
-        return int(p.get_host_api_info_by_type(pyaudio.paWASAPI)["index"])
-    except Exception:
-        return int(p.get_default_host_api_info()["index"])
-
-
 def microphones(p) -> tuple[list[DeviceInfo], DeviceInfo | None, dict[int, str]]:
     """(microphones, default microphone, names of all input devices by index).
 
     The names by index resolve a choice saved by earlier versions, which
-    stored a PortAudio index (see `find_device`).
+    stored a PortAudio index (see `find_device`). Delegates to the active
+    platform backend (or the Windows PortAudio helper when given `p`).
     """
-    api = _input_api(p)
-    found: list[DeviceInfo] = []
-    names: dict[int, str] = {}
-    for i in range(p.get_device_count()):
-        try:
-            info = p.get_device_info_by_index(i)
-        except Exception:
-            continue
-        if int(info.get("maxInputChannels", 0)) <= 0:
-            continue
-        names[i] = str(info["name"])
-        if info.get("isLoopbackDevice") or int(info.get("hostApi", -1)) != api:
-            continue
-        found.append(_from_info(info, loopback=False))
+    if p is None:
+        devices = list_devices()
+        return devices["microphones"], devices["default_microphone"], devices["names_by_index"]
+    from .platforms.windows import audio as windows_audio
 
-    default: DeviceInfo | None = None
-    try:
-        index = int(p.get_host_api_info_by_index(api)["defaultInputDevice"])
-        default = next((d for d in found if d.index == index), None)
-    except Exception:
-        pass
-    if default is None:
-        try:
-            default = _from_info(p.get_default_input_device_info(), loopback=False)
-        except Exception as error:
-            log.warning("No default microphone: %s", error)
-    return found, default, names
-
-
-def _device_map() -> tuple[list[DeviceInfo], list[DeviceInfo],
-                           DeviceInfo | None, DeviceInfo | None, dict[int, str]]:
-    """Returns (microphones, loopback_outputs, default_microphone, default_output, names).
-
-    PortAudio caches the device list at initialization, so each time we create
-    a fresh PyAudio object and close it right away.
-    """
-    loopbacks: list[DeviceInfo] = []
-    default_sys: DeviceInfo | None = None
-
-    p = new_pyaudio()
-    try:
-        try:
-            for info in p.get_loopback_device_info_generator():
-                loopbacks.append(_from_info(info, loopback=True))
-        except Exception as error:  # no WASAPI or no output devices
-            log.warning("Could not list loopback devices: %s", error)
-
-        mics, default_mic, names = microphones(p)
-        # A loopback is never offered as a microphone.
-        loopback_indices = {d.index for d in loopbacks}
-        mics = [d for d in mics if d.index not in loopback_indices]
-
-        try:
-            default_sys = _from_info(p.get_default_wasapi_loopback(), loopback=True)
-        except Exception as error:
-            log.warning("No default loopback device: %s", error)
-    finally:
-        close_pyaudio(p)
-
-    return mics, loopbacks, default_mic, default_sys, names
+    return windows_audio.microphones(p)
 
 
 def list_devices() -> dict:
-    mics, loopbacks, default_mic, default_sys, names = _device_map()
-    return {
-        "microphones": mics,
-        "system": loopbacks,
-        "default_microphone": default_mic,
-        "default_system": default_sys,
-        "names_by_index": names,
-    }
+    return platforms.audio().list_devices()
 
 
 # MME, the oldest Windows audio API, cuts device names to this many characters.
@@ -270,6 +212,43 @@ def migrate_device_choices(settings, devices: dict) -> bool:
 # write thread, so it must be quick.
 Listener = Callable[[str, np.ndarray], None]
 
+# Gets (code, translated message) for a problem found while recording, on a
+# worker thread (the meeting controller turns it into an "audio_warning" event).
+Notice = Callable[[str, str], None]
+NOTICE_SYSTEM_SILENT = "system_audio_silent"
+NOTICE_SYSTEM_FAILED = "system_audio_failed"
+
+# A macOS process tap without the permission delivers exact zeros.
+SILENCE_LIMIT_S = 20.0
+
+
+class SilenceWatch:
+    """Fires once when a track has delivered nothing but exact zeros for `limit_s`.
+
+    Exact zeros, not quiet: a real signal, even a silent room, has noise in
+    the lowest bits. The first non-zero sample ends the watch for good (the
+    source evidently works), so a meeting that goes quiet later never fires it.
+    """
+
+    def __init__(self, limit_s: float = SILENCE_LIMIT_S) -> None:
+        self.limit_s = limit_s
+        self.zero_s = 0.0
+        self.heard = False
+        self.fired = False
+
+    def feed(self, samples: np.ndarray, rate: int) -> bool:
+        """True exactly once: on the block that completes `limit_s` of zeros."""
+        if self.heard or self.fired or rate <= 0 or samples.size == 0:
+            return False
+        if np.any(samples):
+            self.heard = True
+            return False
+        self.zero_s += samples.size / rate
+        if self.zero_s >= self.limit_s - 1e-6:  # float sums of block lengths
+            self.fired = True
+            return True
+        return False
+
 
 class _Track:
     """A single track: PortAudio stream -> queue -> 16 kHz mono FLAC file."""
@@ -295,6 +274,15 @@ class _Track:
         self._width = 2  # paInt16
         self._channels = device.channels
         self._rate = device.rate
+        # Given up for this recording (a macOS tap that never started): no restarts.
+        self.abandoned = False
+        self._silence: SilenceWatch | None = None
+        self._on_silence: Callable[[str], None] | None = None
+
+    def watch_silence(self, on_silence: Callable[[str], None], limit_s: float = SILENCE_LIMIT_S) -> None:
+        """Calls `on_silence(track name)` once when the device delivers only zeros (write thread)."""
+        self._silence = SilenceWatch(limit_s)
+        self._on_silence = on_silence
 
     # --- life cycle -----------------------------------------------------
 
@@ -306,7 +294,7 @@ class _Track:
             channels=1, subtype="PCM_16", format="FLAC",
         )
 
-    def start(self, p: pyaudio.PyAudio, device: DeviceInfo | None = None) -> None:
+    def start(self, p: pyaudio.PyAudio | None, device: DeviceInfo | None = None) -> None:
         if device is not None:
             self.device = device
             self._channels = device.channels
@@ -316,21 +304,15 @@ class _Track:
         self._start_monotonic = self._start_monotonic or time.monotonic()
         self._last_data = time.monotonic()
 
-        self._stream = p.open(
-            format=pyaudio.paInt16,
-            channels=self._channels,
-            rate=self._rate,
-            input=True,
-            input_device_index=self.device.index,
-            frames_per_buffer=BLOCK,
-            stream_callback=self._callback,
+        self._stream = platforms.audio().open_input(
+            self.device, self._channels, self._rate, BLOCK, self._callback, host=p,
         )
         if self._thread is None or not self._thread.is_alive():
             self._thread = threading.Thread(
                 target=self._write_loop, name=f"write-{self.name}", daemon=True
             )
             self._thread.start()
-        self._stream.start_stream()
+        self._stream.start()
 
     def _build_resampler(self) -> None:
         if self._rate == TARGET_RATE:
@@ -348,7 +330,7 @@ class _Track:
         if stream is None:
             return
         try:
-            stream.stop_stream()
+            stream.stop()
         except Exception:
             log.warning("Could not stop the audio stream of track %s", self.name, exc_info=True)
         try:
@@ -371,13 +353,12 @@ class _Track:
 
     # --- processing -----------------------------------------------------
 
-    def _callback(self, in_data, frame_count, time_info, status):
+    def _callback(self, in_data: bytes) -> None:
         try:
             self._queue.put_nowait(in_data)
         except queue.Full:
             # Disk slower than the stream - drop a block instead of blocking audio.
             log.warning("Queue %s full, block dropped", self.name)
-        return (None, pyaudio.paContinue)
 
     def _write_loop(self) -> None:
         while True:
@@ -422,6 +403,8 @@ class _Track:
             return
 
         self._last_data = time.monotonic()
+        if self._silence is not None and self._silence.feed(samples, self._rate):
+            self._silent()
         rms = float(np.sqrt(np.mean(np.square(samples))))
         # Decibel scale 0..1: -60 dBFS is silence, 0 dBFS is the maximum.
         db = 20.0 * np.log10(rms + 1e-9)
@@ -467,8 +450,29 @@ class _Track:
             self._samples_written += missing
             self._tell(padding)
 
+    def _silent(self) -> None:
+        if self._on_silence is None:
+            return
+        try:
+            self._on_silence(self.name)
+        except Exception:
+            log.exception("Silence callback of track %s failed", self.name)
+
+    @property
+    def starting(self) -> bool:
+        """The stream is still starting (a macOS tap starts on a worker thread)."""
+        return getattr(self._stream, "starting", False) is True
+
+    @property
+    def failure(self) -> str | None:
+        """Why the stream failed for good (a macOS tap that did not start), else None."""
+        failure = getattr(self._stream, "failure", None)
+        return failure if isinstance(failure, str) else None
+
     @property
     def dead(self) -> bool:
+        if self.starting:
+            return False
         return (time.monotonic() - self._last_data) > DEVICE_TIMEOUT_S
 
     @property
@@ -481,15 +485,18 @@ class Recorder:
 
     def __init__(self, tracks: str = "both", microphone: str | None = None,
                  system: str | None = None, microphone_index: int | None = None,
-                 system_index: int | None = None, listener: Listener | None = None):
+                 system_index: int | None = None, listener: Listener | None = None,
+                 on_notice: Notice | None = None):
         self.tracks = tracks
         self._listener = listener
+        self._on_notice = on_notice
         # Chosen devices by name; the indices are a choice saved by an earlier version.
         self._microphone = microphone
         self._system = system
         self._microphone_index = microphone_index
         self._system_index = system_index
         self._pa: pyaudio.PyAudio | None = None
+        self._running = False
         self._tracks: dict[str, _Track] = {}
         self._watchdog: threading.Thread | None = None
         self._stop = threading.Event()
@@ -518,9 +525,14 @@ class Recorder:
         if self.tracks in ("both", "system"):
             sys_dev = self._pick("system", devices)
             if sys_dev is None:
-                self.warnings.append(
-                    t("No loopback device found — system audio will not be recorded.")
-                )
+                if platforms.family() == "windows":
+                    self.warnings.append(
+                        t("No loopback device found — system audio will not be recorded.")
+                    )
+                else:
+                    self.warnings.append(
+                        t("No system audio source found — system audio will not be recorded.")
+                    )
             else:
                 chosen.append(("system", MEETING_FILE, sys_dev))
 
@@ -542,6 +554,8 @@ class Recorder:
                         t("Could not open “{name}”: {error}", name=dev.name, error=error))
                     continue
                 self._tracks[name] = track
+                if name == "system" and platforms.family() == "macos":
+                    track.watch_silence(self._system_silent)
         except BaseException:
             for track in self._tracks.values():
                 track.finish()
@@ -555,6 +569,7 @@ class Recorder:
             self._pa = None
             raise RuntimeError(t("Could not start any recording track."))
 
+        self._running = True
         self._stop.clear()
         self._watchdog = threading.Thread(target=self._watchdog_loop,
                                           name="audio-watchdog", daemon=True)
@@ -567,10 +582,16 @@ class Recorder:
             self._watchdog = None
 
         with self._lock:
+            self._running = False
             for track in self._tracks.values():
                 track.finish()
             close_pyaudio(self._pa)
             self._pa = None
+            for name, track in list(self._tracks.items()):
+                if track.abandoned and track.duration_s == 0:
+                    # Its source never delivered: no empty "meeting" file to transcribe.
+                    track.file.unlink(missing_ok=True)
+                    del self._tracks[name]
 
         result = {
             "folder": self.folder,
@@ -609,9 +630,46 @@ class Recorder:
 
     # --- surviving a device change --------------------------------------
 
+    def _notice(self, code: str, message: str) -> None:
+        """A problem found while recording: logged, kept in `warnings`, passed to `on_notice`."""
+        log.warning("Recording notice: %s", code)
+        if message not in self.warnings:
+            self.warnings.append(message)
+        if self._on_notice is None:
+            return
+        try:
+            self._on_notice(code, message)
+        except Exception:
+            log.exception("Recording notice callback failed")
+
+    def _system_silent(self, _track: str) -> None:
+        self._notice(NOTICE_SYSTEM_SILENT,
+                     t("System audio is silent. Ucho may not have permission to record it."))
+
+    def _drop_failed(self) -> None:
+        """Gives up tracks whose source failed for good; the others keep recording."""
+        for name, track in list(self._tracks.items()):
+            failure = track.failure
+            if track.abandoned or failure is None:
+                continue
+            with self._lock:
+                if not self._running:
+                    return
+                track.abandoned = True
+                track.stop_stream()
+            log.warning("Track %s stopped for this recording: %s", name, failure)
+            if name == "system":
+                microphone = self._tracks.get("microphone")
+                if microphone is not None and not microphone.abandoned:
+                    message = t("System audio could not be recorded — recording the microphone only.")
+                else:  # tracks="system": nothing else is being recorded
+                    message = t("System audio could not be recorded.")
+                self._notice(NOTICE_SYSTEM_FAILED, message)
+
     def _watchdog_loop(self) -> None:
         while not self._stop.wait(2.0):
-            dead = [n for n, s in self._tracks.items() if s.dead]
+            self._drop_failed()
+            dead = [n for n, s in self._tracks.items() if s.dead and not s.abandoned]
             if dead:
                 log.warning("Tracks without data: %s - restarting streams", dead)
                 try:
@@ -622,15 +680,18 @@ class Recorder:
     def _restart_streams(self) -> None:
         """Full PortAudio restart - otherwise it does not see a new default device."""
         with self._lock:
-            if self._pa is None:
+            if not self._running:
                 return
             for track in self._tracks.values():
-                track.stop_stream()
+                if not track.abandoned:
+                    track.stop_stream()
             close_pyaudio(self._pa)
 
             devices = list_devices()
             self._pa = new_pyaudio()
             for name, track in self._tracks.items():
+                if track.abandoned:
+                    continue
                 new = self._pick(name, devices)
                 if new is None:
                     continue

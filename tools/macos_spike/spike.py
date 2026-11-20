@@ -1,0 +1,1365 @@
+# SPDX-FileCopyrightText: 2026 Fryderyk Pryjma
+# SPDX-License-Identifier: Apache-2.0
+"""TEMPORARY macOS CI spike for task M3a (issue #22). Not part of the app.
+
+Runs on GitHub macOS runners (.github/workflows/macos-spike.yml) and answers the
+questions of docs/macos-plan.md, M3a and section 8. Every check runs in its own
+subprocess with a timeout, so a crash or a hang is recorded as a result instead of
+stopping the run. Each check writes <out>/<check>.json; `summary` turns them into
+Markdown for $GITHUB_STEP_SUMMARY.
+
+    python tools/macos_spike/spike.py all --out DIR
+    python tools/macos_spike/spike.py run tk --out DIR
+    python tools/macos_spike/spike.py summary --out DIR
+
+Delete together with the workflow once M3b has its own macos.yml.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import faulthandler
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from collections.abc import Callable
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+WHISPER_REPO = "ggerganov/whisper.cpp"
+# Repo sha from the plan (M8), checked in the Hugging Face API on 2026-11-19.
+WHISPER_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
+WHISPER_FILES = ["ggml-tiny-q5_1.bin", "ggml-base-q5_1.bin"]
+
+TEXT_EN = "The quarterly budget meeting starts at nine o'clock tomorrow morning in the small conference room."
+KEYWORDS_EN = ["budget", "meeting", "tomorrow", "morning", "conference"]
+TEXT_PL = "Spotkanie w sprawie budżetu zaczyna się jutro o dziewiątej rano w małej sali konferencyjnej."
+KEYWORDS_PL = ["spotkanie", "budżetu", "jutro", "rano", "sali"]
+
+# Carbon constants (CarbonEvents.h, Events.h).
+CMD_KEY, SHIFT_KEY, OPTION_KEY, CONTROL_KEY = 1 << 8, 1 << 9, 1 << 11, 1 << 12
+KVK_ANSI_R, KVK_ANSI_J, KVK_SPACE, KVK_ESCAPE = 0x0F, 0x26, 0x31, 0x35
+HOTKEY_EXCLUSIVE = 1 << 0  # kEventHotKeyExclusive
+HOTKEY_ERRORS = {0: "noErr", -9878: "eventHotKeyExistsErr", -9879: "eventHotKeyInvalidErr", -50: "paramErr"}
+
+
+# ---------------------------------------------------------------- helpers
+
+def run_cmd(args: list[str], timeout: float = 60, tail: int = 4000) -> dict:
+    start = time.monotonic()
+    try:
+        done = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return {"rc": done.returncode, "out": done.stdout[-tail:], "err": done.stderr[-tail:],
+                "seconds": round(time.monotonic() - start, 2)}
+    except subprocess.TimeoutExpired:
+        return {"rc": "timeout", "seconds": round(time.monotonic() - start, 2)}
+    except OSError as error:
+        return {"rc": "oserror", "err": repr(error)}
+
+
+def guard(details: dict, key: str, func: Callable[[], object]) -> object:
+    """Store func() in details[key], or the exception, and never raise."""
+    try:
+        value = func()
+        details[key] = value
+        return value
+    except BaseException as error:
+        details[key] = {"error": f"{type(error).__name__}: {error}"}
+        return None
+
+
+def fourcc(code: str) -> int:
+    return int.from_bytes(code.encode("ascii"), "big")
+
+
+def tk_root(title: str):
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.title(title)
+    root.geometry("360x160+120+120")
+    tk.Label(root, text=f"Ucho spike: {title}").pack(padx=20, pady=20)
+    root.update()
+    return root
+
+
+class Ticker:
+    """Counts Tk `after` ticks: proves the main loop keeps running (not blocked)."""
+
+    def __init__(self, root, every_ms: int = 100):
+        self.root, self.every, self.count = root, every_ms, 0
+        root.after(every_ms, self._tick)
+
+    def _tick(self):
+        self.count += 1
+        self.root.after(self.every, self._tick)
+
+
+# ---------------------------------------------------------------- checks
+
+def check_install(out: Path) -> dict:
+    details: dict = {}
+    report = out / "pip-report.json"
+    if report.exists():
+        data = json.loads(report.read_text(encoding="utf-8"))
+        wheels = []
+        for item in data.get("install", []):
+            url = (item.get("download_info") or {}).get("url", "")
+            wheels.append({"name": item["metadata"]["name"], "version": item["metadata"]["version"],
+                           "file": url.rsplit("/", 1)[-1]})
+        details["wheels"] = sorted(wheels, key=lambda w: w["name"].lower())
+        details["sdists"] = [w for w in wheels if not w["file"].endswith(".whl")]
+    for name in ("pip-status.txt", "pip-each.txt", "install-seconds.txt"):
+        path = out / name
+        if path.exists():
+            details[name] = path.read_text(encoding="utf-8").strip()
+    status_text = details.get("pip-status.txt", "missing")
+    ok = status_text == "ok" and not details.get("sdists")
+    return {"status": "ok" if ok else "fail",
+            "summary": f"pip: {status_text}, {len(details.get('wheels', []))} distributions, "
+                       f"{details.get('install-seconds.txt', '?')} s, sdists: {len(details.get('sdists', []))}",
+            "details": details}
+
+
+def check_env(out: Path) -> dict:
+    d: dict = {"platform": platform.platform(), "mac_ver": platform.mac_ver()[0],
+               "machine": platform.machine(), "python": sys.version, "cpu_count": os.cpu_count()}
+    d["sw_vers"] = run_cmd(["sw_vers"]).get("out", "").strip()
+    guard(d, "memory_gb", lambda: round(int(run_cmd(["sysctl", "-n", "hw.memsize"])["out"]) / 2**30, 1))
+    d["cpu_brand"] = run_cmd(["sysctl", "-n", "machdep.cpu.brand_string"]).get("out", "").strip()
+    d["hw_model"] = run_cmd(["sysctl", "-n", "hw.model"]).get("out", "").strip()
+    d["displays"] = run_cmd(["system_profiler", "SPDisplaysDataType"], timeout=60).get("out", "")[-1500:]
+    d["tmpdir_len"] = len(os.environ.get("TMPDIR", ""))
+    sock = Path.home() / "Library" / "Application Support" / "Ucho" / "ucho.sock"
+    d["socket_path_len"] = len(str(sock))
+    d["console_user"] = run_cmd(["stat", "-f", "%Su", "/dev/console"]).get("out", "").strip()
+    d["gui_session"] = run_cmd(["launchctl", "managername"]).get("out", "").strip()
+    return {"status": "info",
+            "summary": f"macOS {d['mac_ver']} {d['machine']}, {d['cpu_count']} CPU, {d.get('memory_gb')} GB, "
+                       f"{d['cpu_brand'] or d['hw_model']}, session {d['gui_session']}",
+            "details": d}
+
+
+IMPORTS = ["numpy", "soundfile", "soxr", "PIL", "huggingface_hub", "hf_xet", "openvino", "openvino_genai",
+           "openvino_tokenizers", "sounddevice", "pywhispercpp.model", "catap", "objc", "AppKit", "Quartz",
+           "ApplicationServices", "AVFoundation", "CoreAudio", "sherpa_onnx", "tkinter", "customtkinter",
+           "pystray", "PyInstaller"]
+
+
+def check_imports(out: Path) -> dict:
+    import importlib
+    import importlib.metadata as md
+
+    d: dict = {"modules": {}}
+    failed = []
+    for name in IMPORTS:
+        start = time.monotonic()
+        try:
+            module = importlib.import_module(name)
+            d["modules"][name] = {"ok": True, "seconds": round(time.monotonic() - start, 2),
+                                  "version": str(getattr(module, "__version__", ""))}
+        except BaseException as error:
+            failed.append(name)
+            d["modules"][name] = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+
+    def openvino_info():
+        import openvino as ov
+        core = ov.Core()
+        return {dev: core.get_property(dev, "FULL_DEVICE_NAME") for dev in core.available_devices}
+
+    guard(d, "openvino_devices", openvino_info)
+
+    def genai_api():
+        import openvino_genai as g
+        return {n: hasattr(g, n) for n in ("LLMPipeline", "WhisperPipeline", "StructuredOutputConfig",
+                                           "StreamingStatus", "GenerationConfig")}
+
+    guard(d, "openvino_genai_api", genai_api)
+
+    def sounddevice_info():
+        import sounddevice as sd
+        devices = [{"name": dev["name"], "in": dev["max_input_channels"], "out": dev["max_output_channels"],
+                    "rate": dev["default_samplerate"]} for dev in sd.query_devices()]
+        return {"portaudio": sd.get_portaudio_version()[1], "default": list(sd.default.device), "devices": devices}
+
+    guard(d, "sounddevice", sounddevice_info)
+    d["permissions"] = permission_snapshot()
+
+    def sizes():
+        result = {}
+        for dist in md.distributions():
+            total = 0
+            for file in dist.files or []:
+                with contextlib.suppress(OSError):
+                    total += Path(dist.locate_file(file)).stat().st_size
+            result[dist.metadata["Name"]] = round(total / 2**20, 1)
+        return dict(sorted(result.items(), key=lambda kv: -kv[1]))
+
+    guard(d, "installed_mb", sizes)
+    if isinstance(d.get("installed_mb"), dict):
+        pyobjc = sum(v for k, v in d["installed_mb"].items() if k.lower().startswith("pyobjc"))
+        d["installed_mb_pyobjc_total"] = round(pyobjc, 1)
+        d["installed_mb_total"] = round(sum(d["installed_mb"].values()), 1)
+    return {"status": "fail" if failed else "ok",
+            "summary": ("all imports ok" if not failed else f"failed: {', '.join(failed)}")
+                       + f"; OpenVINO devices: {d.get('openvino_devices')}; installed {d.get('installed_mb_total')} MB",
+            "details": d}
+
+
+def permission_snapshot() -> dict:
+    p: dict = {}
+
+    def microphone():
+        import AVFoundation
+        status = AVFoundation.AVCaptureDevice.authorizationStatusForMediaType_(AVFoundation.AVMediaTypeAudio)
+        return {0: "notDetermined", 1: "restricted", 2: "denied", 3: "authorized"}.get(status, status)
+
+    def accessibility():
+        import ApplicationServices
+        return bool(ApplicationServices.AXIsProcessTrusted())
+
+    def quartz(name):
+        import Quartz
+        return bool(getattr(Quartz, name)())
+
+    def secure_input():
+        import ctypes
+        carbon = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+        return bool(carbon.IsSecureEventInputEnabled())
+
+    guard(p, "microphone", microphone)
+    guard(p, "accessibility_AXIsProcessTrusted", accessibility)
+    guard(p, "screen_capture_preflight", lambda: quartz("CGPreflightScreenCaptureAccess"))
+    guard(p, "post_event_preflight", lambda: quartz("CGPreflightPostEventAccess"))
+    guard(p, "listen_event_preflight", lambda: quartz("CGPreflightListenEventAccess"))
+    guard(p, "secure_event_input", secure_input)
+    return p
+
+
+def check_tk(out: Path) -> dict:
+    import tkinter as tk
+    import tkinter.font as tkfont
+
+    d: dict = {"TkVersion": tk.TkVersion, "TclVersion": tk.TclVersion}
+    root = tk_root("tk")
+    d["patchlevel"] = root.tk.call("info", "patchlevel")
+    d["windowingsystem"] = root.tk.call("tk", "windowingsystem")
+    d["scaling"] = float(root.tk.call("tk", "scaling"))
+    d["mapped"] = bool(root.winfo_ismapped())
+    d["screen"] = [root.winfo_screenwidth(), root.winfo_screenheight()]
+    families = set(tkfont.families())
+    d["font_families_count"] = len(families)
+    d["fonts_present"] = {f: f in families for f in (".AppleSystemUIFont", "SF Pro", "SF Pro Text", "SF Pro Display",
+                                                       "SF Mono", "Helvetica Neue", "Helvetica", "Menlo", "Monaco")}
+    d["default_font"] = tkfont.nametofont("TkDefaultFont").actual()
+    d["mac_commands"] = {c: bool(root.tk.call("info", "commands", c))
+                         for c in ("::tk::mac::ReopenApplication", "::tk::mac::Quit", "::tk::mac::ShowPreferences")}
+    ticker = Ticker(root)
+    start = time.monotonic()
+    root.after(1500, lambda: d.update(screencapture=run_cmd(["screencapture", "-x", str(out / "tk.png")], 20)))
+    root.after(2500, root.quit)
+    root.mainloop()
+    d["loop_seconds"], d["ticks"] = round(time.monotonic() - start, 2), ticker.count
+    root.destroy()
+    ok = d["windowingsystem"] == "aqua" and d["mapped"] and ticker.count > 10
+    return {"status": "ok" if ok else "fail",
+            "summary": f"Tk {d['patchlevel']} {d['windowingsystem']}, mapped={d['mapped']}, ticks={ticker.count}, "
+                       f"SF Pro={d['fonts_present']['SF Pro']}, .AppleSystemUIFont={d['fonts_present']['.AppleSystemUIFont']}",
+            "details": d}
+
+
+def check_ctk(out: Path) -> dict:
+    import customtkinter as ctk
+
+    d: dict = {"version": ctk.__version__}
+    app = ctk.CTk()
+    app.title("Ucho spike: customtkinter")
+    app.geometry("360x200+520+120")
+    ctk.CTkButton(app, text="Record").pack(padx=20, pady=20)
+    ctk.CTkEntry(app, placeholder_text="Search").pack(padx=20)
+    app.update()
+    d["mapped"] = bool(app.winfo_ismapped())
+    d["appearance"] = ctk.get_appearance_mode()
+    ticker = Ticker(app)
+    app.after(1500, lambda: d.update(screencapture=run_cmd(["screencapture", "-x", str(out / "ctk.png")], 20)))
+    app.after(2500, app.quit)
+    app.mainloop()
+    d["ticks"] = ticker.count
+    app.destroy()
+    return {"status": "ok" if d["mapped"] and ticker.count > 10 else "fail",
+            "summary": f"customtkinter {d['version']}, mapped={d['mapped']}, appearance={d['appearance']}, ticks={ticker.count}",
+            "details": d}
+
+
+def _tray_image(color: tuple[int, int, int]):
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    ImageDraw.Draw(image).ellipse((8, 8, 56, 56), fill=(*color, 255))
+    return image
+
+
+def _status_item_state(item) -> dict:
+    state = {"isVisible": bool(item.isVisible())}
+    button = item.button()
+    if button is not None:
+        state["button_hidden"] = bool(button.isHidden())
+        window = button.window()
+        if window is not None:
+            frame = window.frame()
+            state["button_window_frame"] = [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height]
+            state["button_window_visible"] = bool(window.isVisible())
+    menu = item.menu()
+    state["menu_items"] = int(menu.numberOfItems()) if menu is not None else None
+    return state
+
+
+def tray_pystray(out: Path, mode: str) -> dict:
+    """pystray next to Tk, the way ucho/tray.py starts it (run_detached on the Tk thread)."""
+    import AppKit
+    import pystray
+
+    d: dict = {"mode": mode}
+    root = tk_root(f"tray {mode}")
+    d["nsapp_class"] = str(AppKit.NSApplication.sharedApplication().className())
+    calls: list = []
+
+    def action(name):
+        return lambda icon, item: calls.append({"item": name, "main_thread": threading.current_thread()
+                                                is threading.main_thread()})
+
+    menu = pystray.Menu(pystray.MenuItem("Record", action("record"), default=True),
+                        pystray.MenuItem("Dictate", action("dictate")),
+                        pystray.Menu.SEPARATOR,
+                        pystray.MenuItem("Quit", action("quit")))
+    icon = pystray.Icon("ucho-spike", _tray_image((40, 120, 220)), "Ucho spike", menu)
+    if mode == "default":
+        icon.run_detached()  # setup thread sets visible=True off the main thread (pystray default)
+    else:
+        icon.run_detached(setup=lambda _icon: None)
+        root.after(100, lambda: setattr(icon, "visible", True))  # visible set on the Tk thread
+    ticker = Ticker(root)
+    steps: dict = {}
+
+    def at(ms, key, func):
+        root.after(ms, lambda: guard(steps, key, func))
+
+    at(1000, "state_after_start", lambda: _status_item_state(icon._status_item))
+    at(2000, "menu_action", lambda: icon._status_item.menu().performActionForItemAtIndex_(0) or True)
+
+    def update():
+        icon.icon = _tray_image((220, 40, 40))
+        icon.title = "Ucho spike: recording"
+        icon.update_menu()
+        return _status_item_state(icon._status_item)
+
+    at(3000, "update_from_tk_thread", update)
+    at(4000, "stop", lambda: icon.stop() or True)
+    at(4500, "state_after_stop", lambda: _status_item_state(icon._status_item))
+    at(5000, "screencapture", lambda: run_cmd(["screencapture", "-x", str(out / f"tray_{mode}.png")], 20))
+    start = time.monotonic()
+    root.after(10000, root.quit)
+    root.mainloop()
+    d.update(steps)
+    d["loop_seconds"], d["ticks"], d["calls"] = round(time.monotonic() - start, 2), ticker.count, calls
+    root.destroy()
+    ok = bool(calls) and ticker.count > 60 and d["loop_seconds"] < 14
+    return {"status": "ok" if ok else "fail",
+            "summary": f"NSApp={d['nsapp_class']}, menu callback={calls[:1]}, ticks={ticker.count} in "
+                       f"{d['loop_seconds']} s, visible after stop={(d.get('state_after_stop') or {}).get('isVisible')}",
+            "details": d}
+
+
+def check_tray_pystray_default(out: Path) -> dict:
+    return tray_pystray(out, "default")
+
+
+def check_tray_pystray_main(out: Path) -> dict:
+    return tray_pystray(out, "main")
+
+
+def check_tray_thread(out: Path) -> dict:
+    """Expected to fail: pystray's own loop (icon.run) in a worker thread next to Tk."""
+    import pystray
+
+    d: dict = {}
+    root = tk_root("tray thread")
+    icon = pystray.Icon("ucho-spike-thread", _tray_image((40, 160, 80)), "Ucho spike thread",
+                        pystray.Menu(pystray.MenuItem("Record", lambda: None)))
+
+    def target():
+        try:
+            icon.run()
+            d["thread_result"] = "returned"
+        except BaseException as error:
+            d["thread_result"] = f"{type(error).__name__}: {error}"
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    ticker = Ticker(root)
+    start = time.monotonic()
+    root.after(6000, root.quit)
+    root.mainloop()
+    d["loop_seconds"], d["ticks"], d["thread_alive"] = round(time.monotonic() - start, 2), ticker.count, thread.is_alive()
+    return {"status": "info",
+            "summary": f"thread result={d.get('thread_result', 'still running')}, ticks={ticker.count}",
+            "details": d}
+
+
+def check_tray_nsstatusitem(out: Path) -> dict:
+    """Plan B: own NSStatusItem through PyObjC on the Tk thread, no pystray."""
+    import AppKit
+    import Foundation
+    import objc
+
+    d: dict = {}
+    calls: list = []
+    root = tk_root("NSStatusItem")
+
+    class SpikeTarget(Foundation.NSObject):
+        @objc.typedSelector(b"v@:@")
+        def fire_(self, sender):
+            calls.append({"title": str(sender.title()),
+                          "main_thread": threading.current_thread() is threading.main_thread()})
+
+    target = SpikeTarget.alloc().init()
+    item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(AppKit.NSVariableStatusItemLength)
+    item.button().setTitle_("U")
+    item.button().setToolTip_("Ucho spike")
+    menu = AppKit.NSMenu.alloc().init()
+    for title in ("Record", "Dictate"):
+        entry = AppKit.NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "fire:", "")
+        entry.setTarget_(target)
+        menu.addItem_(entry)
+    item.setMenu_(menu)
+    ticker = Ticker(root)
+    steps: dict = {}
+    root.after(1000, lambda: guard(steps, "state", lambda: _status_item_state(item)))
+    root.after(2000, lambda: guard(steps, "menu_action", lambda: menu.performActionForItemAtIndex_(1) or True))
+    root.after(3000, lambda: guard(steps, "remove", lambda: AppKit.NSStatusBar.systemStatusBar()
+                                   .removeStatusItem_(item) or True))
+    root.after(5000, root.quit)
+    root.mainloop()
+    d.update(steps)
+    d["calls"], d["ticks"] = calls, ticker.count
+    root.destroy()
+    return {"status": "ok" if calls and ticker.count > 30 else "fail",
+            "summary": f"menu callback={calls[:1]}, ticks={ticker.count}, state={steps.get('state')}",
+            "details": d}
+
+
+class Carbon:
+    """Minimal ctypes binding of Carbon global hotkeys (RegisterEventHotKey)."""
+
+    def __init__(self):
+        import ctypes
+
+        self.ct = ctypes
+        lib = ctypes.CDLL("/System/Library/Frameworks/Carbon.framework/Carbon")
+
+        class EventHotKeyID(ctypes.Structure):
+            _fields_ = [("signature", ctypes.c_uint32), ("id", ctypes.c_uint32)]
+
+        class EventTypeSpec(ctypes.Structure):
+            _fields_ = [("eventClass", ctypes.c_uint32), ("eventKind", ctypes.c_uint32)]
+
+        self.EventHotKeyID, self.EventTypeSpec = EventHotKeyID, EventTypeSpec
+        self.HANDLER = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+        lib.GetApplicationEventTarget.restype = ctypes.c_void_p
+        lib.RegisterEventHotKey.argtypes = [ctypes.c_uint32, ctypes.c_uint32, EventHotKeyID, ctypes.c_void_p,
+                                            ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
+        lib.RegisterEventHotKey.restype = ctypes.c_int32
+        lib.UnregisterEventHotKey.argtypes = [ctypes.c_void_p]
+        lib.UnregisterEventHotKey.restype = ctypes.c_int32
+        lib.InstallEventHandler.argtypes = [ctypes.c_void_p, self.HANDLER, ctypes.c_uint32,
+                                            ctypes.POINTER(EventTypeSpec), ctypes.c_void_p,
+                                            ctypes.POINTER(ctypes.c_void_p)]
+        lib.InstallEventHandler.restype = ctypes.c_int32
+        lib.GetEventParameter.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                          ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p]
+        lib.GetEventParameter.restype = ctypes.c_int32
+        self.lib = lib
+        self.target = lib.GetApplicationEventTarget()
+        self._handler = None
+
+    def register(self, key: int, modifiers: int, number: int, options: int) -> tuple[int, object]:
+        ref = self.ct.c_void_p()
+        status = self.lib.RegisterEventHotKey(key, modifiers, self.EventHotKeyID(fourcc("UCHO"), number),
+                                              self.target, options, self.ct.byref(ref))
+        return status, ref
+
+    def unregister(self, ref) -> int:
+        return self.lib.UnregisterEventHotKey(ref)
+
+    def install(self, on_hotkey: Callable[[int], None]) -> int:
+        ct = self.ct
+
+        def handler(_call_ref, event, _user):
+            hotkey = self.EventHotKeyID()
+            self.lib.GetEventParameter(event, fourcc("----"), fourcc("hkid"), None,
+                                       ct.sizeof(hotkey), None, ct.byref(hotkey))
+            on_hotkey(hotkey.id)
+            return 0
+
+        self._handler = self.HANDLER(handler)  # keep a reference for the process lifetime
+        spec = self.EventTypeSpec(fourcc("keyb"), 5)  # kEventClassKeyboard, kEventHotKeyPressed
+        return self.lib.InstallEventHandler(self.target, self._handler, 1, ct.byref(spec), None,
+                                            ct.byref(ct.c_void_p()))
+
+
+def _err(status: int) -> str:
+    return f"{status} {HOTKEY_ERRORS.get(status, '')}".strip()
+
+
+def check_hotkey(out: Path) -> dict:
+    d: dict = {"permissions": permission_snapshot()}
+    root = tk_root("hotkey")
+    carbon = Carbon()
+    fired: list = []
+    d["install_handler"] = _err(carbon.install(lambda number: fired.append(
+        {"id": number, "main_thread": threading.current_thread() is threading.main_thread(),
+         "t": round(time.monotonic(), 2)})))
+    regs: dict = {}
+
+    def reg(name, key, mods, number, options=HOTKEY_EXCLUSIVE):
+        status, ref = carbon.register(key, mods, number, options)
+        regs[name] = {"status": _err(status), "ref": ref}
+        return status
+
+    reg("ctrl+alt+r (Ucho record default)", KVK_ANSI_R, CONTROL_KEY | OPTION_KEY, 1)
+    reg("ctrl+alt+r again, same process, exclusive", KVK_ANSI_R, CONTROL_KEY | OPTION_KEY, 2)
+    reg("ctrl+alt+r again, same process, no options", KVK_ANSI_R, CONTROL_KEY | OPTION_KEY, 3, 0)
+    reg("ctrl+shift+space (Ucho dictation default)", KVK_SPACE, CONTROL_KEY | SHIFT_KEY, 4)
+    reg("cmd+space (Spotlight)", KVK_SPACE, CMD_KEY, 5)
+    reg("ctrl+space (input source)", KVK_SPACE, CONTROL_KEY, 6)
+    reg("esc (dictation cancel)", KVK_ESCAPE, 0, 7)
+    regs["esc (dictation cancel)"]["unregister"] = _err(carbon.unregister(regs["esc (dictation cancel)"]["ref"]))
+
+    # Another process holds ctrl+alt+J exclusively: does our registration see it?
+    holder = subprocess.Popen([sys.executable, str(Path(__file__)), "hotkey-holder"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    line = ""
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        line = holder.stdout.readline().strip() if holder.stdout else ""
+        if line.startswith("holder") or not line:
+            break
+    d["holder_line"] = line
+    reg("ctrl+alt+j held by another process, exclusive", KVK_ANSI_J, CONTROL_KEY | OPTION_KEY, 8)
+    reg("ctrl+alt+j held by another process, no options", KVK_ANSI_J, CONTROL_KEY | OPTION_KEY, 9, 0)
+
+    def post_keys():
+        import Quartz
+
+        result = {}
+        for name, tap in (("hid", Quartz.kCGHIDEventTap), ("session", Quartz.kCGSessionEventTap)):
+            for down in (True, False):
+                event = Quartz.CGEventCreateKeyboardEvent(None, KVK_ANSI_R, down)
+                Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskControl | Quartz.kCGEventFlagMaskAlternate)
+                Quartz.CGEventPost(tap, event)
+            result[name] = round(time.monotonic(), 2)
+        return result
+
+    steps: dict = {}
+    root.after(1000, lambda: guard(steps, "synthetic_post", post_keys))
+    ticker = Ticker(root)
+    root.after(4000, root.quit)
+    root.mainloop()
+    holder.wait(timeout=20)
+    d["holder_output"] = holder.stdout.read()[-1000:] if holder.stdout else ""
+    for value in regs.values():
+        value.pop("ref", None)
+    d["registrations"] = regs
+    d.update(steps)
+    d["fired"], d["ticks"] = fired, ticker.count
+    root.destroy()
+    base_ok = regs["ctrl+alt+r (Ucho record default)"]["status"].startswith("0 ")
+    cross = regs["ctrl+alt+j held by another process, exclusive"]["status"]
+    return {"status": "ok" if base_ok else "fail",
+            "summary": f"register={regs['ctrl+alt+r (Ucho record default)']['status']}, "
+                       f"dup same process={regs['ctrl+alt+r again, same process, exclusive']['status']}, "
+                       f"held by other process={cross}, cmd+space={regs['cmd+space (Spotlight)']['status']}, "
+                       f"synthetic event fired={len(fired)}",
+            "details": d}
+
+
+def hotkey_holder() -> None:
+    root = tk_root("hotkey holder")
+    carbon = Carbon()
+    carbon.install(lambda number: None)
+    status, _ref = carbon.register(KVK_ANSI_J, CONTROL_KEY | OPTION_KEY, 1, HOTKEY_EXCLUSIVE)
+    print(f"holder registered ctrl+alt+j: {_err(status)}", flush=True)
+    root.after(6000, root.quit)
+    root.mainloop()
+
+
+def _parse_voices(text: str) -> list[dict]:
+    voices = []
+    for line in text.splitlines():
+        match = re.match(r"^(.*?)\s+([a-z]{2,3}_[A-Z0-9]{2,3})\s+#", line)
+        if match:
+            voices.append({"name": match.group(1).strip(), "locale": match.group(2)})
+    return voices
+
+
+def check_tts(out: Path) -> dict:
+    import soundfile as sf
+
+    listing = run_cmd(["say", "-v", "?"])
+    voices = _parse_voices(listing.get("out", ""))
+    d: dict = {"voice_count": len(voices),
+               "pl_voices": [v["name"] for v in voices if v["locale"] == "pl_PL"],
+               "en_voices": [v["name"] for v in voices if v["locale"] in ("en_US", "en_GB")][:10]}
+    made = {}
+    for lang, text, names in (("en", TEXT_EN, d["en_voices"]), ("pl", TEXT_PL, d["pl_voices"])):
+        path = out / f"tts_{lang}.wav"
+        args = ["say", "-o", str(path), "--file-format=WAVE", "--data-format=LEI16@16000", text]
+        if names:
+            args[1:1] = ["-v", names[0]]
+        result = run_cmd(args, timeout=60)
+        entry = {"voice": names[0] if names else "(default)", "rc": result.get("rc"), "seconds": result.get("seconds"),
+                 "err": result.get("err", "")[-300:]}
+        if path.exists():
+            info = sf.info(str(path))
+            entry.update(samplerate=info.samplerate, channels=info.channels, duration=round(info.duration, 2),
+                         bytes=path.stat().st_size)
+            made[lang] = entry["samplerate"] == 16000 and entry["duration"] > 2
+        d[lang] = entry
+    return {"status": "ok" if made.get("en") else "fail",
+            "summary": f"voices={len(voices)}, pl_PL={d['pl_voices'] or 'none'}, EN wav={d.get('en', {}).get('duration')} s, "
+                       f"PL wav={d.get('pl', {}).get('duration')} s",
+            "details": d}
+
+
+def _hits(text: str, words: list[str]) -> list[str]:
+    low = text.lower()
+    return [w for w in words if w in low]
+
+
+def check_whisper(out: Path) -> dict:
+    import numpy as np
+    import soundfile as sf
+    from huggingface_hub import hf_hub_download
+
+    d: dict = {"revision": WHISPER_REVISION, "models": {}}
+    audio = {}
+    for lang in ("en", "pl"):
+        path = out / f"tts_{lang}.wav"
+        if path.exists():
+            data, rate = sf.read(str(path), dtype="float32")
+            audio[lang] = np.ascontiguousarray(data if data.ndim == 1 else data.mean(axis=1), dtype=np.float32)
+            d[f"audio_{lang}"] = {"rate": rate, "seconds": round(len(data) / rate, 2)}
+    if "en" not in audio:
+        return {"status": "fail", "summary": "no EN WAV from the tts check", "details": d}
+    from pywhispercpp.model import Model
+
+    for filename in WHISPER_FILES:
+        m: dict = {}
+        d["models"][filename] = m
+        start = time.monotonic()
+        try:
+            path = hf_hub_download(WHISPER_REPO, filename, revision=WHISPER_REVISION)
+        except BaseException as error:
+            m["download_error"] = f"{type(error).__name__}: {error}"
+            continue
+        m["download_seconds"] = round(time.monotonic() - start, 2)
+        m["mb"] = round(Path(path).stat().st_size / 2**20, 1)
+        m["path"] = path
+        log = out / f"whisper_{filename}.log"
+        start = time.monotonic()
+        model = Model(path, redirect_whispercpp_logs_to=str(log), n_threads=os.cpu_count() or 3,
+                      print_progress=False, print_realtime=False)
+        m["load_seconds"] = round(time.monotonic() - start, 2)
+        for lang, words in (("en", KEYWORDS_EN), ("pl", KEYWORDS_PL)):
+            if lang not in audio:
+                continue
+            r: dict = {}
+            m[lang] = r
+
+            def detect(samples=audio[lang], engine=model):
+                found = engine.auto_detect_language(samples)
+                top = found[0]
+                probs = sorted(found[1].items(), key=lambda kv: -float(kv[1]))[:5]
+                return {"type": type(found).__name__, "top": [top[0], round(float(top[1]), 3)],
+                        "top5": [[k, round(float(v), 3)] for k, v in probs]}
+
+            guard(r, "auto_detect", detect)
+            start = time.monotonic()
+            try:
+                segments = model.transcribe(audio[lang], language=lang)
+                r["seconds"] = round(time.monotonic() - start, 2)
+                text = " ".join(s.text.strip() for s in segments)
+                r["text"] = text
+                r["segments"] = [[s.t0, s.t1] for s in segments][:5]
+                r["hits"] = _hits(text, words)
+            except BaseException as error:
+                r["error"] = f"{type(error).__name__}: {error}"
+        if log.exists():
+            lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+            m["log_backend_lines"] = [ln for ln in lines if re.search(r"metal|gpu|backend|system_info|BLAS|CPU",
+                                                                       ln, re.I)][:25]
+        del model
+    base = d["models"].get("ggml-base-q5_1.bin", {})
+    en_hits = len((base.get("en") or {}).get("hits", []))
+    if base.get("path"):
+        (out / "model_path.txt").write_text(base["path"], encoding="utf-8")
+    tiny = d["models"].get("ggml-tiny-q5_1.bin", {})
+    return {"status": "ok" if en_hits >= 3 else "fail",
+            "summary": f"base: load {base.get('load_seconds')} s, EN {(base.get('en') or {}).get('seconds')} s "
+                       f"hits {en_hits}/{len(KEYWORDS_EN)}, PL hits {len((base.get('pl') or {}).get('hits', []))}/"
+                       f"{len(KEYWORDS_PL)}; tiny EN hits {len((tiny.get('en') or {}).get('hits', []))}",
+            "details": d}
+
+
+def bounded(details: dict, key: str, func: Callable[[], object], seconds: float) -> object:
+    """guard() in a daemon thread: a call that blocks longer than `seconds` is recorded, not waited for."""
+    box: dict = {}
+
+    def target():
+        try:
+            box["value"] = func()
+        except BaseException as error:
+            box["error"] = f"{type(error).__name__}: {error}"
+            box["traceback"] = traceback.format_exc()[-1500:]
+
+    print(f"[{time.strftime('%X')}] {key} ...", file=sys.stderr, flush=True)
+    start = time.monotonic()
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    took = round(time.monotonic() - start, 2)
+    if thread.is_alive():
+        details[key] = {"error": f"still blocked after {seconds} s"}
+        print(f"--- stacks while {key} is blocked:", file=sys.stderr, flush=True)
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+    elif "error" in box:
+        details[key] = {"error": box["error"], "traceback": box["traceback"], "seconds": took}
+    else:
+        details[key] = {"value": box.get("value"), "seconds": took}
+    print(f"[{time.strftime('%X')}] {key}: {str(details[key])[:300]}", file=sys.stderr, flush=True)
+    return box.get("value")
+
+
+def tcc_preflight_audio_capture() -> int:
+    """Private TCC SPI used by AudioCap: 0 = granted, 1 = denied, 2 = not determined (information only)."""
+    import ctypes
+
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+    cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+    tcc = ctypes.CDLL("/System/Library/PrivateFrameworks/TCC.framework/TCC")
+    tcc.TCCAccessPreflight.restype = ctypes.c_int
+    tcc.TCCAccessPreflight.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    service = cf.CFStringCreateWithCString(None, b"kTCCServiceAudioCapture", 0x08000100)
+    return int(tcc.TCCAccessPreflight(service, None))
+
+
+def check_tap(out: Path) -> dict:
+    import ctypes
+
+    import numpy as np
+
+    d: dict = {"permissions_before": permission_snapshot()}
+    guard(d, "AudioHardwareCreateProcessTap_symbol", lambda: hasattr(
+        ctypes.CDLL("/System/Library/Frameworks/CoreAudio.framework/CoreAudio"), "AudioHardwareCreateProcessTap"))
+
+    def lookup():
+        import objc
+        return str(objc.lookUpClass("CATapDescription"))
+
+    guard(d, "CATapDescription_class", lookup)
+    guard(d, "tcc_preflight_audio_capture_private", tcc_preflight_audio_capture)
+    catap = bounded(d, "import_catap", lambda: __import__("catap"), 30)
+    if catap is None:
+        return {"status": "fail", "summary": f"import catap: {d['import_catap']}", "details": d}
+    d["catap_version"] = catap.__version__
+    native = Path(catap.__file__).parent / "native" / "libcatap_coreaudio.dylib"
+    d["native_lib"] = {"exists": native.exists(), "kb": round(native.stat().st_size / 1024) if native.exists() else None}
+    bounded(d, "bundle_id_taps_supported", lambda: bool(catap.bundle_id_taps_supported()), 10)
+    bounded(d, "audio_devices", lambda: [str(getattr(x, "name", x)) for x in catap.list_audio_devices()][:20], 15)
+    bounded(d, "audio_processes", lambda: [str(getattr(p, "name", p)) for p in catap.list_audio_processes()][:20], 15)
+    bounded(d, "own_process", lambda: str(catap.find_process_by_pid(os.getpid())), 15)
+
+    stats = {"buffers": 0, "frames": 0, "nonzero": 0, "peak": 0.0, "format": None}
+
+    def on_buffer(buffer):
+        stats["buffers"] += 1
+        stats["frames"] += buffer.frame_count
+        fmt = buffer.format
+        stats["format"] = f"{fmt.sample_rate} Hz, {fmt.num_channels} ch, {fmt.bits_per_sample} bit, {fmt.sample_type}"
+        is_float = "float" in str(fmt.sample_type).lower()
+        dtype = np.float32 if is_float and fmt.bits_per_sample == 32 else np.int16 if fmt.bits_per_sample == 16 else None
+        if dtype is not None:
+            samples = np.frombuffer(buffer.data, dtype=dtype)
+            stats["nonzero"] += int(np.count_nonzero(samples))
+            if samples.size:
+                stats["peak"] = max(stats["peak"], float(np.abs(samples.astype(np.float64)).max()))
+
+    session = bounded(d, "session_create", lambda: catap.RecordingSession.from_system_audio(on_buffer=on_buffer), 20)
+    started = False
+    if session is not None:
+        bounded(d, "session_start", lambda: session.start() or True, 30)
+        started = (d["session_start"].get("value") is True)
+    if started:
+        player = subprocess.Popen(["afplay", str(out / "tts_en.wav")]) if (out / "tts_en.wav").exists() else None
+        time.sleep(4)
+        if player is not None:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                d["afplay_rc"] = player.wait(timeout=10)
+        bounded(d, "capture_failed", lambda: bool(session.capture_failed), 5)
+        bounded(d, "session_stop", lambda: session.stop() or True, 30)
+        bounded(d, "captured_only_silence", lambda: bool(session.captured_only_silence), 5)
+        bounded(d, "frames_recorded", lambda: int(session.frames_recorded), 5)
+    d["stats"] = stats
+    d["permissions_after"] = permission_snapshot()
+    step = "stop" if started else "start" if session is not None else "create"
+    result = d.get(f"session_{step}") or {}
+    return {"status": "info",
+            "summary": f"last step {step}: {result.get('error') or 'ok'}; buffers={stats['buffers']}, "
+                       f"frames={stats['frames']}, nonzero={stats['nonzero']}, peak={round(stats['peak'], 4)}, "
+                       f"format={stats['format']}",
+            "details": d}
+
+
+TCC_DATABASES = [Path.home() / "Library" / "Application Support" / "com.apple.TCC" / "TCC.db",
+                 Path("/Library/Application Support/com.apple.TCC/TCC.db")]
+
+
+def tcc_grant(out: Path, home: str, client: str | None = None) -> None:
+    """Run as root (sudo): copy every kTCCServiceMicrophone row to kTCCServiceAudioCapture.
+
+    Experiment from the plan (M3a point 7): the runner images pre-grant the microphone by
+    writing TCC.db; does the same trick give the Process Tap real audio? CI only.
+    """
+    import sqlite3
+
+    result: dict = {}
+    for db in [Path(home) / "Library" / "Application Support" / "com.apple.TCC" / "TCC.db", TCC_DATABASES[1]]:
+        entry: dict = result.setdefault(str(db), {})
+        try:
+            con = sqlite3.connect(str(db))
+            columns = [row[1] for row in con.execute("PRAGMA table_info(access)")]
+            entry["audio_capture_before"] = con.execute(
+                "SELECT client, auth_value FROM access WHERE service='kTCCServiceAudioCapture'").fetchall()
+            entry["microphone_clients"] = con.execute(
+                "SELECT client, auth_value FROM access WHERE service='kTCCServiceMicrophone'").fetchall()
+            values = {"service": "'kTCCServiceAudioCapture'"}
+            limit = ""
+            if client:  # one row for a bundle id (client_type 0), no code requirement
+                values.update(client=f"'{client}'", client_type="0", csreq="NULL")
+                limit = " LIMIT 1"
+            select = ", ".join(values.get(c, c) for c in columns)
+            cursor = con.execute(f"INSERT OR REPLACE INTO access ({', '.join(columns)}) "
+                                 f"SELECT {select} FROM access WHERE service='kTCCServiceMicrophone'{limit}")
+            con.commit()
+            entry["inserted"] = cursor.rowcount
+            con.close()
+        except Exception as error:
+            entry["error"] = f"{type(error).__name__}: {error}"
+    result["killall_tccd"] = run_cmd(["killall", "tccd"])
+    name = f"tcc_grant_{client}.json" if client else "tcc_grant.json"
+    (out / name).write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+
+
+def check_tap_granted(out: Path) -> dict:
+    """The tap again after the TCC.db experiment (sudo); information only."""
+    grant = run_cmd(["sudo", "-n", sys.executable, str(Path(__file__)), "tcc-grant", "--home", str(Path.home()),
+                     "--out", str(out)], timeout=60)
+    time.sleep(2)
+    result = check_tap(out)
+    details = result["details"]
+    details["grant_cmd"] = grant
+    path = out / "tcc_grant.json"
+    details["grant"] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    inserted = [v.get("inserted") for k, v in (details["grant"] or {}).items() if isinstance(v, dict) and k != "killall_tccd"]
+    result["summary"] = f"TCC rows inserted={inserted}; " + result["summary"]
+    return result
+
+
+def _pump_until(done: Callable[[], bool], seconds: float) -> bool:
+    """Run the main thread's NSRunLoop (as Tk would) until done() or the time is up."""
+    import Foundation
+
+    loop = Foundation.NSRunLoop.currentRunLoop()
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if done():
+            return True
+        loop.runUntilDate_(Foundation.NSDate.dateWithTimeIntervalSinceNow_(0.1))
+    return done()
+
+
+def check_tap_runloop(out: Path) -> dict:
+    """Runs 2-5: session.start() blocks in AudioDeviceCreateIOProcID, with or without TCC rows,
+    from python and from the .app. Hypotheses: (A) Core Audio needs the main run loop while a
+    worker thread starts the tap (Ucho's main thread runs Tk, which pumps it); (B) only the
+    system-wide tap blocks, a tap of one process (afplay) does not. (C) start on the main thread
+    under a watchdog. Information only; runs after tap_granted, so the TCC rows exist."""
+    import catap
+    import numpy as np
+
+    d: dict = {"tcc_preflight": None}
+    guard(d, "tcc_preflight", tcc_preflight_audio_capture)
+    stats: dict = {}
+
+    def make_callback(name):
+        entry = stats[name] = {"buffers": 0, "nonzero": 0, "peak": 0.0}
+
+        def on_buffer(buffer):
+            entry["buffers"] += 1
+            if buffer.format.bits_per_sample == 32:
+                samples = np.frombuffer(buffer.data, dtype=np.float32)
+                entry["nonzero"] += int(np.count_nonzero(samples))
+                if samples.size:
+                    entry["peak"] = max(entry["peak"], float(np.abs(samples).max()))
+        return on_buffer
+
+    def attempt(name: str, make_session) -> None:
+        r: dict = d.setdefault(name, {})
+        print(f"[{time.strftime('%X')}] {name} ...", file=sys.stderr, flush=True)
+        try:
+            session = make_session(make_callback(name))
+        except BaseException as error:
+            r["create"] = f"{type(error).__name__}: {error}"
+            return
+        box: dict = {}
+
+        def start():
+            try:
+                session.start()
+                box["ok"] = True
+            except BaseException as error:
+                box["error"] = f"{type(error).__name__}: {error}"
+
+        began = time.monotonic()
+        threading.Thread(target=start, daemon=True).start()
+        finished = _pump_until(lambda: bool(box), 25)
+        r["start"] = ("ok" if box.get("ok") else box.get("error")) if finished else "still blocked after 25 s (main run loop pumped)"
+        r["start_seconds"] = round(time.monotonic() - began, 2)
+        if box.get("ok"):
+            player = subprocess.Popen(["afplay", str(out / "tts_en.wav")])
+            _pump_until(lambda: player.poll() is not None, 15)
+            stopped: dict = {}
+            threading.Thread(target=lambda: stopped.update(ok=session.stop() or True), daemon=True).start()
+            _pump_until(lambda: bool(stopped), 15)
+            r["stopped"] = bool(stopped)
+        r["stats"] = stats[name]
+        print(f"[{time.strftime('%X')}] {name}: {r}", file=sys.stderr, flush=True)
+
+    attempt("A_system_tap_worker_with_runloop", lambda cb: catap.RecordingSession.from_system_audio(on_buffer=cb))
+    # B: tap of one process; afplay plays the WAV in a loop so that it is an audio process
+    player = subprocess.Popen(["/bin/sh", "-c", f"for i in 1 2 3 4 5 6 7 8; do afplay '{out / 'tts_en.wav'}'; done"])
+    time.sleep(1.5)
+
+    def afplay_process():
+        for process in catap.list_audio_processes():
+            if "afplay" in str(getattr(process, "name", "")).lower() or "afplay" in str(getattr(process, "bundle_id", "")):
+                return process
+        return None
+
+    target = bounded(d, "afplay_process", lambda: str(afplay_process()), 10)
+    process = afplay_process() if target and target != "None" else None
+    if process is not None:
+        attempt("B_process_tap_worker_with_runloop",
+                lambda cb: catap.RecordingSession.from_process(process, on_buffer=cb))
+    player.kill()
+
+    # C: start on the main thread; a watchdog writes the result and ends the process if it blocks.
+    name = "C_system_tap_main_thread"
+    d[name] = {"start": "still blocked after 30 s (main thread)"}
+
+    def watchdog():
+        time.sleep(30)
+        print(f"--- stacks while {name} is blocked:", file=sys.stderr, flush=True)
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        result = {"status": "info", "summary": _tap_runloop_summary(d), "details": d, "seconds": None}
+        (out / "tap_runloop.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+        os._exit(0)
+
+    threading.Thread(target=watchdog, daemon=True).start()
+    try:
+        session = catap.RecordingSession.from_system_audio(on_buffer=make_callback(name))
+        session.start()
+        d[name]["start"] = "ok"
+        subprocess.run(["afplay", str(out / "tts_en.wav")], timeout=15)
+        session.stop()
+        d[name]["stats"] = stats[name]
+    except BaseException as error:
+        d[name]["start"] = f"{type(error).__name__}: {error}"
+    return {"status": "info", "summary": _tap_runloop_summary(d), "details": d}
+
+
+def _tap_runloop_summary(d: dict) -> str:
+    parts = [f"TCC preflight={d.get('tcc_preflight')}"]
+    for key in ("A_system_tap_worker_with_runloop", "B_process_tap_worker_with_runloop", "C_system_tap_main_thread"):
+        r = d.get(key) or {}
+        parts.append(f"{key[0]}: {r.get('create') or r.get('start')} {r.get('stats', '')}")
+    return "; ".join(parts)
+
+
+def check_microphone(out: Path) -> dict:
+    import numpy as np
+    import sounddevice as sd
+
+    d: dict = {}
+    try:
+        info = sd.query_devices(kind="input")
+        d["default_input"] = info["name"]
+    except BaseException as error:
+        d["default_input"] = f"{type(error).__name__}: {error}"
+        return {"status": "info", "summary": f"no input device: {d['default_input']}", "details": d}
+    chunks: list[bytes] = []
+
+    def callback(indata, frames, _time, status):
+        chunks.append(bytes(indata))
+
+    try:
+        with sd.RawInputStream(samplerate=16000, channels=1, dtype="int16", blocksize=1600, callback=callback):
+            time.sleep(1.5)
+        data = np.frombuffer(b"".join(chunks), dtype=np.int16)
+        d.update(blocks=len(chunks), samples=int(data.size), nonzero=int(np.count_nonzero(data)))
+    except BaseException as error:
+        d["error"] = f"{type(error).__name__}: {error}"
+    d["permissions_after"] = permission_snapshot()
+    return {"status": "info", "summary": f"input={d['default_input']}, samples={d.get('samples')}, "
+                                         f"nonzero={d.get('nonzero')}, error={d.get('error')}", "details": d}
+
+
+LIGHT_EXCLUDES = ["openvino", "openvino_genai", "openvino_tokenizers", "catap", "sounddevice", "soundfile"]
+
+
+def _build_probe(out: Path, temp: Path, name: str, excludes: list[str], extra: list[str] | None = None) -> dict:
+    d: dict = {}
+    args = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--windowed", "--name", name,
+            "--osx-bundle-identifier", f"app.ucho.spike.{name.lower()}", "--distpath", str(temp / "dist"),
+            "--workpath", str(temp / "build" / name), "--specpath", str(temp)]
+    for module in excludes:
+        args += ["--exclude-module", module]
+    args += extra or []
+    build = run_cmd(args + [str(HERE / "pyi_probe.py")], timeout=900, tail=8000)
+    log = build.get("err", "") + build.get("out", "")
+    (out / f"pyinstaller-{name}.log").write_text(log, encoding="utf-8")
+    d["build"] = {"rc": build.get("rc"), "seconds": build.get("seconds")}
+    app = temp / "dist" / f"{name}.app"
+    if build.get("rc") != 0 or not app.exists():
+        failed = re.findall(r"Failed to process binary '([^']+)'", log)
+        d["failed_binary"] = failed[-1] if failed else None
+        d["codesign_error"] = "internal error in Code Signing subsystem" in log
+        return d
+    d["app_mb"] = round(sum(p.stat().st_size for p in app.rglob("*") if p.is_file() and not p.is_symlink()) / 2**20, 1)
+    d["dylibs"] = sorted(str(p.relative_to(app)) for p in app.rglob("*.dylib"))[:120]
+    d["codesign_verify"] = run_cmd(["codesign", "--verify", "--deep", "--strict", str(app)])
+    d["codesign_display"] = run_cmd(["codesign", "-dv", str(app)]).get("err", "")[-800:]
+    d["spctl"] = run_cmd(["spctl", "-a", "-vv", "-t", "exec", str(app)])
+    model_file = out / "model_path.txt"
+    if model_file.exists():
+        probe_out = out / f"pyi_probe_{name}.json"
+        run = run_cmd([str(app / "Contents" / "MacOS" / name), model_file.read_text(encoding="utf-8"),
+                       str(out / "tts_en.wav"), str(probe_out)], timeout=300)
+        d["run"] = {k: run.get(k) for k in ("rc", "seconds", "err")}
+        if probe_out.exists():
+            d["probe"] = json.loads(probe_out.read_text(encoding="utf-8"))
+    d["app"] = str(app)
+    return d
+
+
+def _codesign_diagnose(site_lib: Path, temp: Path) -> dict:
+    """Why does ad-hoc signing of an OpenVINO dylib fail? Tries on copies, never on the original."""
+    d: dict = {"lib": site_lib.name}
+    d["lipo"] = run_cmd(["lipo", "-archs", str(site_lib)]).get("out", "").strip()
+    d["original_signature"] = run_cmd(["codesign", "-dvvv", str(site_lib)]).get("err", "")[-600:]
+    load = run_cmd(["otool", "-l", str(site_lib)], tail=200000).get("out", "")
+    d["has_code_signature_cmd"] = "LC_CODE_SIGNATURE" in load
+    d["rpaths"] = re.findall(r"path (\S+) \(offset", load)[:10]
+    plain = temp / f"plain-{site_lib.name}"
+    shutil.copy2(site_lib, plain)
+    d["sign_copy"] = run_cmd(["codesign", "-s", "-", "--force", str(plain)])
+    d["sign_copy_like_pyinstaller"] = run_cmd(["codesign", "-s", "-", "--force", "--all-architectures", "--timestamp",
+                                               str(plain)])
+    stripped = temp / f"stripped-{site_lib.name}"
+    shutil.copy2(site_lib, stripped)
+    d["remove_signature"] = run_cmd(["codesign", "--remove-signature", str(stripped)])
+    d["sign_after_remove"] = run_cmd(["codesign", "-s", "-", "--force", str(stripped)])
+    return d
+
+
+def macho_strip_signature(source: Path, target: Path) -> dict:
+    """Copy a thin 64-bit Mach-O without LC_CODE_SIGNATURE (what codesign --remove-signature does)."""
+    import struct
+
+    data = bytearray(source.read_bytes())
+    info: dict = {"file_size": len(data)}
+    if struct.unpack_from("<I", data, 0)[0] != 0xFEEDFACF:
+        info["error"] = "not a thin 64-bit Mach-O"
+        return info
+    ncmds, sizeofcmds = struct.unpack_from("<II", data, 16)
+    offset, signature, linkedit = 32, None, None
+    for _ in range(ncmds):
+        cmd, size = struct.unpack_from("<II", data, offset)
+        if cmd == 0x1D:
+            signature = (offset, size, *struct.unpack_from("<II", data, offset + 8))
+        elif cmd == 0x19 and bytes(data[offset + 8:offset + 24]).rstrip(b"\0") == b"__LINKEDIT":
+            linkedit = offset
+        offset += size
+    if signature is None or linkedit is None:
+        info["error"] = "no LC_CODE_SIGNATURE or __LINKEDIT"
+        return info
+    cmd_offset, cmd_size, dataoff, datasize = signature
+    fileoff, filesize = struct.unpack_from("<QQ", data, linkedit + 40)
+    info.update(sig_dataoff=dataoff, sig_datasize=datasize, sig_end=dataoff + datasize,
+                linkedit_end=fileoff + filesize, trailing_bytes=len(data) - (dataoff + datasize),
+                cmd_is_last=cmd_offset + cmd_size == 32 + sizeofcmds)
+    end_cmds = 32 + sizeofcmds
+    data[cmd_offset:end_cmds] = data[cmd_offset + cmd_size:end_cmds] + bytes(cmd_size)
+    struct.pack_into("<II", data, 16, ncmds - 1, sizeofcmds - cmd_size)
+    if linkedit > cmd_offset:
+        linkedit -= cmd_size
+    struct.pack_into("<Q", data, linkedit + 48, dataoff - fileoff)
+    del data[dataoff:]
+    target.write_bytes(bytes(data))
+    return info
+
+
+def _signing_survey(site: Path, temp: Path) -> dict:
+    """Which native files of the full bundle does `codesign -s - --force` refuse (tried on copies)?"""
+    roots = ["openvino", "openvino_genai", "openvino_tokenizers", "catap", "_sounddevice_data", "_soundfile_data",
+             "pywhispercpp", "objc", "numpy", "PIL", "soxr", "hf_xet"]
+    files = [p for root in roots if (site / root).exists() for p in (site / root).rglob("*")
+             if p.is_file() and not p.is_symlink() and (p.suffix in (".dylib", ".so") or ".so." in p.name)]
+    refused, authorities = [], {}
+    work = temp / "survey"
+    work.mkdir(exist_ok=True)
+    for path in files:
+        copy = work / path.name
+        shutil.copy2(path, copy)
+        result = run_cmd(["codesign", "-s", "-", "--force", str(copy)])
+        if result.get("rc") != 0:
+            relative = str(path.relative_to(site))
+            refused.append(relative)
+            display = run_cmd(["codesign", "-dvv", str(path)]).get("err", "")
+            authorities[relative] = re.findall(r"Authority=(.*)", display)[:1]
+        copy.unlink(missing_ok=True)
+    return {"checked": len(files), "refused": refused, "authorities": authorities}
+
+
+def _tap_in_app(out: Path, app: Path) -> dict:
+    """Run 4: the tap blocks in AudioDeviceCreateIOProcID for a bare python, even with a TCC row.
+    Try it from the frozen .app with NSAudioCaptureUsageDescription: direct exec, through
+    LaunchServices (`open`, the app is then the responsible process) and after a TCC row for
+    the bundle id."""
+    d: dict = {}
+    plist = app / "Contents" / "Info.plist"
+    for key in ("NSAudioCaptureUsageDescription", "NSMicrophoneUsageDescription"):
+        d[f"plist_{key}"] = run_cmd(["plutil", "-insert", key, "-string", "Ucho spike: system audio test", str(plist)])
+    d["resign"] = run_cmd(["codesign", "--force", "--deep", "-s", "-", str(app)])
+    d["verify"] = run_cmd(["codesign", "--verify", "--deep", "--strict", str(app)]).get("rc")
+    exe = app / "Contents" / "MacOS" / app.stem
+    wav = str(out / "tts_en.wav")
+    bundle_id = run_cmd(["plutil", "-extract", "CFBundleIdentifier", "raw", str(plist)]).get("out", "").strip()
+    d["bundle_id"] = bundle_id
+
+    def read(name: str) -> object:
+        path = out / name
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    run = run_cmd([str(exe), "tap", wav, str(out / "tap_app_direct.json")], timeout=90)
+    d["direct"] = {"rc": run.get("rc"), "seconds": run.get("seconds"), "result": read("tap_app_direct.json")}
+    run = run_cmd(["open", "-W", "-n", str(app), "--args", "tap", wav, str(out / "tap_app_open.json")], timeout=90)
+    d["open"] = {"rc": run.get("rc"), "seconds": run.get("seconds"), "result": read("tap_app_open.json")}
+    d["grant"] = run_cmd(["sudo", "-n", sys.executable, str(Path(__file__)), "tcc-grant", "--home", str(Path.home()),
+                          "--client", bundle_id, "--out", str(out)], timeout=60)
+    time.sleep(2)
+    run = run_cmd(["open", "-W", "-n", str(app), "--args", "tap", wav, str(out / "tap_app_open_granted.json")],
+                  timeout=90)
+    d["open_granted"] = {"rc": run.get("rc"), "seconds": run.get("seconds"),
+                         "result": read("tap_app_open_granted.json")}
+    return d
+
+
+def check_pyinstaller(out: Path) -> dict:
+    import sysconfig
+
+    temp = Path(os.environ.get("RUNNER_TEMP", "/tmp")) / "pyi"
+    shutil.rmtree(temp, ignore_errors=True)
+    temp.mkdir(parents=True)
+    site = Path(sysconfig.get_paths()["purelib"])
+    d: dict = {}
+    # 1. Tk + pywhispercpp only (the first run of the spike built this one fine).
+    light = d["light"] = _build_probe(out, temp, "WhisperProbe", LIGHT_EXCLUDES)
+    if light.get("app"):
+        dmg = temp / "WhisperProbe.dmg"
+        for attempt in range(3):
+            made = run_cmd(["hdiutil", "create", "-volname", "WhisperProbe", "-srcfolder", light["app"], "-format",
+                            "ULFO", "-ov", str(dmg)], timeout=300)
+            light[f"hdiutil_attempt_{attempt + 1}"] = {k: made.get(k) for k in ("rc", "seconds", "err")}
+            if made.get("rc") == 0:
+                light["dmg_mb"] = round(dmg.stat().st_size / 2**20, 1)
+                break
+            time.sleep(10)
+    # 2. Everything Ucho needs (OpenVINO, catap, sounddevice, soundfile). Run 2 and 3: codesign
+    #    cannot re-sign or even remove the Intel signature of openvino/libs/libtbb.12.dylib
+    #    ("internal error in Code Signing subsystem"). Survey every native file of the bundle
+    #    candidates, strip the signature of the ones codesign refuses with our own Mach-O edit
+    #    (CI only, in the runner's site-packages), then build again.
+    d["survey"] = survey = _signing_survey(site, temp)
+    d["stripped"] = stripped = []
+    for item in survey["refused"]:
+        path = site / item
+        info = macho_strip_signature(path, temp / ("stripped-" + path.name))
+        info["sign_stripped_copy"] = run_cmd(["codesign", "-s", "-", "--force", str(temp / ("stripped-" + path.name))])
+        info["load_stripped_copy"] = run_cmd([sys.executable, "-c", "import ctypes, sys; ctypes.CDLL(sys.argv[1])",
+                                              str(temp / ("stripped-" + path.name))])
+        if info["sign_stripped_copy"].get("rc") == 0:
+            shutil.copy2(temp / ("stripped-" + path.name), path)
+            info["replaced"] = True
+        stripped.append({"lib": item, **info})
+    shutil.rmtree(Path.home() / "Library" / "Application Support" / "pyinstaller", ignore_errors=True)
+    # Run 4: OpenVINO had no devices and catap's native dylib was missing in the frozen app.
+    full = d["full"] = _build_probe(out, temp, "FullProbe", [], ["--collect-all", "openvino",
+                                                                   "--collect-binaries", "catap"])
+    fixes = [s["lib"] for s in stripped if s.get("replaced")]
+    if full.get("app"):
+        app = Path(full["app"])
+        full["openvino_files"] = sorted(str(p.relative_to(app)) for p in app.rglob("*")
+                                        if "plugin" in p.name or p.name == "plugins.xml")[:30]
+        d["tap_in_app"] = _tap_in_app(out, app)
+    lp, fp = light.get("probe", {}), full.get("probe", {})
+    ok = (light.get("codesign_verify", {}).get("rc") == 0 and len(_hits(lp.get("text", ""), KEYWORDS_EN)) >= 3)
+    return {"status": "ok" if ok else "fail",
+            "summary": f"light: build {light['build']['seconds']} s, .app {light.get('app_mb')} MB, dmg "
+                       f"{light.get('dmg_mb')} MB, codesign rc={light.get('codesign_verify', {}).get('rc')}, "
+                       f"hits={len(_hits(lp.get('text', ''), KEYWORDS_EN))}, tk={lp.get('tk')}; "
+                       f"full: build rc={full['build']['rc']} {full['build']['seconds']} s, .app {full.get('app_mb')} MB, "
+                       f"refused by codesign={len(survey['refused'])} of {survey['checked']}, stripped={fixes}, codesign rc="
+                       f"{full.get('codesign_verify', {}).get('rc')}, hits={len(_hits(fp.get('text', ''), KEYWORDS_EN))}, "
+                       f"openvino={fp.get('openvino')}, catap={str(fp.get('catap'))[:120]}, "
+                       f"sounddevice={str(fp.get('sounddevice'))[:40]}, soundfile={fp.get('soundfile')}, "
+                       f"pystray={fp.get('pystray')}, genai={fp.get('openvino_genai')}; tap in .app: "
+                       + "; ".join(f"{k}: {str(((d.get('tap_in_app') or {}).get(k) or {}).get('result'))[:160]}"
+                                   for k in ("direct", "open", "open_granted")),
+            "details": d}
+
+
+CHECKS: dict[str, tuple[Callable[[Path], dict], int]] = {
+    "install": (check_install, 30),
+    "env": (check_env, 120),
+    "imports": (check_imports, 300),
+    "tk": (check_tk, 60),
+    "ctk": (check_ctk, 60),
+    "tray_pystray_default": (check_tray_pystray_default, 60),
+    "tray_pystray_main": (check_tray_pystray_main, 60),
+    "tray_thread": (check_tray_thread, 40),
+    "tray_nsstatusitem": (check_tray_nsstatusitem, 60),
+    "hotkey": (check_hotkey, 90),
+    "tts": (check_tts, 120),
+    "whisper": (check_whisper, 900),
+    "microphone": (check_microphone, 60),
+    "tap": (check_tap, 240),
+    "tap_granted": (check_tap_granted, 300),
+    "tap_runloop": (check_tap_runloop, 180),
+    "pyinstaller": (check_pyinstaller, 3000),
+}
+
+
+def run_one(name: str, out: Path) -> None:
+    func, timeout = CHECKS[name]
+    faulthandler.enable()
+    faulthandler.dump_traceback_later(max(timeout - 10, 5), exit=False)
+    start = time.monotonic()
+    try:
+        result = func(out)
+    except BaseException as error:
+        result = {"status": "error", "summary": f"{type(error).__name__}: {error}",
+                  "details": {"traceback": traceback.format_exc()[-3000:]}}
+    result["seconds"] = round(time.monotonic() - start, 2)
+    (out / f"{name}.json").write_text(json.dumps(result, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
+    faulthandler.cancel_dump_traceback_later()
+    # A blocked daemon thread (Core Audio) must not keep the process alive after the result is written.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
+def run_all(out: Path, only: list[str] | None) -> None:
+    for name, (_func, timeout) in CHECKS.items():
+        if only and name not in only:
+            continue
+        log = out / f"{name}.log"
+        target = out / f"{name}.json"
+        target.unlink(missing_ok=True)
+        start = time.monotonic()
+        with open(log, "w", encoding="utf-8") as handle:
+            try:
+                done = subprocess.run([sys.executable, str(Path(__file__)), "run", name, "--out", str(out)],
+                                      stdout=handle, stderr=subprocess.STDOUT, timeout=timeout)
+                code = done.returncode
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+        seconds = round(time.monotonic() - start, 2)
+        if not target.exists():
+            tail = log.read_text(encoding="utf-8", errors="replace")[-2000:]
+            target.write_text(json.dumps({"status": "crash", "summary": f"process ended with {code} after {seconds} s",
+                                          "seconds": seconds, "details": {"log_tail": tail}}, indent=2),
+                              encoding="utf-8")
+        status = json.loads(target.read_text(encoding="utf-8"))["status"]
+        print(f"{name}: {status} ({seconds} s, exit {code})", flush=True)
+
+
+def summary(out: Path) -> str:
+    runner = os.environ.get("SPIKE_RUNNER", platform.mac_ver()[0])
+    lines = [f"## macOS spike (M3a): {runner}", "", "| Check | Status | Time | Result |", "|---|---|---|---|"]
+    for name in CHECKS:
+        path = out / f"{name}.json"
+        if not path.exists():
+            lines.append(f"| {name} | missing | | |")
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        text = str(data.get("summary", "")).replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| {name} | {data.get('status')} | {data.get('seconds', '')} s | {text} |")
+    lines += ["", "Details: artifact `spike-<runner>` (JSON per check, logs, screenshots)."]
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("command", choices=["all", "run", "summary", "hotkey-holder", "tcc-grant"])
+    parser.add_argument("name", nargs="*")
+    parser.add_argument("--out", type=Path, default=Path("spike-out"))
+    parser.add_argument("--home", default=str(Path.home()))
+    parser.add_argument("--client")
+    args = parser.parse_args()
+    if args.command == "hotkey-holder":
+        hotkey_holder()
+        return 0
+    if args.command == "tcc-grant":
+        tcc_grant(args.out, args.home, args.client)
+        return 0
+    args.out.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    os.environ.setdefault("DO_NOT_TRACK", "1")
+    if args.command == "run":
+        run_one(args.name[0], args.out)
+    elif args.command == "all":
+        run_all(args.out, args.name or None)
+    else:
+        text = summary(args.out)
+        (args.out / "summary.md").write_text(text, encoding="utf-8")
+        target = os.environ.get("GITHUB_STEP_SUMMARY")
+        if target:
+            with open(target, "a", encoding="utf-8") as handle:
+                handle.write(text)
+        print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

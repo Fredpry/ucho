@@ -13,13 +13,17 @@ import importlib.util
 import json
 import logging
 import os
+import sys
 from pathlib import Path
+
+from . import paths
 
 log = logging.getLogger(__name__)
 
-PROJECT_DIR = Path(__file__).resolve().parent.parent
+PROJECT_DIR = paths.app_dir()
+DATA_DIR = Path(paths.data_dir())
 # Before v0.2 the folder was called "modele".
-LEGACY_MODELS_DIR = PROJECT_DIR / "modele"
+LEGACY_MODELS_DIR = Path(paths.legacy_models_dir())
 
 
 def _models_dir() -> Path:
@@ -29,7 +33,7 @@ def _models_dir() -> Path:
     (several GB). If it fails (e.g. another Ucho process still has a model
     open) we keep using the old folder rather than download everything again.
     """
-    new = PROJECT_DIR / "models"
+    new = Path(paths.models_dir())
     if new.exists() or not LEGACY_MODELS_DIR.is_dir():
         return new
     try:
@@ -41,10 +45,10 @@ def _models_dir() -> Path:
 
 MODELS_DIR = _models_dir()
 OV_CACHE_DIR = MODELS_DIR / "ovcache"
-SETTINGS_FILE = PROJECT_DIR / "settings.json"
+SETTINGS_FILE = Path(paths.settings_file())
 # v0.1 settings file name; migrated to settings.json on first start (and kept).
 LEGACY_SETTINGS_NAME = "ustawienia.json"
-LOG_FILE = PROJECT_DIR / "ucho.log"
+LOG_FILE = Path(paths.log_file())
 
 # Recordings deliberately do NOT go to Documents: on many company computers
 # Documents is redirected to OneDrive, so recordings and transcripts would go
@@ -63,6 +67,10 @@ VERSION = "0.5.0"
 # AppUserModelID: Windows groups taskbar windows by it. Without our own id the
 # window inherits the pythonw.exe icon instead of ours.
 APP_ID = "Ucho.Transcription"
+
+# Where a diagnostics package goes (ucho/diagnostics.py). The user sends it
+# from their own mail program; Ucho itself sends nothing.
+SUPPORT_EMAIL = "fryderyk@pryjma.pl"
 
 # Ready-made, pre-converted OpenVINO models: no PyTorch and no conversion.
 # Turbo is a distilled model (4 decoder layers instead of 32): fast, but weak
@@ -97,6 +105,39 @@ MODELS = {
         "description": "Parakeet TDT 0.6B v3 — fast on the CPU, weak with English phrases in Polish",
         "size": "~2.5 GB",
         "backend": "parakeet",
+    },
+    # macOS models (ucho/whispercpp.py, whisper.cpp via Metal or CPU).
+    # `hidden` models are only for CI and tests and are not offered in
+    # Settings; the shared repo has one pinned revision in REVISIONS.
+    "ggerganov/whisper.cpp:ggml-large-v3-q5_0.bin": {
+        "name": "large-v3-q5_0",
+        "description": "Large-v3 Q5 (whisper.cpp) — best language detection on Mac",
+        "size": "~1.1 GB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+    },
+    "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin": {
+        "name": "large-v3-turbo-q5_0",
+        "description": "Turbo Q5 (whisper.cpp) — faster on Mac, worse with mixed languages",
+        "size": "~570 MB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+    },
+    "ggerganov/whisper.cpp:ggml-tiny-q5_1.bin": {
+        "name": "tiny-q5_1",
+        "description": "Tiny Q5 (whisper.cpp) — smallest test model",
+        "size": "~32 MB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+        "hidden": True,
+    },
+    "ggerganov/whisper.cpp:ggml-base-q5_1.bin": {
+        "name": "base-q5_1",
+        "description": "Base Q5 (whisper.cpp) — small test model",
+        "size": "~60 MB",
+        "backend": "whispercpp",
+        "platforms": ["darwin"],
+        "hidden": True,
     },
 }
 
@@ -179,6 +220,9 @@ REVISIONS = {
     #   c59158379255ad66e161679cca6af8d52d51e389e3224ab7d7a7baae295c2db5
     "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0": "9403a6902bb58e3d5ae8c7e77c3422de279db2e0",
     "csukuangfj/speaker-embedding-models": "0743f301363dec56491a490f6d6cbc9d67f9a3bf",
+    # whisper.cpp GGML models (checked in Hugging Face API 2026-11-19; MIT,
+    # ggml conversions of OpenAI Whisper weights).
+    "ggerganov/whisper.cpp": "5359861c739e955e79d9a303bcbc70fb988958b1",
 }
 
 # Repos of which only some files are downloaded (the Parakeet repos also hold
@@ -198,6 +242,10 @@ DOWNLOAD_PATTERNS = {
     "csukuangfj/speaker-embedding-models": [
         "3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx",
     ],
+    "ggerganov/whisper.cpp:ggml-large-v3-q5_0.bin": ["ggml-large-v3-q5_0.bin"],
+    "ggerganov/whisper.cpp:ggml-large-v3-turbo-q5_0.bin": ["ggml-large-v3-turbo-q5_0.bin"],
+    "ggerganov/whisper.cpp:ggml-tiny-q5_1.bin": ["ggml-tiny-q5_1.bin"],
+    "ggerganov/whisper.cpp:ggml-base-q5_1.bin": ["ggml-base-q5_1.bin"],
 }
 
 # Whisper expects the language token in this form. None = auto-detection.
@@ -584,9 +632,20 @@ def prepare_dirs(settings: Settings | None = None) -> None:
 
 def onedrive_folder(path: Path) -> bool:
     """True when `path` lies in a OneDrive-synced folder (recordings would go to the cloud)."""
-    text = str(path).lower()
-    for variable in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer"):
-        root = os.environ.get(variable)
-        if root and text.startswith(root.lower().rstrip("\\/")):
-            return True
-    return "onedrive" in text
+    return paths.is_cloud_path(path)
+
+
+def split_model_id(key: str) -> tuple[str, str | None]:
+    """Splits a `repo:filename` model key into `(repo, filename)`, or `(key, None)`."""
+    if ":" not in key:
+        return key, None
+    repo, filename = key.split(":", 1)
+    if len(repo) > 1 and "/" in repo and filename:
+        return repo, filename
+    return key, None
+
+
+def model_supported(key: str) -> bool:
+    """True when `key` has no platform restriction or supports `sys.platform`."""
+    platforms = MODELS.get(key, {}).get("platforms")
+    return platforms is None or sys.platform in platforms

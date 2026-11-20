@@ -43,7 +43,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from . import config, parakeet, transcribe
+from . import config, parakeet, platforms, transcribe
 from .i18n import t
 from .merge import Segment, diarized_code
 
@@ -88,10 +88,13 @@ def ready() -> bool:
     return available() and models_downloaded()
 
 
-def download_models() -> None:
-    """Downloads every speaker detection model in `config.SPEAKER_MODELS`."""
+def download_models(tqdm_class: type | None = None) -> None:
+    """Downloads every speaker detection model in `config.SPEAKER_MODELS`.
+
+    One `tqdm_class` for all of them, so the progress adds up across the repos.
+    """
     for repo in config.SPEAKER_MODELS:
-        transcribe.model_path(repo, download=True)
+        transcribe.model_path(repo, download=True, tqdm_class=tqdm_class)
 
 
 def model_files() -> tuple[Path, Path]:
@@ -250,17 +253,17 @@ def run_worker(
 ) -> list[Turn]:
     """Runs speaker detection on `file` in a short-lived worker process and returns its turns."""
     started = time.monotonic()
-    command = [
-        worker_python(),
-        "-m",
+    command = platforms.shell().worker_command(
         "ucho.diarize",
-        "--worker",
-        "--threshold",
-        repr(float(threshold)),
-        "--threads",
-        str(int(threads)),
-        str(file),
-    ]
+        [
+            "--worker",
+            "--threshold",
+            repr(float(threshold)),
+            "--threads",
+            str(int(threads)),
+            str(file),
+        ],
+    )
     # No console window; below-normal priority keeps the UI and dictation responsive.
     # The environment is inherited (HF_HOME is set by ucho.config).
     proc = popen(

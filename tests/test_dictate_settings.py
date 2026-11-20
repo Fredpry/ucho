@@ -2,11 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dictate settings migration (dyktuj.json -> dictate.json) and the last text from the log."""
 import json
-import sys
 
 import pytest
-
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="ucho.dictate uses WinAPI")
 
 LEGACY = {
     "jezyk": "pl",

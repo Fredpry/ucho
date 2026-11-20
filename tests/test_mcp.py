@@ -232,7 +232,7 @@ def test_server_survives_bad_messages(archive):
 
 def _junction_or_skip(link: Path, target: Path) -> None:
     if sys.platform != "win32":
-        pytest.skip("junctions are Windows only")
+        pytest.skip("Windows only: directory junctions")
     import _winapi
 
     _winapi.CreateJunction(str(target), str(link))
