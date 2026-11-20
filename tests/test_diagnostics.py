@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
-from ucho import config, diagnostics, dictate
+from ucho import config, diagnostics, dictate, platforms
 from ucho.diagnostics import classify, recognize
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -111,9 +111,10 @@ def test_onedrive_hint(monkeypatch):
     error = PermissionError(errno.EACCES, "Access is denied",
                             r"C:\Users\someone\OneDrive\Ucho\recordings\a.flac")
     error.winerror = 32
-    assert "OneDrive" in classify(error).hint
-    plain = PermissionError(errno.EACCES, "Access is denied", r"D:\local\a.flac")
-    assert "OneDrive" not in classify(plain).hint
+    with platforms.override("windows"):  # the macOS text names no vendor (platform_text)
+        assert "OneDrive" in classify(error).hint
+        plain = PermissionError(errno.EACCES, "Access is denied", r"D:\local\a.flac")
+        assert "OneDrive" not in classify(plain).hint
 
 
 @pytest.mark.parametrize("error", [
