@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -648,7 +649,10 @@ def _run_child(tmp_path, tracks: str) -> dict:
     assert proc.returncode == 0 and lines, proc.stderr[-3000:]
     out = json.loads(lines[-1].removeprefix("RESULT "))
     out["process_s"] = took
-    print(out)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:  # what the runner's tap did, for docs/macos-spike.md and the 7b list
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(f"- process tap, tracks={tracks}: `{json.dumps(out)}`\n")
     return out
 
 
