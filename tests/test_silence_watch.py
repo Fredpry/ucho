@@ -161,6 +161,22 @@ def test_failed_source_is_dropped_and_the_recording_goes_on(monkeypatch, tmp_pat
     assert notices[0][1] in result["warnings"]
 
 
+def test_failed_source_without_a_microphone_track_says_so(monkeypatch, tmp_path):
+    with platforms.override("macos"):
+        backend = FakeBackend()
+        notices: list[tuple[str, str]] = []
+        monkeypatch.setattr(platforms, "audio", lambda: backend)
+        rec = audio.Recorder(tracks="system",
+                             on_notice=lambda code, message: notices.append((code, message)))
+        rec.start(tmp_path)
+        try:
+            backend.streams[-1][0].failure = "gone"
+            rec._drop_failed()
+        finally:
+            rec.stop()
+    assert notices == [(audio.NOTICE_SYSTEM_FAILED, "System audio could not be recorded.")]
+
+
 def test_failed_source_keeps_what_it_recorded(monkeypatch, tmp_path):
     with platforms.override("macos"):
         backend, rec, notices = _recorder(monkeypatch)

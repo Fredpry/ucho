@@ -495,5 +495,6 @@
   "Open at login": "Otwieraj przy logowaniu",
   "System audio is silent. Ucho may not have permission to record it.": "Dźwięk systemowy jest pusty. Ucho może nie mieć zgody na jego nagrywanie.",
   "System audio could not be recorded — recording the microphone only.": "Nie udało się nagrać dźwięku systemowego — nagrywam tylko mikrofon.",
-  "System audio capture is not responding. Restart Ucho to record it again.": "Nagrywanie dźwięku systemowego nie odpowiada. Uruchom Ucho ponownie, żeby znowu go nagrywać."
+  "System audio capture is not responding. Restart Ucho to record it again.": "Nagrywanie dźwięku systemowego nie odpowiada. Uruchom Ucho ponownie, żeby znowu go nagrywać.",
+  "System audio could not be recorded.": "Nie udało się nagrać dźwięku systemowego."
 }

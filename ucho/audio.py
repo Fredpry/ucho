@@ -659,8 +659,12 @@ class Recorder:
                 track.stop_stream()
             log.warning("Track %s stopped for this recording: %s", name, failure)
             if name == "system":
-                self._notice(NOTICE_SYSTEM_FAILED,
-                             t("System audio could not be recorded — recording the microphone only."))
+                microphone = self._tracks.get("microphone")
+                if microphone is not None and not microphone.abandoned:
+                    message = t("System audio could not be recorded — recording the microphone only.")
+                else:  # tracks="system": nothing else is being recorded
+                    message = t("System audio could not be recorded.")
+                self._notice(NOTICE_SYSTEM_FAILED, message)
 
     def _watchdog_loop(self) -> None:
         while not self._stop.wait(2.0):
