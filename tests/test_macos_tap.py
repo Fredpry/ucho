@@ -21,6 +21,7 @@ import textwrap
 import threading
 import time
 import types
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -649,10 +650,8 @@ def _run_child(tmp_path, tracks: str) -> dict:
     assert proc.returncode == 0 and lines, proc.stderr[-3000:]
     out = json.loads(lines[-1].removeprefix("RESULT "))
     out["process_s"] = took
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:  # what the runner's tap did, for docs/macos-spike.md and the 7b list
-        with open(summary, "a", encoding="utf-8") as handle:
-            handle.write(f"- process tap, tracks={tracks}: `{json.dumps(out)}`\n")
+    # Shown in the "warnings summary" of the CI log: what the runner's tap did.
+    warnings.warn(f"process tap, tracks={tracks}: {json.dumps(out)}", stacklevel=2)
     return out
 
 
@@ -669,6 +668,10 @@ def test_real_tap_never_blocks_the_app(tmp_path):
     assert out["stop_s"] < 3.0
     assert out["max_gap_s"] is not None and out["max_gap_s"] < 1.0
     assert out["tracks"] == ["system"]
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        # docs/macos-spike.md: on the runners the tap never starts. If a new
+        # runner image starts it, this path is no longer tested in CI: update.
+        assert out["system_abandoned"], out
     if out["system_abandoned"]:  # the runners: start blocks in Core Audio
         assert out["notices"] == [audio.NOTICE_SYSTEM_FAILED]
         assert out["result_tracks"] == []
