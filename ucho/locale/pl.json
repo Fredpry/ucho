@@ -502,5 +502,7 @@
   "force quitting apps": "wymuszanie zakończenia aplikacji",
   "locking the screen": "blokowanie ekranu",
   "screenshots": "zrzuty ekranu",
-  "app menu shortcuts": "skróty z menu aplikacji"
+  "app menu shortcuts": "skróty z menu aplikacji",
+  "Ucho needs the Accessibility permission to paste. Text is on the clipboard, press {keys}.": "Ucho potrzebuje uprawnienia Dostępność, żeby wklejać. Tekst jest w schowku, wklej go {keys}.",
+  "Secure keyboard entry is on (a password field or a terminal). Text is on the clipboard, press {keys}.": "Włączone jest bezpieczne wprowadzanie (pole hasła albo terminal). Tekst jest w schowku, wklej go {keys}."
 }
