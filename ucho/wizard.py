@@ -15,9 +15,10 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, hardware, llm, theme, transcribe, ui
+from . import config, hardware, llm, platform_text, theme, transcribe, ui
 from .hotkeys import label as hotkey_label
 from .i18n import t
+from .permissions_ui import PermissionsPanel
 from .settings_screen import LanguageModelPicker, short_model
 from .theme import C
 
@@ -32,6 +33,9 @@ class Wizard(ctk.CTkFrame):
         self.app = app
         self.settings = app.settings
         self.step = step
+        names = platform_text.wizard_steps()
+        self.steps = len(names)
+        self._permissions_next_label: str | None = None
         self.state = state if state is not None else {
             "folder": str(self.settings.recordings_dir),
             "use_recommendation": True,
@@ -53,7 +57,7 @@ class Wizard(ctk.CTkFrame):
                  theme.SM - 1, wraplength=190, justify="center").grid(row=2, column=0, padx=24, pady=(6, 0))
         dots = ctk.CTkFrame(brand, fg_color="transparent")
         dots.grid(row=3, column=0, pady=(28, 0))
-        for i in range(STEPS):
+        for i in range(self.steps):
             ctk.CTkFrame(dots, width=22 if i == step else 8, height=8, corner_radius=4,
                          fg_color=C.action if i <= step else C.border).pack(side="left", padx=3)
 
@@ -62,12 +66,20 @@ class Wizard(ctk.CTkFrame):
         content.grid(row=0, column=1, sticky="nsew", padx=(40, 40), pady=(36, 0))
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(2, weight=1)
-        ui.muted(content, t("Step {i} of {n}", i=step + 1, n=STEPS), anchor="w").grid(
+        ui.muted(content, t("Step {i} of {n}", i=step + 1, n=self.steps), anchor="w").grid(
             row=0, column=0, sticky="w")
         self.body = ctk.CTkFrame(content, fg_color="transparent")
         self.body.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
         self.body.grid_columnconfigure(0, weight=1)
-        [self._language, self._folder, self._hardware, self._analysis, self._consent][step]()
+        builders = {
+            "language": self._language,
+            "folder": self._folder,
+            "hardware": self._hardware,
+            "analysis": self._analysis,
+            "permissions": self._permissions,
+            "consent": self._consent,
+        }
+        builders[names[step]]()
 
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.grid(row=1, column=1, sticky="ew", padx=40, pady=(8, 24))
@@ -75,8 +87,13 @@ class Wizard(ctk.CTkFrame):
         if step > 0:
             ui.secondary(footer, t("Back"), self.back, "back", width=10, height=38).grid(
                 row=0, column=1, padx=(0, 10))
-        self.next_button = ui.primary(footer, t("Start using Ucho") if step == STEPS - 1 else t("Next"),
-                                      self.next, width=140)
+        if step == self.steps - 1:
+            next_text = t("Start using Ucho")
+        elif names[step] == "permissions" and self._permissions_next_label is not None:
+            next_text = self._permissions_next_label
+        else:
+            next_text = t("Next")
+        self.next_button = ui.primary(footer, next_text, self.next, width=140)
         self.next_button.grid(row=0, column=2)
         self.after(50, lambda: ui.focus(self.next_button))
 
@@ -95,7 +112,7 @@ class Wizard(ctk.CTkFrame):
         ui.label(self.body, t("Interface language"), theme.SM, "bold", anchor="w").grid(
             row=2, column=0, sticky="w", pady=(0, 6))
         current = self.settings["ui_language"]
-        options = [("pl", "Polski"), ("en", "English"), ("auto", t("Same as Windows"))]
+        options = [("pl", "Polski"), ("en", "English"), ("auto", platform_text.system_theme_label())]
         box = ctk.CTkFrame(self.body, fg_color="transparent")
         box.grid(row=3, column=0, sticky="w")
         for i, (code, text) in enumerate(options):
@@ -148,9 +165,7 @@ class Wizard(ctk.CTkFrame):
         self.state["folder"] = str(path)
         if config.onedrive_folder(path):
             self.folder_note.configure(
-                text=t("This folder is synced by OneDrive: recordings and transcripts would go to "
-                       "the cloud. Choose a folder outside OneDrive, for example {folder}.",
-                       folder=config.RECORDINGS_DIR), text_color=C.warning)
+                text=platform_text.cloud_folder_note(config.RECORDINGS_DIR), text_color=C.warning)
         else:
             self.folder_note.configure(text=t("Recordings and transcripts stay on this computer."),
                                        text_color=C.success)
@@ -304,6 +319,22 @@ class Wizard(ctk.CTkFrame):
         self.state["analysis_model"] = value
         self.summary_switch.configure(state="normal" if value != llm.NONE else "disabled")
 
+    def _permissions(self) -> None:
+        self._title(
+            t("Permissions"),
+            t("Ucho needs your permission for a few things. You can allow them now or later in Settings."),
+        )
+        PermissionsPanel(self.body, on_update=self._permissions_changed).grid(
+            row=2, column=0, sticky="ew"
+        )
+
+    def _permissions_changed(self, rows: list[platform_text.PermissionRow]) -> None:
+        label = t("Next") if platform_text.all_granted(rows) else t("Later")
+        self._permissions_next_label = label
+        button = getattr(self, "next_button", None)
+        if button is not None and button.winfo_exists():
+            button.configure(text=label)
+
     def _consent(self) -> None:
         self._title(t("Before your first recording"),
                     t("Four things worth knowing before you press REC."))
@@ -341,7 +372,7 @@ class Wizard(ctk.CTkFrame):
                 self.folder_note.configure(text=t("Invalid folder: {error}", error=error),
                                            text_color=C.warning)
                 return
-        if self.step < STEPS - 1:
+        if self.step < self.steps - 1:
             self.app.show_wizard(self.step + 1, self.state)
             return
         self.finish()

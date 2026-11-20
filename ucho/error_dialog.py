@@ -24,7 +24,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, diagnostics, theme, ui
+from . import config, diagnostics, platform_text, theme, ui
 from .i18n import t
 from .theme import C
 
@@ -36,7 +36,7 @@ _hooks_installed = False
 
 def _file_descriptions() -> dict[str, str]:
     return {
-        "system.txt": t("Ucho version, Windows, processor, memory and graphics"),
+        "system.txt": platform_text.system_info_description(),
         "settings.json": t("settings without personal paths and names"),
         "models.txt": t("downloaded models and their sizes"),
         "error.txt": t("this error with its technical details"),

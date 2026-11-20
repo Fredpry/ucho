@@ -43,7 +43,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from . import config
+from . import config, platform_text
 from .i18n import language, t
 
 log = logging.getLogger(__name__)
@@ -279,11 +279,10 @@ def classify(error: BaseException, context: str | None = None) -> ErrorInfo:
             message = t("Another program has a file open that Ucho needs.")
         else:
             title = t("Access denied")
-            message = t("Windows did not let Ucho read or write a file or folder.")
+            message = platform_text.access_denied_message()
         path = _error_path(error)
         if (path and config.onedrive_folder(Path(path))) or "onedrive" in _text(error):
-            hint = t("The file is in a OneDrive folder, which can lock files while they sync. "
-                     "Wait for OneDrive to finish or choose a folder outside OneDrive.")
+            hint = platform_text.cloud_lock_hint()
         elif kind == FILE_LOCKED:
             hint = t("Close programs that may use the file (an antivirus scan, a backup, another "
                      "Ucho window) and try again.")
@@ -302,8 +301,7 @@ def classify(error: BaseException, context: str | None = None) -> ErrorInfo:
             kind, t("Audio device unavailable"),
             t("The microphone or speakers could not be opened. The device may be unplugged, "
               "disabled, or used by another program in exclusive mode."),
-            t("Check the device in Windows sound settings, close other programs that use it and "
-              "choose it again in Settings."))
+            platform_text.audio_device_hint())
     if kind == MEMORY:
         return ErrorInfo(
             kind, t("Not enough memory"),
