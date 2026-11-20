@@ -286,6 +286,10 @@ class App(ctk.CTk):
             self.toast(str(data), "warning", 6)
         elif event == "notice":
             self.toast(str(data), "ready", 6)
+        elif event == "audio_warning":
+            from .permissions_ui import show_system_audio_unavailable
+
+            show_system_audio_unavailable(self, str(data.get("message") or "") or None)
         elif event == "summary_error":
             log.warning("Summary skipped: %s", data)
             self.toast(t("No summary: {reason}", reason=data), "warning", 6)

@@ -143,9 +143,12 @@ class PermissionsPanel(ctk.CTkFrame):
         self._schedule()
 
 
-def show_system_audio_unavailable(app) -> None:
-    """Shows a warning toast when system audio capture is unavailable."""
+def show_system_audio_unavailable(app, message: str | None = None) -> None:
+    """Shows a warning toast when system audio capture is unavailable.
+
+    `message` is the (already translated) text of the recorder's notice; without
+    it the generic text is shown."""
     try:
-        app.toast(platform_text.system_audio_unavailable_text(), "warning", 8)
+        app.toast(message or platform_text.system_audio_unavailable_text(), "warning", 8)
     except Exception:
         log.debug("Could not show system audio unavailable toast", exc_info=True)
