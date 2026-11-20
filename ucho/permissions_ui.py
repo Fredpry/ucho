@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 
 import customtkinter as ctk
@@ -24,6 +25,7 @@ class PermissionsPanel(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self._on_update = on_update
         self._signature: list[tuple[str, str, bool, bool]] | None = None
+        self._requesting: set[str] = set()
         self.grid_columnconfigure(0, weight=1)
         self.card = ui.card(self)
         self.card.grid(row=0, column=0, sticky="ew")
@@ -97,7 +99,19 @@ class PermissionsPanel(ctk.CTkFrame):
             ).pack(side="left", padx=(10, 0))
 
     def _allow(self, kind: str) -> None:
-        platform_text.request_permission(kind)
+        # A request may block for seconds (macOS probes system audio with a short tap), so it
+        # runs off the Tk thread; the 1 s timer and the refresh below pick up the new state.
+        if kind in self._requesting:
+            return
+        self._requesting.add(kind)
+
+        def run() -> None:
+            try:
+                platform_text.request_permission(kind)
+            finally:
+                self._requesting.discard(kind)
+
+        threading.Thread(target=run, name=f"permission-{kind}", daemon=True).start()
         try:
             if self.winfo_exists():
                 self.after(400, self._refresh_if_exists)
