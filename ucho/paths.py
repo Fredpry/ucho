@@ -77,6 +77,15 @@ def models_dir(
     return data_dir(system=system, home=home, env=env) / "models"
 
 
+def lock_dir(
+    system: str | None = None,
+    home: PurePath | None = None,
+    env: Mapping[str, str] | None = None,
+) -> PurePath:
+    """Return the directory for the single-instance lock file and socket (macOS)."""
+    return data_dir(system=system, home=home, env=env)
+
+
 def legacy_models_dir(
     system: str | None = None,
     home: PurePath | None = None,

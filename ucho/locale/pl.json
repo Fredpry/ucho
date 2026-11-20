@@ -492,5 +492,15 @@
   "{ram} GB RAM: only the smallest language model fits next to speech recognition.": "{ram} GB RAM: obok rozpoznawania mowy mieści się tylko najmniejszy model językowy.",
   "{ram} GB RAM: the 4B language model on the CPU writes good Polish.": "{ram} GB RAM: model językowy 4B na CPU dobrze pisze po polsku.",
   "{ram} GB RAM: the largest language model fits.": "{ram} GB RAM: mieści się największy model językowy.",
-  "Open at login": "Otwieraj przy logowaniu"
+  "Open at login": "Otwieraj przy logowaniu",
+  "{shortcut} is also a macOS shortcut ({purpose}) and may not work.": "{shortcut} to także skrót macOS ({purpose}) i może nie działać.",
+  "Spotlight": "Spotlight",
+  "Finder search": "wyszukiwanie w Finderze",
+  "switching the input source": "przełączanie źródła wprowadzania",
+  "emoji and symbols": "emoji i symbole",
+  "switching apps": "przełączanie aplikacji",
+  "force quitting apps": "wymuszanie zakończenia aplikacji",
+  "locking the screen": "blokowanie ekranu",
+  "screenshots": "zrzuty ekranu",
+  "app menu shortcuts": "skróty z menu aplikacji"
 }

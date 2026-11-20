@@ -3,7 +3,7 @@
 """Parsing of the hotkey settings ("<ctrl>+<alt>+r") for RegisterHotKey."""
 import pytest
 
-from ucho import config, hotkeys
+from ucho import config, hotkeys, platforms
 
 
 @pytest.mark.parametrize("combo, expected", [
@@ -25,5 +25,6 @@ def test_parse_rejects(combo):
 def test_defaults_parse_and_labels():
     assert hotkeys.parse(config.DEFAULTS["hotkey"]) is not None
     assert hotkeys.parse(config.DEFAULTS["dictation_hotkey"]) is not None
-    assert hotkeys.label(config.DEFAULTS["hotkey"]) == "Ctrl + Alt + R"
-    assert hotkeys.label(config.DEFAULTS["dictation_hotkey"]) == "Ctrl + Shift + Space"
+    with platforms.override("windows"):  # macOS labels use symbols (tests/test_macos_hotkeys.py)
+        assert hotkeys.label(config.DEFAULTS["hotkey"]) == "Ctrl + Alt + R"
+        assert hotkeys.label(config.DEFAULTS["dictation_hotkey"]) == "Ctrl + Shift + Space"

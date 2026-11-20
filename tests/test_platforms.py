@@ -106,12 +106,18 @@ def test_missing_modules_fall_back_to_null_and_cache():
             h1 = platforms.hotkeys(lambda _n: None)
             h2 = platforms.hotkeys(lambda _n: None)
             assert h1 is not h2
-            assert type(h1) is null.NullHotkeys
+            if fam == "macos" and (MACOS_DIR / "hotkeys.py").is_file():
+                assert type(h1).__module__ == "ucho.platforms.macos.hotkeys"
+            else:
+                assert type(h1) is null.NullHotkeys
 
             i1 = platforms.instance()
             i2 = platforms.instance()
             assert i1 is not i2
-            assert type(i1) is null.NullInstance
+            if fam == "macos" and (MACOS_DIR / "instance.py").is_file():
+                assert type(i1).__module__ == "ucho.platforms.macos.instance"
+            else:
+                assert type(i1) is null.NullInstance
 
 
 def _is_type_checking(test: ast.expr) -> bool:

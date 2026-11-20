@@ -193,10 +193,24 @@ class App(ctk.CTk):
         self.geometry(f"{width}x{height}")
         self.minsize(min(820, width), min(500, height))
         self.configure(fg_color=C.bg)
+        if platforms.family() == "macos":
+            self._install_macos_handlers()
         self._set_icon()
         # customtkinter repaints the title bar after ~200 ms (dark mode) and
         # Windows can lose the icon on the way; set it again afterwards.
         self.after(400, self._set_icon)
+
+    def _install_macos_handlers(self) -> None:
+        """Dock and app menu events that Tk on macOS turns into Tcl commands.
+
+        A click on the Dock icon while the window is closed (withdrawn) calls
+        `::tk::mac::ReopenApplication`: show the window like a second start.
+        Cmd+Q and "Quit" in the app menu call `::tk::mac::Quit`; without it Tk
+        ends the process with Tcl `exit`, skipping the shutdown (recording,
+        engine, settings).
+        """
+        self.createcommand("::tk::mac::ReopenApplication", lambda *_args: self.on_command("show"))
+        self.createcommand("::tk::mac::Quit", lambda *_args: self.quit_app())
 
     def _set_icon(self) -> None:
         platforms.shell().set_window_icon(self)
