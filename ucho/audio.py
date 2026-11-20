@@ -545,8 +545,6 @@ class Recorder:
         try:
             for name, file, dev in chosen:
                 track = _Track(name, folder / file, dev, self._listener)
-                if name == "system" and platforms.family() == "macos":
-                    track.watch_silence(self._system_silent)
                 try:
                     track.open_file()
                     track.start(self._pa)
@@ -556,6 +554,8 @@ class Recorder:
                         t("Could not open “{name}”: {error}", name=dev.name, error=error))
                     continue
                 self._tracks[name] = track
+                if name == "system" and platforms.family() == "macos":
+                    track.watch_silence(self._system_silent)
         except BaseException:
             for track in self._tracks.values():
                 track.finish()

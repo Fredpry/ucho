@@ -178,7 +178,8 @@ def test_tap_stream_resamples_another_rate():
     for _ in range(20):
         sessions[0].deliver(np.full(441 * 2, 0.25, dtype=np.float32), _fmt(channels=2, rate=44_100.0))
     total = sum(len(chunk) for chunk in received) // 2
-    assert abs(total - 20 * 480) < 480
+    # 0.2 s at 48 kHz, minus what soxr keeps back as its filter delay (about 700 samples).
+    assert 20 * 480 - 1_500 < total <= 20 * 480
     stream.close()
 
 
