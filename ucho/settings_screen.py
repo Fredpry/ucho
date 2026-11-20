@@ -15,10 +15,11 @@ from collections.abc import Callable
 
 import customtkinter as ctk
 
-from . import (config, diarize, downloads, hardware, i18n, llm, platforms, retention, theme,
-               transcribe, ui)
+from . import (config, diarize, downloads, hardware, i18n, llm, platform_text, platforms, retention,
+               theme, transcribe, ui)
 from .hotkeys import label as hotkey_label
 from .i18n import t
+from .permissions_ui import PermissionsPanel
 from .screens import PAD, Screen, header, open_path
 from .theme import C
 
@@ -31,7 +32,7 @@ MODE_LABELS = config.DICTATION_MODE_LABELS
 
 def model_label(repo: str) -> str:
     info = config.MODELS.get(repo, {})
-    return f"{info.get('name', repo.split('/')[-1])}  ({info.get('size', '?')})"
+    return f"{info.get('name', platform_text.model_tail(repo))}  ({info.get('size', '?')})"
 
 
 def short_model(repo: str) -> str:
@@ -275,6 +276,7 @@ class SettingsScreen(Screen):
         self._build_transcription()
         self._build_dictation()
         self._build_audio()
+        self._build_permissions()
         self._build_llm()
         self._build_titles()
         self._build_summary()
@@ -297,9 +299,14 @@ class SettingsScreen(Screen):
 
     def _build_appearance(self) -> None:
         s = self._section(t("Appearance and windows"))
-        themes = {t(v): k for k, v in THEME_LABELS.items()}
+        themes = {
+            (platform_text.system_theme_label() if k == "system" else t(v)): k
+            for k, v in THEME_LABELS.items()
+        }
+        theme_by_key = {k: label for label, k in themes.items()}
+        current_theme = theme_by_key.get(self.settings["theme"], theme_by_key["system"])
         s.row(t("Theme"), lambda m: ui.segmented(
-            m, list(themes), t(THEME_LABELS.get(self.settings["theme"], "Same as Windows")),
+            m, list(themes), current_theme,
             lambda v: self.app.set_theme(themes[v])))
         layouts = {t(v): k for k, v in LAYOUT_LABELS.items()}
         s.row(t("Window layout"), lambda m: ui.option_menu(
@@ -634,9 +641,11 @@ class SettingsScreen(Screen):
             lambda v: self._save("dictation_live", v)),
             t("The text is recognized in pieces during the dictation, so it is pasted right after "
               "you stop. Off: the whole dictation is recognized after the stop."))
-        modes = {t(v): k for k, v in MODE_LABELS.items()}
+        mode_labels = platform_text.dictation_mode_labels()
+        modes = {label: key for key, label in mode_labels.items()}
+        current_mode = mode_labels.get(self.settings["dictation_mode"], mode_labels["paste"])
         s.row(t("Insert text by"), lambda m: ui.option_menu(
-            m, list(modes), t(MODE_LABELS.get(self.settings["dictation_mode"], MODE_LABELS["paste"])),
+            m, list(modes), current_mode,
             lambda v: self._save("dictation_mode", modes[v]), width=320))
         s.row(t("Sounds"), lambda m: ui.switch(
             m, t("Short beeps at start and end"), self.settings["dictation_sounds"],
@@ -708,6 +717,18 @@ class SettingsScreen(Screen):
         # A name replaces the index saved by an earlier version.
         self.settings[f"{key}_index"] = None
         self.settings.save()
+
+    # --- permissions (macOS) ------------------------------------------------------------
+
+    def _build_permissions(self) -> None:
+        if platforms.family() != "macos":
+            return
+        s = self._section(
+            t("Permissions"),
+            t("macOS asks for each permission once. If you denied one, open the settings and switch Ucho on."),
+        )
+        s.full(lambda m: PermissionsPanel(m).pack(fill="x"))
+        s.end()
 
     # --- language model -----------------------------------------------------------------
 
@@ -877,8 +898,7 @@ class SettingsScreen(Screen):
     def _folder_warning(self) -> None:
         path = Path(self.folder.get().strip() or ".")
         if config.onedrive_folder(path):
-            self.folder_note.configure(text=t("This folder is synced by OneDrive: recordings and transcripts "
-                                              "would go to the cloud. Choose a folder outside OneDrive."),
+            self.folder_note.configure(text=platform_text.cloud_folder_note(),
                                        text_color=C.warning)
         else:
             self.folder_note.configure(text=t("Recordings and transcripts stay on this computer."),

@@ -37,7 +37,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from . import config, downloads, live, platforms, transcribe
+from . import config, downloads, live, platform_text, platforms, transcribe
 from .events import Emitter
 from .i18n import t
 
@@ -611,7 +611,7 @@ class DictationController(Emitter):
         preload = bool(self.settings["dictation_preload"])
         if not transcribe.model_downloaded(key[0]):
             self.model_state, self.model_error = "error", t("Model {model} is not downloaded.",
-                                                             model=key[0].split("/")[-1])
+                                                             model=platform_text.model_tail(key[0]))
             self.app.engine.configure(None, False)
             return
         self.model_state = "loading" if preload else "idle"

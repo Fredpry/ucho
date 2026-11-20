@@ -16,7 +16,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config, platforms, retention, session, theme, ui
+from . import config, platform_text, platforms, retention, session, theme, ui
 from .archive import Match, fold, query_words
 from .hotkeys import label as hotkey_label
 from .i18n import t
@@ -655,7 +655,7 @@ class TranscriptScreen(Screen):
         self.segments = []
         self.names = {}
         self.title.configure(text=m.last_meta.get("name") or (self.folder.name if self.folder else ""))
-        model = self.app.settings["model"].split("/")[-1]
+        model = platform_text.model_tail(self.app.settings["model"])
         self.subtitle.configure(text=f"{self.app.settings['device']}  ·  {model}")
         self.text.clear()
         for line in m.live_text:
@@ -670,7 +670,7 @@ class TranscriptScreen(Screen):
         if meta.get("device"):
             details.append(str(meta["device"]))
         if meta.get("model"):
-            details.append(str(meta["model"]).split("/")[-1])
+            details.append(platform_text.model_tail(str(meta["model"])))
         if retention.audio_removed(meta):
             details.append(t("audio deleted"))
         self.title.configure(text=title)
@@ -1107,8 +1107,10 @@ class DictationPanel(ctk.CTkFrame):
             shared = model == self.app.settings["model"]
             state = {"ready": t("loaded"), "loading": t("loading"), "error": t("not loaded"),
                      "idle": t("loads on first use")}.get(d.model_state, "")
-            line = t("Model: {model} on {device} ({state})", model=model.split("/")[-1].removeprefix(
-                "whisper-").removesuffix("-ov"), device=d.model_device or device, state=state)
+            from .settings_screen import short_model
+
+            line = t("Model: {model} on {device} ({state})", model=short_model(model),
+                     device=d.model_device or device, state=state)
             if shared:
                 line += "  ·  " + t("shared with transcription")
             if self.model.cget("text") != line:
