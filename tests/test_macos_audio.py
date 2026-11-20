@@ -22,6 +22,12 @@ from ucho.platforms.macos import audio as mac_audio
 from ucho.platforms.macos.audio import MacAudio
 
 
+@pytest.fixture(autouse=True)
+def _without_system_tap(monkeypatch):
+    """These tests cover the microphones; the process tap source (M7b) is in test_macos_tap.py."""
+    monkeypatch.setattr(mac_audio.audio_tap, "supported", lambda release=None: False)
+
+
 class _FakePortAudioError(Exception):
     pass
 

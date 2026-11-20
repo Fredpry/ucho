@@ -22,9 +22,10 @@ jobs:
   macos-tests:
     # The packages of the Windows `test` job in ci.yml plus customtkinter, Pillow
     # and soxr, so the UI-import and resampling tests run here instead of being
-    # skipped, sounddevice for the microphone backend and the PyObjC frameworks
-    # of the clipboard and paste tests (real NSPasteboard, Quartz key events
-    # into a Tk window); no models or OpenVINO. Tests
+    # skipped, and the audio stack the macOS-only tests use for real
+    # (sounddevice, catap, and the PyObjC frameworks of permissions, the
+    # clipboard and paste tests: real NSPasteboard, Quartz key events into a
+    # Tk window); no models and no OpenVINO. Tests
     # that only make sense on Windows are marked "Windows only: ...", and any
     # other skip fails the job (UCHO_ONLY_WINDOWS_SKIPS); the step summary
     # lists every skipped test with its reason (tests/conftest.py).
@@ -43,8 +44,9 @@ jobs:
         run: >-
           python -m pip install pytest==9.2.0 ruff==0.17.5 numpy==2.5.3 soundfile==0.14.0
           customtkinter==6.0.0 pillow==13.0.0 soxr==1.1.0 sounddevice==0.5.6
-          pyobjc-core==13.0 pyobjc-framework-Cocoa==13.0 pyobjc-framework-Quartz==13.0
-          pyobjc-framework-ApplicationServices==13.0
+          catap==0.6.1 pyobjc-core==13.0 pyobjc-framework-Cocoa==13.0
+          pyobjc-framework-Quartz==13.0 pyobjc-framework-ApplicationServices==13.0
+          pyobjc-framework-AVFoundation==13.0 pyobjc-framework-CoreAudio==13.0
       - name: Tests
         env:
           PYTHONIOENCODING: utf-8
